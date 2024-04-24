@@ -8,6 +8,10 @@ pub enum Error {
     DbErr(#[from] DbErr),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
+    #[error("Hash error: {0}")]
+    HashError(argon2::password_hash::Error),
+    #[error("Custom error: {0}")]
+    Custom(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

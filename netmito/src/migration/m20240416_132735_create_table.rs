@@ -1,0 +1,690 @@
+use sea_orm_migration::prelude::*;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+const DEFAULT_STORAGE_QUOTA: i64 = 1024 * 1024 * 1024 * 128; // 128GB
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(Users::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Users::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::Username)
+                            .text()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(ColumnDef::new(Users::EncryptedPassword).text().not_null())
+                    .col(ColumnDef::new(Users::AuthSignature).big_integer().null())
+                    .col(ColumnDef::new(Users::ResetPasswordToken).text().null())
+                    .col(
+                        ColumnDef::new(Users::ResetPasswordTokenExpiry)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::CurrentSignInAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::LastSignInAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(ColumnDef::new(Users::CurrentSignInIp).text().null())
+                    .col(ColumnDef::new(Users::LastSignInIp).text().null())
+                    .col(
+                        ColumnDef::new(Users::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::Admin)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(ColumnDef::new(Users::State).integer().not_null().default(0))
+                    .col(
+                        ColumnDef::new(Users::TaskCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Users::StorageQuota)
+                            .big_integer()
+                            .not_null()
+                            .default(DEFAULT_STORAGE_QUOTA),
+                    )
+                    .col(
+                        ColumnDef::new(Users::StorageUsed)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(Groups::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Groups::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Groups::GroupName)
+                            .text()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(ColumnDef::new(Groups::CreatorId).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(Groups::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Groups::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Groups::State)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-groups-creator_id")
+                            .from(Groups::Table, Groups::CreatorId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(UserGroup::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(UserGroup::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(UserGroup::UserId).big_integer().not_null())
+                    .col(ColumnDef::new(UserGroup::GroupId).big_integer().not_null())
+                    .col(ColumnDef::new(UserGroup::Role).integer().not_null())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-user_group-user_id")
+                            .from(UserGroup::Table, UserGroup::UserId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-user_group-group_id")
+                            .from(UserGroup::Table, UserGroup::GroupId)
+                            .to(Groups::Table, Groups::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .index(
+                        Index::create()
+                            .name("idx_user_group-user_id-group_id")
+                            .table(UserGroup::Table)
+                            .unique()
+                            .col(UserGroup::UserId)
+                            .col(UserGroup::GroupId),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(Workers::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Workers::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Workers::WorkerId)
+                            .uuid()
+                            .unique_key()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(Workers::EncryptedToken).text().not_null())
+                    .col(ColumnDef::new(Workers::CreatorId).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(Workers::Tags)
+                            .array(ColumnType::Text)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Workers::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Workers::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Workers::State)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Workers::LastHeartbeat)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(Workers::AssignedTaskId).big_integer().null())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-workers-creator_id")
+                            .from(Workers::Table, Workers::CreatorId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(GroupWorker::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(GroupWorker::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(GroupWorker::GroupId)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(GroupWorker::WorkerId)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(GroupWorker::Role).integer().not_null())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-group_worker-group_id")
+                            .from(GroupWorker::Table, GroupWorker::GroupId)
+                            .to(Groups::Table, Groups::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-group_worker-worker_id")
+                            .from(GroupWorker::Table, GroupWorker::WorkerId)
+                            .to(Workers::Table, Workers::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .index(
+                        Index::create()
+                            .name("idx_group_worker-group_id-worker_id")
+                            .table(GroupWorker::Table)
+                            .unique()
+                            .col(GroupWorker::GroupId)
+                            .col(GroupWorker::WorkerId),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(ActiveTasks::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(ActiveTasks::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(ActiveTasks::CreatorId)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ActiveTasks::GroupId)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(ActiveTasks::TaskId).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(ActiveTasks::Tags)
+                            .array(ColumnType::Text)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ActiveTasks::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ActiveTasks::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ActiveTasks::State)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(ActiveTasks::AssignedWorker)
+                            .big_integer()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(ActiveTasks::Timeout)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(ActiveTasks::Priority).integer().not_null())
+                    .col(ColumnDef::new(ActiveTasks::Spec).json().not_null())
+                    .col(ColumnDef::new(ActiveTasks::Result).json().null())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-active_tasks-creator_id")
+                            .from(ActiveTasks::Table, ActiveTasks::CreatorId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-active_tasks-group_id")
+                            .from(ActiveTasks::Table, ActiveTasks::GroupId)
+                            .to(Groups::Table, Groups::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .index(
+                        Index::create()
+                            .name("idx_active_tasks-creator_id-task_id")
+                            .table(ActiveTasks::Table)
+                            .unique()
+                            .col(ActiveTasks::CreatorId)
+                            .col(ActiveTasks::TaskId),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(ArchivedTasks::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(ArchivedTasks::Id)
+                            .big_integer()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(ArchivedTasks::CreatorId)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ArchivedTasks::GroupId)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ArchivedTasks::TaskId)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ArchivedTasks::Tags)
+                            .array(ColumnType::Text)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ArchivedTasks::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ArchivedTasks::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(ArchivedTasks::State).integer().not_null())
+                    .col(
+                        ColumnDef::new(ArchivedTasks::AssignedWorker)
+                            .big_integer()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(ArchivedTasks::Timeout)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(ArchivedTasks::Priority).integer().not_null())
+                    .col(ColumnDef::new(ArchivedTasks::Spec).json().not_null())
+                    .col(ColumnDef::new(ArchivedTasks::Result).json().null())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-archived_tasks-creator_id")
+                            .from(ArchivedTasks::Table, ArchivedTasks::CreatorId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-archived_tasks-group_id")
+                            .from(ArchivedTasks::Table, ArchivedTasks::GroupId)
+                            .to(Groups::Table, Groups::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .index(
+                        Index::create()
+                            .name("idx_archived_tasks-creator_id-task_id")
+                            .table(ArchivedTasks::Table)
+                            .unique()
+                            .col(ArchivedTasks::CreatorId)
+                            .col(ArchivedTasks::TaskId),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(Attachments::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Attachments::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Attachments::TaskId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(Attachments::ContentType)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(ColumnDef::new(Attachments::Size).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(Attachments::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Attachments::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(Artifacts::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Artifacts::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Artifacts::TaskId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(Artifacts::ContentType)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(ColumnDef::new(Artifacts::Size).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(Artifacts::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Artifacts::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(Artifacts::Table).if_exists().to_owned())
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(Attachments::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(ArchivedTasks::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(ActiveTasks::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(GroupWorker::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(Table::drop().table(Workers::Table).if_exists().to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(UserGroup::Table).if_exists().to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(Groups::Table).if_exists().to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(Users::Table).if_exists().to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum Users {
+    Table,
+    Id,
+    Username,
+    EncryptedPassword,
+    AuthSignature,
+    ResetPasswordToken,
+    ResetPasswordTokenExpiry,
+    CurrentSignInAt,
+    LastSignInAt,
+    CurrentSignInIp,
+    LastSignInIp,
+    CreatedAt,
+    UpdatedAt,
+    Admin,
+    State,
+    TaskCount,
+    StorageQuota,
+    StorageUsed,
+}
+
+#[derive(DeriveIden)]
+enum Groups {
+    Table,
+    Id,
+    GroupName,
+    CreatorId,
+    CreatedAt,
+    UpdatedAt,
+    State,
+}
+
+#[derive(DeriveIden)]
+enum UserGroup {
+    Table,
+    Id,
+    UserId,
+    GroupId,
+    Role,
+}
+
+#[derive(DeriveIden)]
+enum Workers {
+    Table,
+    Id,
+    WorkerId,
+    EncryptedToken,
+    CreatorId,
+    Tags,
+    CreatedAt,
+    UpdatedAt,
+    State,
+    LastHeartbeat,
+    AssignedTaskId,
+}
+
+#[derive(DeriveIden)]
+enum GroupWorker {
+    Table,
+    Id,
+    GroupId,
+    WorkerId,
+    Role,
+}
+
+#[derive(DeriveIden)]
+enum ActiveTasks {
+    Table,
+    Id,
+    CreatorId,
+    GroupId,
+    TaskId,
+    Tags,
+    CreatedAt,
+    UpdatedAt,
+    State,
+    AssignedWorker,
+    Timeout,
+    Priority,
+    Spec,
+    Result,
+}
+
+#[derive(DeriveIden)]
+enum ArchivedTasks {
+    Table,
+    Id,
+    CreatorId,
+    GroupId,
+    TaskId,
+    Tags,
+    CreatedAt,
+    UpdatedAt,
+    State,
+    AssignedWorker,
+    Timeout,
+    Priority,
+    Spec,
+    Result,
+}
+
+#[derive(DeriveIden)]
+enum Attachments {
+    Table,
+    Id,
+    TaskId,
+    ContentType,
+    Size,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum Artifacts {
+    Table,
+    Id,
+    TaskId,
+    ContentType,
+    Size,
+    CreatedAt,
+    UpdatedAt,
+}

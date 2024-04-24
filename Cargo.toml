@@ -9,6 +9,7 @@ homepage = "https://github.com/stack-rs/mitosis"
 repository = "https://github.com/stack-rs/mitosis"
 
 [workspace.dependencies]
+clap = { version = "4.5.1", features = ["std", "derive"] }
 jsonwebtoken = "9.3.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -35,8 +36,7 @@ repository.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clap = { version = "4.5.1", features = ["std", "derive"] }
 netmito = { path = "netmito" }
+tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-

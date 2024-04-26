@@ -7,25 +7,27 @@ use aws_sdk_s3::{
     },
     presigning::PresigningConfigError,
 };
-use sea_orm::DbErr;
+use axum::{http::StatusCode, response::IntoResponse, Json};
+use sea_orm::{DbErr, TransactionError};
+use serde_json::json;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Invalid configuration {0}")]
-    InvalidConfig(#[from] figment::Error),
+    ConfigError(#[from] figment::Error),
     #[error("Database error: {0}")]
-    DbErr(#[from] DbErr),
+    DbError(#[from] DbErr),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
-    #[error("Hash error: {0}")]
-    HashError(argon2::password_hash::Error),
-    #[error("Custom error: {0}")]
+    #[error("Encrypt error: {0}")]
+    EncryptError(#[from] argon2::password_hash::Error),
+    #[error("Error: {0}")]
     Custom(String),
     #[error("Auth error: {0}")]
     AuthError(#[from] AuthError),
-    #[error("JWT Error: {0}")]
+    #[error("Encode token error: {0}")]
     EncodeTokenError(#[from] jsonwebtoken::errors::Error),
-    #[error("Invalid token: {0}")]
+    #[error("Decode token error: {0}")]
     DecodeTokenError(#[from] DecodeTokenError),
     #[error("S3 Error: {0}")]
     S3Error(#[from] S3Error),
@@ -37,6 +39,8 @@ pub enum AuthError {
     InvalidToken,
     #[error("Wrong credentials")]
     WrongCredentials,
+    #[error("Permission denied")]
+    PermissionDenied,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -64,3 +68,24 @@ pub enum S3Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl IntoResponse for AuthError {
+    fn into_response(self) -> axum::response::Response {
+        let status = match self {
+            AuthError::InvalidToken => StatusCode::UNAUTHORIZED,
+            AuthError::WrongCredentials => axum::http::StatusCode::FORBIDDEN,
+            AuthError::PermissionDenied => axum::http::StatusCode::FORBIDDEN,
+        };
+        let body = Json(json!({ "msg": Error::from(self).to_string() }));
+        (status, body).into_response()
+    }
+}
+
+impl From<TransactionError<Error>> for Error {
+    fn from(e: TransactionError<Error>) -> Self {
+        match e {
+            TransactionError::Connection(e) => e.into(),
+            TransactionError::Transaction(e) => e,
+        }
+    }
+}

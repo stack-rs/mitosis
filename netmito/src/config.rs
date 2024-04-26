@@ -132,7 +132,7 @@ impl CoordinatorConfig {
 
     pub async fn build_admin_user(&self) -> crate::error::Result<InitAdminUser> {
         if self.admin_password.len() > 255 || self.admin_username.len() > 255 {
-            Err(crate::error::Error::InvalidConfig(figment::Error::from(
+            Err(crate::error::Error::ConfigError(figment::Error::from(
                 "username or password too long",
             )))
         } else {

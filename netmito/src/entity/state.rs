@@ -10,6 +10,14 @@ pub enum UserState {
 
 #[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq)]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
+pub enum GroupState {
+    Active = 0,
+    Locked = 1,
+    Deleted = 2,
+}
+
+#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq)]
+#[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum TaskState {
     Pending = 0,
     Ready = 1,

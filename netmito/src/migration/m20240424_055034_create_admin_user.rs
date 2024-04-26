@@ -1,12 +1,6 @@
-use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
-    Argon2,
-};
-use sea_orm::prelude::*;
-use sea_orm::ActiveValue::Set;
 use sea_orm_migration::prelude::*;
 
-use crate::entity::users as User;
+use crate::{error::Error, service::user::create_user};
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -18,46 +12,28 @@ impl MigrationTrait for Migration {
             "default admin user config not found".to_string(),
         ))?;
         let db = manager.get_connection();
-        // Find if there is a user has the same username
-        let user = User::Entity::find()
-            .filter(User::Column::Username.eq(&admin_user_info.username))
-            .one(db)
-            .await?;
-        if user.is_none() {
-            tracing::info!("Creating default admin user");
-            let now = TimeDateTimeWithTimeZone::now_utc();
-            let hashed_passwd = md5::compute(admin_user_info.password.as_bytes());
-            let salt = SaltString::generate(&mut OsRng);
-            let argon2 = Argon2::default();
-            let password_hash = argon2
-                .hash_password(&hashed_passwd.0, &salt)
-                .map_err(|e| DbErr::Custom(format!("Hash error: {}", e)))?
-                .to_string();
-            let admin_user = User::ActiveModel {
-                username: Set(admin_user_info.username.clone()),
-                encrypted_password: Set(password_hash),
-                created_at: Set(now),
-                updated_at: Set(now),
-                admin: Set(true),
-                ..Default::default()
-            };
-            let _ = admin_user.insert(db).await?;
-        } else {
-            tracing::info!("Default admin user already exists, skip creation");
+        let md5_password = md5::compute(admin_user_info.password.as_bytes()).0;
+        let res = create_user(db, admin_user_info.username.clone(), md5_password, true).await;
+        match res {
+            Ok(_) => {
+                tracing::info!("Default admin user created");
+                Ok(())
+            }
+            Err(e) => match e {
+                Error::DbError(DbErr::RecordNotInserted) => {
+                    tracing::info!("Default admin user already exists, skip creation");
+                    Ok(())
+                }
+                _ => Err(DbErr::Custom(format!(
+                    "Error creating default admin user: {}",
+                    e
+                ))),
+            },
         }
-        Ok(())
     }
 
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // delete the admin user
-        let admin_user_info = crate::config::INIT_ADMIN_USER.get().ok_or(DbErr::Custom(
-            "default admin user config not found".to_string(),
-        ))?;
-        let db = manager.get_connection();
-        let _ = User::Entity::delete_many()
-            .filter(User::Column::Username.eq(&admin_user_info.username))
-            .exec(db)
-            .await?;
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // We are not going to support this migration
         Ok(())
     }
 }

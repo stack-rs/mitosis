@@ -2,6 +2,8 @@
 
 use sea_orm::entity::prelude::*;
 
+use super::state::GroupState;
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
 #[sea_orm(table_name = "groups")]
 pub struct Model {
@@ -12,7 +14,7 @@ pub struct Model {
     pub creator_id: i64,
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
-    pub state: i32,
+    pub state: GroupState,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -8,7 +8,7 @@ repository.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-argon2 = "0.5.3"
+argon2 = { version = "0.5.3", features = ["std"] }
 aws-sdk-s3 = { version = "1.24.0", features = ["behavior-version-latest"] }
 axum = { version = "0.7.4", features = ["http2"] }
 axum-extra = { version = "0.9.3", features = ["typed-header"] }
@@ -37,3 +37,6 @@ tower-http = { version = "0.5.2", features = ["cors"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { version = "1.8.0", features = ["v4"] }
+
+[dev-dependencies]
+async-once-cell = "0.5.3"

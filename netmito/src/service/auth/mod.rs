@@ -15,18 +15,23 @@ pub struct AuthUser {
     pub id: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct AdminUser {
+    pub id: i64,
+}
+
 pub async fn user_auth_middleware(
     State(pool): State<InfraPool>,
     TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
     mut req: Request<Body>,
     next: Next,
 ) -> Result<impl IntoResponse, AuthError> {
-    let auth_user = inner_auth(&pool, &bearer).await?;
+    let auth_user = user_auth(&pool, &bearer).await?;
     req.extensions_mut().insert(auth_user);
     Ok(next.run(req).await)
 }
 
-async fn inner_auth(pool: &InfraPool, bearer: &Bearer) -> Result<AuthUser, AuthError> {
+async fn user_auth(pool: &InfraPool, bearer: &Bearer) -> Result<AuthUser, AuthError> {
     let token = bearer.token();
     let claims = verify_token(token).map_err(|_| AuthError::InvalidToken)?;
 
@@ -38,4 +43,32 @@ async fn inner_auth(pool: &InfraPool, bearer: &Bearer) -> Result<AuthUser, AuthE
         .ok_or(AuthError::WrongCredentials)?;
 
     Ok(AuthUser { id: user.id })
+}
+
+pub async fn admin_auth_middleware(
+    State(pool): State<InfraPool>,
+    TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
+    mut req: Request<Body>,
+    next: Next,
+) -> Result<impl IntoResponse, AuthError> {
+    let admin_user = admin_auth(&pool, &bearer).await?;
+    req.extensions_mut().insert(admin_user);
+    Ok(next.run(req).await)
+}
+
+async fn admin_auth(pool: &InfraPool, bearer: &Bearer) -> Result<AdminUser, AuthError> {
+    let token = bearer.token();
+    let claims = verify_token(token).map_err(|_| AuthError::InvalidToken)?;
+
+    let user = User::Entity::find()
+        .filter(User::Column::Username.eq(claims.sub))
+        .one(&pool.db)
+        .await
+        .map_err(|_| AuthError::WrongCredentials)?
+        .ok_or(AuthError::WrongCredentials)?;
+    if user.admin {
+        Ok(AdminUser { id: user.id })
+    } else {
+        Err(AuthError::PermissionDenied)
+    }
 }

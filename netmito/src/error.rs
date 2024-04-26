@@ -1,5 +1,12 @@
 use std::string::FromUtf8Error;
 
+use aws_sdk_s3::{
+    error::SdkError,
+    operation::{
+        create_bucket::CreateBucketError, get_object::GetObjectError, put_object::PutObjectError,
+    },
+    presigning::PresigningConfigError,
+};
 use sea_orm::DbErr;
 
 #[derive(thiserror::Error, Debug)]
@@ -20,6 +27,8 @@ pub enum Error {
     EncodeTokenError(#[from] jsonwebtoken::errors::Error),
     #[error("Invalid token: {0}")]
     DecodeTokenError(#[from] DecodeTokenError),
+    #[error("S3 Error: {0}")]
+    S3Error(#[from] S3Error),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -38,6 +47,20 @@ pub enum DecodeTokenError {
     JWTError(#[from] jsonwebtoken::errors::Error),
     #[error(transparent)]
     ParseError(#[from] FromUtf8Error),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum S3Error {
+    #[error(transparent)]
+    CreateBucketError(#[from] SdkError<CreateBucketError>),
+    #[error(transparent)]
+    PutObjectError(#[from] SdkError<PutObjectError>),
+    #[error(transparent)]
+    GetObjectError(#[from] SdkError<GetObjectError>),
+    #[error(transparent)]
+    PresigningConfigError(#[from] PresigningConfigError),
+    #[error("Invalid content length {0}")]
+    InvalidContentLength(i64),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

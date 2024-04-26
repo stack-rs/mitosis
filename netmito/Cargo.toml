@@ -19,6 +19,7 @@ humantime-serde = "1.1.1"
 jsonwebtoken = { workspace = true }
 md5 = { workspace = true }
 once_cell = "1.19.0"
+rand = "0.8.5"
 sea-orm = { version = "0.12.15", default-features = false, features = [
     "sqlx-postgres",
     "macros",

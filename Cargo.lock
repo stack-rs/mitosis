@@ -1738,6 +1738,7 @@ dependencies = [
  "jsonwebtoken",
  "md5",
  "once_cell",
+ "rand",
  "sea-orm",
  "sea-orm-migration",
  "serde",

@@ -73,7 +73,7 @@ impl IntoResponse for AuthError {
     fn into_response(self) -> axum::response::Response {
         let status = match self {
             AuthError::InvalidToken => StatusCode::UNAUTHORIZED,
-            AuthError::WrongCredentials => axum::http::StatusCode::FORBIDDEN,
+            AuthError::WrongCredentials => axum::http::StatusCode::UNAUTHORIZED,
             AuthError::PermissionDenied => axum::http::StatusCode::FORBIDDEN,
         };
         let body = Json(json!({ "msg": Error::from(self).to_string() }));

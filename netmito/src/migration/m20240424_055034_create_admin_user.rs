@@ -14,7 +14,7 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let admin_user_info = crate::config::InitAdminUser.get().ok_or(DbErr::Custom(
+        let admin_user_info = crate::config::INIT_ADMIN_USER.get().ok_or(DbErr::Custom(
             "default admin user config not found".to_string(),
         ))?;
         let db = manager.get_connection();
@@ -50,7 +50,7 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         // delete the admin user
-        let admin_user_info = crate::config::InitAdminUser.get().ok_or(DbErr::Custom(
+        let admin_user_info = crate::config::INIT_ADMIN_USER.get().ok_or(DbErr::Custom(
             "default admin user config not found".to_string(),
         ))?;
         let db = manager.get_connection();

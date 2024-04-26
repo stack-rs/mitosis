@@ -10,6 +10,7 @@ use figment::{
     value::magic::RelativePathBuf,
     Figment,
 };
+use jsonwebtoken::{DecodingKey, EncodingKey};
 use once_cell::sync::OnceCell;
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
@@ -19,7 +20,7 @@ pub const DEFAULT_COORDINATOR_ADDR: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5000);
 
 #[derive(Deserialize, Serialize, Debug)]
-pub(crate) struct CoordinatorConfig {
+pub struct CoordinatorConfig {
     pub(crate) bind: SocketAddr,
     pub(crate) db_url: String,
     pub(crate) s3_url: String,
@@ -33,7 +34,7 @@ pub(crate) struct CoordinatorConfig {
     pub(crate) access_token_expires_in: std::time::Duration,
 }
 
-#[derive(Args, Debug, Serialize)]
+#[derive(Args, Debug, Serialize, Default)]
 #[command(rename_all = "kebab-case")]
 pub struct CoordinatorConfigCli {
     /// The address to bind to
@@ -100,7 +101,7 @@ impl Default for CoordinatorConfig {
 }
 
 impl CoordinatorConfig {
-    pub(crate) fn new(cli: &mut CoordinatorConfigCli) -> crate::error::Result<Self> {
+    pub fn new(cli: &mut CoordinatorConfigCli) -> crate::error::Result<Self> {
         Ok(Figment::new()
             .merge(Serialized::from(Self::default(), "coordinator"))
             .merge(Toml::file(cli.config.as_deref().unwrap_or("config.toml")).nested())
@@ -110,7 +111,7 @@ impl CoordinatorConfig {
             .extract()?)
     }
 
-    pub(crate) async fn build_infra_pool(&self) -> crate::error::Result<InfraPool> {
+    pub async fn build_infra_pool(&self) -> crate::error::Result<InfraPool> {
         let db = sea_orm::Database::connect(&self.db_url).await?;
         let credential = Credentials::new(
             &self.s3_access_key,
@@ -129,7 +130,7 @@ impl CoordinatorConfig {
         Ok(InfraPool { db, s3 })
     }
 
-    pub(crate) async fn build_admin_user(&self) -> crate::error::Result<InitAdminUser> {
+    pub async fn build_admin_user(&self) -> crate::error::Result<InitAdminUser> {
         if self.admin_password.len() > 255 || self.admin_username.len() > 255 {
             Err(crate::error::Error::InvalidConfig(figment::Error::from(
                 "username or password too long",
@@ -142,7 +143,7 @@ impl CoordinatorConfig {
         }
     }
 
-    pub(crate) async fn build_server_config(&self) -> crate::error::Result<ServerConfig> {
+    pub async fn build_server_config(&self) -> crate::error::Result<ServerConfig> {
         Ok(ServerConfig {
             bind: self.bind,
             token_expires_in: Duration::try_from(self.access_token_expires_in)
@@ -150,34 +151,36 @@ impl CoordinatorConfig {
         })
     }
 
-    pub(crate) async fn build_private_key(&self) -> crate::error::Result<Vec<u8>> {
-        Ok(tokio::fs::read(&self.access_token_private_path.relative()).await?)
+    pub async fn build_jwt_encoding_key(&self) -> crate::error::Result<EncodingKey> {
+        let private_key = tokio::fs::read(&self.access_token_private_path.relative()).await?;
+        Ok(EncodingKey::from_ed_pem(&private_key)?)
     }
 
-    pub(crate) async fn build_public_key(&self) -> crate::error::Result<Vec<u8>> {
-        Ok(tokio::fs::read(&self.access_token_public_path.relative()).await?)
+    pub async fn build_jwt_decoding_key(&self) -> crate::error::Result<DecodingKey> {
+        let public_key = tokio::fs::read(&self.access_token_public_path.relative()).await?;
+        Ok(DecodingKey::from_ed_pem(&public_key)?)
     }
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct InfraPool {
-    pub(crate) db: DatabaseConnection,
-    pub(crate) s3: S3Client,
+pub struct InfraPool {
+    pub db: DatabaseConnection,
+    pub s3: S3Client,
 }
 
 #[derive(Debug)]
-pub(crate) struct ServerConfig {
-    pub(crate) bind: SocketAddr,
-    pub(crate) token_expires_in: Duration,
+pub struct ServerConfig {
+    pub bind: SocketAddr,
+    pub token_expires_in: Duration,
 }
 
 #[derive(Debug)]
-pub(crate) struct InitAdminUser {
-    pub(crate) username: String,
-    pub(crate) password: String,
+pub struct InitAdminUser {
+    pub username: String,
+    pub password: String,
 }
 
-pub(crate) static ServerConfig: OnceCell<ServerConfig> = OnceCell::new();
-pub(crate) static InitAdminUser: OnceCell<InitAdminUser> = OnceCell::new();
-pub(crate) static PrivateKey: OnceCell<Vec<u8>> = OnceCell::new();
-pub(crate) static PublicKey: OnceCell<Vec<u8>> = OnceCell::new();
+pub(crate) static SERVER_CONFIG: OnceCell<ServerConfig> = OnceCell::new();
+pub(crate) static INIT_ADMIN_USER: OnceCell<InitAdminUser> = OnceCell::new();
+pub(crate) static ENCODING_KEY: OnceCell<EncodingKey> = OnceCell::new();
+pub(crate) static DECODING_KEY: OnceCell<DecodingKey> = OnceCell::new();

@@ -304,6 +304,12 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(ActiveTasks::TaskId).big_integer().not_null())
                     .col(
+                        ColumnDef::new(ActiveTasks::Uuid)
+                            .uuid()
+                            .unique_key()
+                            .not_null(),
+                    )
+                    .col(
                         ColumnDef::new(ActiveTasks::Tags)
                             .array(ColumnType::Text)
                             .not_null(),
@@ -388,6 +394,12 @@ impl MigrationTrait for Migration {
                     .col(
                         ColumnDef::new(ArchivedTasks::TaskId)
                             .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ArchivedTasks::Uuid)
+                            .uuid()
+                            .unique_key()
                             .not_null(),
                     )
                     .col(
@@ -638,6 +650,7 @@ enum ActiveTasks {
     CreatorId,
     GroupId,
     TaskId,
+    Uuid,
     Tags,
     CreatedAt,
     UpdatedAt,
@@ -656,6 +669,7 @@ enum ArchivedTasks {
     CreatorId,
     GroupId,
     TaskId,
+    Uuid,
     Tags,
     CreatedAt,
     UpdatedAt,

@@ -12,6 +12,8 @@ pub struct Model {
     pub creator_id: i64,
     pub group_id: i64,
     pub task_id: i64,
+    #[sea_orm(unique)]
+    pub uuid: Uuid,
     pub tags: Vec<String>,
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
@@ -20,7 +22,7 @@ pub struct Model {
     pub timeout: i64,
     pub priority: i32,
     pub spec: Json,
-    pub result: Json,
+    pub result: Option<Json>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

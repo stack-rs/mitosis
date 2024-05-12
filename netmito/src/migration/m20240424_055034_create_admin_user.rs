@@ -16,12 +16,12 @@ impl MigrationTrait for Migration {
         let res = create_user(db, admin_user_info.username.clone(), md5_password, true).await;
         match res {
             Ok(_) => {
-                tracing::info!("Default admin user created");
+                tracing::info!(target: "netmito::migration", "Default admin user created");
                 Ok(())
             }
             Err(e) => match e {
                 Error::DbError(DbErr::RecordNotInserted) => {
-                    tracing::info!("Default admin user already exists, skip creation");
+                    tracing::info!(target: "netmito::migration", "Default admin user already exists, skip creation");
                     Ok(())
                 }
                 _ => Err(DbErr::Custom(format!(

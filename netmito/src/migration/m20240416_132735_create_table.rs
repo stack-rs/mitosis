@@ -3,7 +3,8 @@ use sea_orm_migration::prelude::*;
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
-const DEFAULT_STORAGE_QUOTA: i64 = 1024 * 1024 * 1024 * 128; // 128GB
+const DEFAULT_STORAGE_QUOTA: i64 = 1024 * 1024 * 1024 * 16; // 16GB
+const DEFAULT_GROUP_QUOTA: i64 = 8;
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
@@ -64,22 +65,16 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(Users::State).integer().not_null().default(0))
                     .col(
-                        ColumnDef::new(Users::TaskCount)
+                        ColumnDef::new(Users::GroupQuota)
+                            .big_integer()
+                            .not_null()
+                            .default(DEFAULT_GROUP_QUOTA),
+                    )
+                    .col(
+                        ColumnDef::new(Users::GroupCount)
                             .integer()
                             .not_null()
-                            .default(0),
-                    )
-                    .col(
-                        ColumnDef::new(Users::StorageQuota)
-                            .big_integer()
-                            .not_null()
-                            .default(DEFAULT_STORAGE_QUOTA),
-                    )
-                    .col(
-                        ColumnDef::new(Users::StorageUsed)
-                            .big_integer()
-                            .not_null()
-                            .default(0),
+                            .default(1),
                     )
                     .to_owned(),
             )
@@ -116,6 +111,24 @@ impl MigrationTrait for Migration {
                     .col(
                         ColumnDef::new(Groups::State)
                             .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Groups::TaskCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Groups::StorageQuota)
+                            .big_integer()
+                            .not_null()
+                            .default(DEFAULT_STORAGE_QUOTA),
+                    )
+                    .col(
+                        ColumnDef::new(Groups::StorageUsed)
+                            .big_integer()
                             .not_null()
                             .default(0),
                     )
@@ -361,10 +374,10 @@ impl MigrationTrait for Migration {
                     )
                     .index(
                         Index::create()
-                            .name("idx_active_tasks-creator_id-task_id")
+                            .name("idx_active_tasks-group_id-task_id")
                             .table(ActiveTasks::Table)
                             .unique()
-                            .col(ActiveTasks::CreatorId)
+                            .col(ActiveTasks::GroupId)
                             .col(ActiveTasks::TaskId),
                     )
                     .to_owned(),
@@ -449,10 +462,10 @@ impl MigrationTrait for Migration {
                     )
                     .index(
                         Index::create()
-                            .name("idx_archived_tasks-creator_id-task_id")
+                            .name("idx_archived_tasks-group_id-task_id")
                             .table(ArchivedTasks::Table)
                             .unique()
-                            .col(ArchivedTasks::CreatorId)
+                            .col(ArchivedTasks::GroupId)
                             .col(ArchivedTasks::TaskId),
                     )
                     .to_owned(),
@@ -470,7 +483,12 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(Attachments::TaskId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(Attachments::GroupId)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(Attachments::Key).text().not_null())
                     .col(
                         ColumnDef::new(Attachments::ContentType)
                             .integer()
@@ -487,6 +505,22 @@ impl MigrationTrait for Migration {
                         ColumnDef::new(Attachments::UpdatedAt)
                             .timestamp_with_time_zone()
                             .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-attachments-group_id")
+                            .from(Attachments::Table, Attachments::GroupId)
+                            .to(Groups::Table, Groups::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .index(
+                        Index::create()
+                            .name("idx_attachments-group_id-path")
+                            .table(Attachments::Table)
+                            .unique()
+                            .col(Attachments::GroupId)
+                            .col(Attachments::Key),
                     )
                     .to_owned(),
             )
@@ -520,6 +554,14 @@ impl MigrationTrait for Migration {
                         ColumnDef::new(Artifacts::UpdatedAt)
                             .timestamp_with_time_zone()
                             .not_null(),
+                    )
+                    .index(
+                        Index::create()
+                            .name("idx_artifacts-task_id-content_type")
+                            .table(Artifacts::Table)
+                            .unique()
+                            .col(Artifacts::TaskId)
+                            .col(Artifacts::ContentType),
                     )
                     .to_owned(),
             )
@@ -594,9 +636,8 @@ enum Users {
     UpdatedAt,
     Admin,
     State,
-    TaskCount,
-    StorageQuota,
-    StorageUsed,
+    GroupQuota,
+    GroupCount,
 }
 
 #[derive(DeriveIden)]
@@ -608,6 +649,9 @@ enum Groups {
     CreatedAt,
     UpdatedAt,
     State,
+    TaskCount,
+    StorageQuota,
+    StorageUsed,
 }
 
 #[derive(DeriveIden)]
@@ -685,7 +729,8 @@ enum ArchivedTasks {
 enum Attachments {
     Table,
     Id,
-    TaskId,
+    GroupId,
+    Key,
     ContentType,
     Size,
     CreatedAt,

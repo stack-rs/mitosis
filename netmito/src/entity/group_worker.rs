@@ -9,8 +9,8 @@ use super::role::GroupWorkerRole;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
-    pub worker_id: i64,
     pub group_id: i64,
+    pub worker_id: i64,
     pub role: GroupWorkerRole,
 }
 

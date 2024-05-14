@@ -15,6 +15,9 @@ pub struct Model {
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
     pub state: GroupState,
+    pub task_count: i32,
+    pub storage_quota: i64,
+    pub storage_used: i64,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -23,6 +26,8 @@ pub enum Relation {
     ActiveTasks,
     #[sea_orm(has_many = "super::archived_tasks::Entity")]
     ArchivedTasks,
+    #[sea_orm(has_many = "super::attachments::Entity")]
+    Attachments,
     #[sea_orm(has_many = "super::group_worker::Entity")]
     GroupWorker,
     #[sea_orm(has_many = "super::user_group::Entity")]
@@ -46,6 +51,12 @@ impl Related<super::active_tasks::Entity> for Entity {
 impl Related<super::archived_tasks::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::ArchivedTasks.def()
+    }
+}
+
+impl Related<super::attachments::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Attachments.def()
     }
 }
 

@@ -27,9 +27,8 @@ pub struct Model {
     pub updated_at: TimeDateTimeWithTimeZone,
     pub admin: bool,
     pub state: UserState,
-    pub task_count: i32,
-    pub storage_quota: i64,
-    pub storage_used: i64,
+    pub group_quota: i64,
+    pub group_count: i32,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

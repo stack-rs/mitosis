@@ -2,19 +2,38 @@
 
 use sea_orm::entity::prelude::*;
 
+use super::content::AttachmentContentType;
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
 #[sea_orm(table_name = "attachments")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
-    pub task_id: Uuid,
-    pub content_type: i32,
+    pub group_id: i64,
+    #[sea_orm(column_type = "Text")]
+    pub key: String,
+    pub content_type: AttachmentContentType,
     pub size: i64,
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
+pub enum Relation {
+    #[sea_orm(
+        belongs_to = "super::groups::Entity",
+        from = "Column::GroupId",
+        to = "super::groups::Column::Id",
+        on_update = "Cascade",
+        on_delete = "Restrict"
+    )]
+    Groups,
+}
+
+impl Related<super::groups::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Groups.def()
+    }
+}
 
 impl ActiveModelBehavior for ActiveModel {}

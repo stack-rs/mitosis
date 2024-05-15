@@ -2,13 +2,15 @@ use argon2::{
     password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
     Argon2,
 };
-use sea_orm::ActiveValue::Set;
-use sea_orm::{prelude::*, TransactionTrait};
+use sea_orm::{prelude::*, Set, TransactionTrait};
 use sea_orm_migration::prelude::*;
 
 use crate::{
-    entity::groups as Group, entity::role::UserGroupRole, entity::user_group as UserGroup,
-    entity::users as User, error::Error,
+    entity::{
+        groups as Group, role::UserGroupRole, state::UserState, user_group as UserGroup,
+        users as User,
+    },
+    error::Error,
 };
 
 pub async fn create_user<C>(
@@ -93,4 +95,36 @@ where
         })
         .await?;
     Ok(user)
+}
+
+pub async fn change_user_state<C>(
+    db: &C,
+    username: String,
+    state: UserState,
+) -> crate::error::Result<UserState>
+where
+    C: TransactionTrait,
+{
+    Ok(db
+        .transaction::<_, UserState, Error>(|txn| {
+            Box::pin(async move {
+                let user = User::Entity::find()
+                    .filter(User::Column::Username.eq(&username))
+                    .one(txn)
+                    .await?;
+                if let Some(user) = user {
+                    // change state to the new state
+                    let user = User::ActiveModel {
+                        id: Set(user.id),
+                        state: Set(state),
+                        ..Default::default()
+                    };
+                    let u = user.update(txn).await?;
+                    Ok(u.state)
+                } else {
+                    Err(DbErr::RecordNotUpdated.into())
+                }
+            })
+        })
+        .await?)
 }

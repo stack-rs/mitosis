@@ -27,7 +27,7 @@ pub struct Model {
     pub updated_at: TimeDateTimeWithTimeZone,
     pub admin: bool,
     pub state: UserState,
-    pub group_quota: i64,
+    pub group_quota: i32,
     pub group_count: i32,
 }
 

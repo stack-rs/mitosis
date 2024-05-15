@@ -9,7 +9,9 @@ use aws_sdk_s3::{
 };
 use axum::{http::StatusCode, response::IntoResponse, Json};
 use sea_orm::{DbErr, TransactionError};
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -29,8 +31,14 @@ pub enum Error {
     EncodeTokenError(#[from] jsonwebtoken::errors::Error),
     #[error("Decode token error: {0}")]
     DecodeTokenError(#[from] DecodeTokenError),
-    #[error("S3 Error: {0}")]
+    #[error("S3 error: {0}")]
     S3Error(#[from] S3Error),
+    #[error("Parse url error: {0}")]
+    ParseUrlError(#[from] url::ParseError),
+    #[error("Request error: {0}")]
+    RequestError(#[from] reqwest::Error),
+    #[error(transparent)]
+    ApiError(#[from] ApiError),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -67,18 +75,27 @@ pub enum S3Error {
     InvalidContentLength(i64),
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type ApiResult<T> = std::result::Result<T, ApiError>;
 
-impl IntoResponse for AuthError {
-    fn into_response(self) -> axum::response::Response {
-        let status = match self {
-            AuthError::InvalidToken => StatusCode::UNAUTHORIZED,
-            AuthError::WrongCredentials => axum::http::StatusCode::UNAUTHORIZED,
-            AuthError::PermissionDenied => axum::http::StatusCode::FORBIDDEN,
-        };
-        let body = Json(json!({ "msg": Error::from(self).to_string() }));
-        (status, body).into_response()
-    }
+#[derive(thiserror::Error, Debug)]
+pub enum ApiError {
+    #[error("Internal server error")]
+    InternalServerError,
+    #[error("Authentication error: {0}")]
+    AuthError(#[from] AuthError),
+    #[error("Process request error: {0}")]
+    InvalidRequest(String),
+    #[error("User or group with same name {0} already exists")]
+    AlreadyExists(String),
+    #[error("User or group with name {0} not found")]
+    NotFound(String),
+    #[error("Resource quota exceeded")]
+    QuotaExceeded,
+}
+
+#[derive(Serialize, Debug, Deserialize)]
+pub struct ErrorMsg {
+    pub msg: String,
 }
 
 impl From<TransactionError<Error>> for Error {
@@ -87,5 +104,56 @@ impl From<TransactionError<Error>> for Error {
             TransactionError::Connection(e) => e.into(),
             TransactionError::Transaction(e) => e,
         }
+    }
+}
+
+// impl IntoResponse for AuthError {
+//     fn into_response(self) -> axum::response::Response {
+//         let status = match self {
+//             AuthError::InvalidToken => StatusCode::UNAUTHORIZED,
+//             AuthError::WrongCredentials => StatusCode::UNAUTHORIZED,
+//             AuthError::PermissionDenied => StatusCode::FORBIDDEN,
+//         };
+//         let body = Json(json!({ "msg": Error::from(self).to_string() }));
+//         (status, body).into_response()
+//     }
+// }
+
+pub trait GetStatusCode {
+    fn get_status_code(&self) -> StatusCode;
+}
+
+impl GetStatusCode for AuthError {
+    fn get_status_code(&self) -> StatusCode {
+        match self {
+            AuthError::InvalidToken => StatusCode::UNAUTHORIZED,
+            AuthError::WrongCredentials => StatusCode::UNAUTHORIZED,
+            AuthError::PermissionDenied => StatusCode::FORBIDDEN,
+        }
+    }
+}
+
+impl GetStatusCode for ApiError {
+    fn get_status_code(&self) -> StatusCode {
+        match self {
+            ApiError::InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::AuthError(e) => e.get_status_code(),
+            ApiError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::AlreadyExists(_) => StatusCode::CONFLICT,
+            ApiError::NotFound(_) => StatusCode::NOT_FOUND,
+            ApiError::QuotaExceeded => StatusCode::FORBIDDEN,
+        }
+    }
+}
+
+impl From<ApiError> for ErrorMsg {
+    fn from(e: ApiError) -> Self {
+        ErrorMsg { msg: e.to_string() }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        (self.get_status_code(), Json(ErrorMsg::from(self))).into_response()
     }
 }

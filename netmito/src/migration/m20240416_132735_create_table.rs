@@ -4,7 +4,7 @@ use sea_orm_migration::prelude::*;
 pub struct Migration;
 
 const DEFAULT_STORAGE_QUOTA: i64 = 1024 * 1024 * 1024 * 16; // 16GB
-const DEFAULT_GROUP_QUOTA: i64 = 8;
+const DEFAULT_GROUP_QUOTA: i32 = 8;
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
@@ -66,7 +66,7 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Users::State).integer().not_null().default(0))
                     .col(
                         ColumnDef::new(Users::GroupQuota)
-                            .big_integer()
+                            .integer()
                             .not_null()
                             .default(DEFAULT_GROUP_QUOTA),
                     )

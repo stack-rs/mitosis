@@ -18,14 +18,17 @@ pub struct TokenClaims<'a> {
     pub sign: i64,
 }
 
-pub fn generate_token(username: &String, sign: i64) -> crate::error::Result<String> {
+pub fn generate_token<T>(username: T, sign: i64) -> crate::error::Result<String>
+where
+    T: AsRef<str>,
+{
     let token_ttl = crate::config::SERVER_CONFIG
         .get()
         .ok_or(crate::error::Error::Custom(
             "server config not found".to_string(),
         ))?;
     let claims = TokenClaims {
-        sub: Cow::from(username),
+        sub: Cow::from(username.as_ref()),
         exp: OffsetDateTime::now_utc() + token_ttl.token_expires_in,
         sign,
     };

@@ -5,3 +5,4 @@ pub mod error;
 pub mod migration;
 pub mod schema;
 pub mod service;
+pub mod signal;

@@ -36,9 +36,15 @@ pub enum Error {
     #[error("Parse url error: {0}")]
     ParseUrlError(#[from] url::ParseError),
     #[error("Request error: {0}")]
-    RequestError(#[from] reqwest::Error),
+    RequestError(#[from] RequestError),
     #[error(transparent)]
     ApiError(#[from] ApiError),
+    #[error("Join task error: {0}")]
+    JoinError(#[from] tokio::task::JoinError),
+    #[error("Nix error: {0}")]
+    NixError(#[from] nix::Error),
+    #[error("Serde error: {0}")]
+    SerdeError(#[from] serde_json::Error),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -75,6 +81,14 @@ pub enum S3Error {
     InvalidContentLength(i64),
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum RequestError {
+    #[error("Fail to connect to {0}")]
+    ConnectionError(String),
+    #[error(transparent)]
+    Custom(#[from] reqwest::Error),
+}
+
 pub type ApiResult<T> = std::result::Result<T, ApiError>;
 
 #[derive(thiserror::Error, Debug)]
@@ -87,7 +101,7 @@ pub enum ApiError {
     InvalidRequest(String),
     #[error("User or group with same name {0} already exists")]
     AlreadyExists(String),
-    #[error("User or group with name {0} not found")]
+    #[error("{0} not found")]
     NotFound(String),
     #[error("Resource quota exceeded")]
     QuotaExceeded,

@@ -8,3 +8,4 @@ pub mod migration;
 pub mod schema;
 pub mod service;
 pub mod signal;
+pub mod worker;

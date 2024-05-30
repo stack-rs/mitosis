@@ -69,7 +69,7 @@ where
                         };
                         UserGroup::Entity::insert(user_group)
                             .on_conflict(
-                                sea_query::OnConflict::columns(vec![
+                                sea_query::OnConflict::columns([
                                     UserGroup::Column::UserId,
                                     UserGroup::Column::GroupId,
                                 ])

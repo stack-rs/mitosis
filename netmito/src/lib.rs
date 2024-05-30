@@ -1,5 +1,6 @@
 pub mod api;
 pub mod config;
+pub mod coordinator;
 pub mod entity;
 pub mod error;
 pub mod migration;

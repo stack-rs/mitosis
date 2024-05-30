@@ -22,6 +22,8 @@ pub struct WorkerConfig {
     pub(crate) password: Option<String>,
     pub(crate) groups: HashSet<String>,
     pub(crate) tags: HashSet<String>,
+    pub(crate) log_file: Option<RelativePathBuf>,
+    pub(crate) no_log_file: bool,
 }
 
 #[derive(Args, Debug, Serialize, Default)]
@@ -63,6 +65,14 @@ pub struct WorkerConfigCli {
     #[arg(short, long, num_args = 0.., value_delimiter = ',')]
     #[serde(skip_serializing_if = "::std::vec::Vec::is_empty")]
     pub tags: Vec<String>,
+    /// The log file path. if not specified, then the default log file path would be used.
+    /// Use `--no-log-file`` to disable logging to file
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub log_file: Option<String>,
+    /// Disable logging to file
+    #[arg(long)]
+    pub no_log_file: bool,
 }
 
 impl Default for WorkerConfig {
@@ -76,6 +86,8 @@ impl Default for WorkerConfig {
             password: None,
             groups: HashSet::new(),
             tags: HashSet::new(),
+            log_file: None,
+            no_log_file: false,
         }
     }
 }

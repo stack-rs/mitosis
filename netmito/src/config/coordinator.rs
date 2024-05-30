@@ -40,6 +40,8 @@ pub struct CoordinatorConfig {
     pub(crate) access_token_expires_in: std::time::Duration,
     #[serde(with = "humantime_serde")]
     pub(crate) heartbeat_timeout: std::time::Duration,
+    pub(crate) log_file: Option<RelativePathBuf>,
+    pub(crate) no_log_file: bool,
 }
 
 #[derive(Args, Debug, Serialize, Default)]
@@ -89,10 +91,18 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub access_token_expires_in: Option<String>,
-    /// The heartheat timeout, default to 600 seconds
+    /// The heartbeat timeout, default to 600 seconds
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub heartbeat_timeout: Option<String>,
+    /// The log file path. if not specified, then the default log file path would be used.
+    /// Use `--no-log-file`` to disable logging to file
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub log_file: Option<String>,
+    /// Disable logging to file
+    #[arg(long)]
+    pub no_log_file: bool,
 }
 
 impl Default for CoordinatorConfig {
@@ -109,6 +119,8 @@ impl Default for CoordinatorConfig {
             access_token_public_path: "public.pem".to_string().into(),
             access_token_expires_in: std::time::Duration::from_secs(60 * 60 * 24 * 7),
             heartbeat_timeout: std::time::Duration::from_secs(600),
+            log_file: None,
+            no_log_file: false,
         }
     }
 }

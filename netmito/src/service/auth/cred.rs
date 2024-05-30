@@ -168,7 +168,10 @@ pub async fn get_user_credential(
     // Local credential not found or invalid, need to login
     tracing::warn!("Local credential not found or invalid, need to login");
     let username = user
-        .map(|u| Ok::<_, std::io::Error>(u.clone()))
+        .map(|u| {
+            println!("Username: {}", u);
+            Ok::<_, std::io::Error>(u.clone())
+        })
         .unwrap_or_else(|| {
             let mut user = String::new();
             print!("Username: ");

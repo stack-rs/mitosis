@@ -1,5 +1,6 @@
 use clap_repl::ClapEditor;
 use reqwest::Client;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use url::Url;
 
 use crate::{
@@ -20,6 +21,26 @@ pub struct MitoClient {
 }
 
 impl MitoClient {
+    pub async fn main(cli: ClientConfigCli) {
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "netmito=info".into()),
+            )
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+        match Self::setup(&cli).await {
+            Ok(mut client) => {
+                if let Err(e) = client.run().await {
+                    tracing::error!("{}", e);
+                }
+            }
+            Err(e) => {
+                tracing::error!("{}", e);
+            }
+        }
+    }
+
     pub async fn setup(cli: &ClientConfigCli) -> crate::error::Result<Self> {
         tracing::debug!("Client is setting up");
         let config = ClientConfig::new(cli)?;

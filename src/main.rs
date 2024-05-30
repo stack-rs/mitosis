@@ -1,3 +1,59 @@
+use clap::{Parser, Subcommand};
+use netmito::{
+    client::MitoClient,
+    config::{ClientConfigCli, CoordinatorConfigCli, WorkerConfigCli},
+    coordinator::MitoCoordinator,
+    worker::MitoWorker,
+};
+
+/// Main entry point for the mitosis command-line tool.
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+#[command(propagate_version = true)]
+struct Arguments {
+    #[command(subcommand)]
+    mode: Mode,
+}
+
+#[derive(Subcommand, Debug)]
+enum Mode {
+    /// Run the mitosis coordinator.
+    Coordinator(CoordinatorConfigCli),
+    /// Run a mitosis worker.
+    Worker(WorkerConfigCli),
+    /// Run a mitosis client.
+    Client(ClientConfigCli),
+}
+
 fn main() {
-    println!("Hello, world!");
+    let args = Arguments::parse();
+    match args.mode {
+        Mode::Coordinator(coordinator_cli) => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    MitoCoordinator::main(coordinator_cli).await;
+                });
+        }
+        Mode::Worker(worker_cli) => {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    MitoWorker::main(worker_cli).await;
+                });
+        }
+        Mode::Client(client_cli) => {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    MitoClient::main(client_cli).await;
+                });
+        }
+    }
 }

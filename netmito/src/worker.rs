@@ -12,6 +12,8 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_tar::{Builder, Header};
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use url::Url;
 
 use crate::entity::content::ArtifactContentType;
@@ -34,7 +36,36 @@ pub struct MitoWorker {
 }
 
 impl MitoWorker {
-    pub async fn setup(cli: &WorkerConfigCli) -> crate::error::Result<Self> {
+    pub async fn main(cli: WorkerConfigCli) {
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "netmito=info".into()),
+            )
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+        match Self::setup(&cli).await {
+            Ok((mut worker, _guards)) => {
+                if let Err(e) = worker.run().await {
+                    tracing::error!("{}", e);
+                }
+                worker.cleanup().await;
+            }
+            Err(e) => {
+                tracing::error!("{}", e);
+            }
+        }
+    }
+
+    pub async fn setup(
+        cli: &WorkerConfigCli,
+    ) -> crate::error::Result<(
+        Self,
+        Option<(
+            tracing::subscriber::DefaultGuard,
+            tracing_appender::non_blocking::WorkerGuard,
+        )>,
+    )> {
         tracing::debug!("Worker is setting up");
         let config = WorkerConfig::new(cli)?;
         let http_client = Client::new();
@@ -68,21 +99,60 @@ impl MitoWorker {
             })?;
         if resp.status().is_success() {
             let resp: RegisterWorkerResp = resp.json().await.map_err(RequestError::from)?;
-            tracing::info!("Worker registered with ID: {}", resp.worker_id);
             let mut cache_path =
                 dirs::cache_dir().ok_or(Error::Custom("Cache dir not found".to_string()))?;
             cache_path.push("mitosis");
+            let log_dir = cache_path.join("worker");
             cache_path.push(resp.worker_id.to_string());
             tokio::fs::create_dir_all(&cache_path).await?;
             tokio::fs::create_dir_all(&cache_path.join("result")).await?;
             tokio::fs::create_dir_all(&cache_path.join("exec")).await?;
-            Ok(MitoWorker {
-                config,
-                http_client,
-                credential: resp.token,
-                cancel_token: CancellationToken::new(),
-                cache_path,
-            })
+            tokio::fs::create_dir_all(&log_dir).await?;
+            let guards = if !config.no_log_file {
+                config
+                    .log_file
+                    .as_ref()
+                    .map(|p| p.relative())
+                    .or_else(|| {
+                        dirs::cache_dir().map(|mut p| {
+                            p.push("mitosis");
+                            p.push("worker");
+                            p
+                        })
+                    })
+                    .map(|log_dir| {
+                        let file_logger = tracing_appender::rolling::daily(
+                            log_dir,
+                            format!("{}.log", resp.worker_id),
+                        );
+                        let stdout = std::io::stdout.with_max_level(tracing::Level::INFO);
+                        let (non_blocking, _guard) = tracing_appender::non_blocking(file_logger);
+                        let _coordinator_subscriber = tracing_subscriber::registry()
+                            .with(
+                                tracing_subscriber::EnvFilter::try_from_default_env()
+                                    .unwrap_or_else(|_| "netmito=info".into()),
+                            )
+                            .with(
+                                tracing_subscriber::fmt::layer()
+                                    .with_writer(stdout.and(non_blocking)),
+                            )
+                            .set_default();
+                        (_coordinator_subscriber, _guard)
+                    })
+            } else {
+                None
+            };
+            tracing::info!("Worker registered with ID: {}", resp.worker_id);
+            Ok((
+                MitoWorker {
+                    config,
+                    http_client,
+                    credential: resp.token,
+                    cancel_token: CancellationToken::new(),
+                    cache_path,
+                },
+                guards,
+            ))
         } else {
             let resp: crate::error::ErrorMsg = resp.json().await.map_err(RequestError::from)?;
             tracing::error!("{}", resp.msg);

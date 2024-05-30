@@ -1,6 +1,9 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::api::router;
 use crate::config::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
@@ -14,12 +17,74 @@ pub struct MitoCoordinator {
     pub worker_task_queue: WorkerTaskQueue,
     pub worker_heartbeat_queue: WorkerHeartbeatQueue,
     pub cancel_token: CancellationToken,
+    pub log_dir: PathBuf,
 }
 
 impl MitoCoordinator {
-    pub async fn setup(cli: &CoordinatorConfigCli) -> crate::error::Result<Self> {
+    pub async fn main(cli: CoordinatorConfigCli) {
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "netmito=info".into()),
+            )
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+        match CoordinatorConfig::new(&cli) {
+            Ok(config) => {
+                let _guards = if !config.no_log_file {
+                    config
+                        .log_file
+                        .as_ref()
+                        .map(|p| p.relative())
+                        .or_else(|| {
+                            dirs::cache_dir().map(|mut p| {
+                                p.push("mitosis");
+                                p.push("coordinator");
+                                p
+                            })
+                        })
+                        .map(|log_dir| {
+                            let file_logger = tracing_appender::rolling::daily(
+                                log_dir,
+                                format!("{}.log", config.bind),
+                            );
+                            let stdout = std::io::stdout.with_max_level(tracing::Level::INFO);
+                            let (non_blocking, _guard) =
+                                tracing_appender::non_blocking(file_logger);
+                            let _coordinator_subscriber = tracing_subscriber::registry()
+                                .with(
+                                    tracing_subscriber::EnvFilter::try_from_default_env()
+                                        .unwrap_or_else(|_| "netmito=info".into()),
+                                )
+                                .with(
+                                    tracing_subscriber::fmt::layer()
+                                        .with_writer(stdout.and(non_blocking)),
+                                )
+                                .set_default();
+                            (_coordinator_subscriber, _guard)
+                        })
+                } else {
+                    None
+                };
+                match Self::setup(config).await {
+                    Ok(coordinator) => {
+                        if let Err(e) = coordinator.run().await {
+                            tracing::error!("{}", e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("{}", e);
+            }
+        }
+    }
+
+    pub async fn setup(config: CoordinatorConfig) -> crate::error::Result<Self> {
         tracing::debug!("Coordinator is setting up");
-        let config = CoordinatorConfig::new(cli)?;
         // Setup configurations
         let server_config = config.build_server_config()?;
         crate::config::SERVER_CONFIG
@@ -68,11 +133,19 @@ impl MitoCoordinator {
         // Setup database
         Migrator::up(&infra_pool.db, None).await?;
 
+        let mut log_dir = dirs::cache_dir().ok_or(crate::error::Error::Custom(
+            "Cache dir not found".to_string(),
+        ))?;
+        log_dir.push("mitosis");
+        log_dir.push("coordinator");
+        tokio::fs::create_dir_all(&log_dir).await?;
+
         Ok(Self {
             infra_pool,
             worker_task_queue,
             worker_heartbeat_queue,
             cancel_token,
+            log_dir,
         })
     }
 
@@ -83,6 +156,7 @@ impl MitoCoordinator {
             mut worker_task_queue,
             mut worker_heartbeat_queue,
             cancel_token,
+            ..
         } = self;
         let task_queue_hd = tokio::spawn(async move { worker_task_queue.run().await });
         let heartbeat_hd = tokio::spawn(async move { worker_heartbeat_queue.run().await });
@@ -96,13 +170,15 @@ impl MitoCoordinator {
             .bind;
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("Coordinator is listening on: {}", addr);
-        axum::serve(
+        if let Err(e) = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .unwrap();
+        {
+            tracing::error!("Server error: {}", e);
+        }
         tracing::info!("Coordinator shutdown signal received");
         cancel_token.cancel();
         task_queue_hd.await?;

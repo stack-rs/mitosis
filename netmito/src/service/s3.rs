@@ -22,17 +22,18 @@ pub async fn create_bucket(client: &Client, bucket_name: &str) -> Result<(), S3E
 
 pub async fn get_presigned_upload_link<T: Into<String>>(
     client: &Client,
+    bucket: &str,
     key: T,
     length: i64,
 ) -> Result<String, S3Error> {
     if length <= 0 {
         return Err(S3Error::InvalidContentLength(length));
     }
-    // At least valid for 1 day
-    let expires = Duration::from_secs(86400.max(length as u64 / 1000000));
+    // At least valid for 1 day and at most valid for 7 days
+    let expires = Duration::from_secs(604800.min(86400.max(length as u64 / 1000000)));
     let resp = client
         .put_object()
-        .bucket("mitosis-tasks")
+        .bucket(bucket)
         .key(key)
         .content_length(length)
         .presigned(PresigningConfig::expires_in(expires)?)
@@ -42,14 +43,15 @@ pub async fn get_presigned_upload_link<T: Into<String>>(
 
 pub async fn get_presigned_download_link<T: Into<String>>(
     client: &Client,
+    bucket: &str,
     key: T,
     length: i64,
 ) -> Result<String, S3Error> {
-    // At least valid for 3 days
-    let expires = Duration::from_secs(259200.max(length as u64 / 1000000));
+    // At least valid for 3 days and at most valid for 10 days
+    let expires = Duration::from_secs(864000.min(259200.max(length as u64 / 1000000)));
     let resp = client
         .get_object()
-        .bucket("mitosis-tasks")
+        .bucket(bucket)
         .key(key)
         .presigned(PresigningConfig::expires_in(expires)?)
         .await?;

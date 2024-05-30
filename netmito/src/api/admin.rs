@@ -1,4 +1,4 @@
-use axum::{extract::State, Extension, Json};
+use axum::{extract::State, middleware, routing::post, Extension, Json, Router};
 use sea_orm::DbErr;
 
 use crate::{
@@ -6,8 +6,23 @@ use crate::{
     entity::state::UserState,
     error::{ApiError, ApiResult, Error},
     schema::*,
-    service::{self, auth::AuthAdminUser, name_validator},
+    service::{
+        self,
+        auth::{admin_auth_middleware, AuthAdminUser},
+        name_validator,
+    },
 };
+
+pub fn admin_router(st: InfraPool) -> Router<InfraPool> {
+    Router::new()
+        .route("/user", post(create_user).delete(delete_user))
+        .route("/user/state", post(change_user_state))
+        .layer(middleware::from_fn_with_state(
+            st.clone(),
+            admin_auth_middleware,
+        ))
+        .with_state(st)
+}
 
 pub async fn create_user(
     Extension(_): Extension<AuthAdminUser>,
@@ -47,7 +62,10 @@ pub async fn delete_user(
         Ok(UserState::Deleted) => Ok(Json(UserStateResp {
             state: UserState::Deleted,
         })),
-        Err(Error::DbError(DbErr::RecordNotUpdated)) => Err(ApiError::NotFound(req.username)),
+        Err(Error::DbError(DbErr::RecordNotUpdated)) => Err(ApiError::NotFound(format!(
+            "User or group with name {}",
+            req.username
+        ))),
         Err(e) => {
             tracing::error!("{}", e);
             Err(ApiError::InternalServerError)
@@ -63,7 +81,10 @@ pub async fn change_user_state(
 ) -> ApiResult<Json<UserStateResp>> {
     match service::user::change_user_state(&pool.db, req.username.clone(), req.state).await {
         Ok(state) => Ok(Json(UserStateResp { state })),
-        Err(Error::DbError(DbErr::RecordNotUpdated)) => Err(ApiError::NotFound(req.username)),
+        Err(Error::DbError(DbErr::RecordNotUpdated)) => Err(ApiError::NotFound(format!(
+            "User or group with name {}",
+            req.username
+        ))),
         Err(e) => {
             tracing::error!("{}", e);
             Err(ApiError::InternalServerError)

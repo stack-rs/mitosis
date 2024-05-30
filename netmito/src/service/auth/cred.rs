@@ -188,7 +188,7 @@ pub async fn get_user_credential(
         username: username.clone(),
         md5_password,
     };
-    url.set_path("user/login");
+    url.set_path("login");
     let resp = client
         .post(url.as_str())
         .json(&req)

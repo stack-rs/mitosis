@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod group;
 pub mod user;
+pub mod worker;
 
 #[cfg(feature = "debugging")]
 use std::net::SocketAddr;
@@ -22,21 +23,7 @@ use axum::{
 use http_body_util::BodyExt;
 use serde_json::json;
 
-use crate::{
-    config::InfraPool,
-    service::auth::{admin_auth_middleware, user_auth_middleware},
-};
-
-fn admin_router(st: InfraPool) -> Router<InfraPool> {
-    Router::new()
-        .route("/user", post(admin::create_user).delete(admin::delete_user))
-        .route("/user/state", post(admin::change_user_state))
-        .layer(middleware::from_fn_with_state(
-            st.clone(),
-            admin_auth_middleware,
-        ))
-        .with_state(st)
-}
+use crate::{config::InfraPool, service::auth::user_auth_middleware};
 
 pub fn router(st: InfraPool) -> Router {
     #[cfg(not(feature = "debugging"))]
@@ -46,15 +33,9 @@ pub fn router(st: InfraPool) -> Router {
                 "/health",
                 get(|| async { (StatusCode::OK, Json(json!({"status": "ok"}))) }),
             )
-            .route("/user/login", post(user::login_user))
-            .route(
-                "/user/auth",
-                get(user::auth_user).layer(middleware::from_fn_with_state(
-                    st.clone(),
-                    user_auth_middleware,
-                )),
-            )
-            .nest("/admin", admin_router(st.clone()))
+            .route("/login", post(user::login_user))
+            .nest("/user", user::user_router(st.clone()))
+            .nest("/admin", admin::admin_router(st.clone()))
             .route(
                 "/group",
                 post(group::create_group).layer(middleware::from_fn_with_state(
@@ -62,6 +43,14 @@ pub fn router(st: InfraPool) -> Router {
                     user_auth_middleware,
                 )),
             )
+            .route(
+                "/worker",
+                post(worker::register_worker).layer(middleware::from_fn_with_state(
+                    st.clone(),
+                    user_auth_middleware,
+                )),
+            )
+            .nest("/worker", worker::worker_router(st.clone()))
             .with_state(st)
     }
     #[cfg(feature = "debugging")]
@@ -71,15 +60,9 @@ pub fn router(st: InfraPool) -> Router {
                 "/health",
                 get(|| async { (StatusCode::OK, Json(json!({"status": "ok"}))) }),
             )
-            .route("/user/login", post(user::login_user))
-            .route(
-                "/user/auth",
-                get(user::auth_user).layer(middleware::from_fn_with_state(
-                    st.clone(),
-                    user_auth_middleware,
-                )),
-            )
-            .nest("/admin", admin_router(st.clone()))
+            .route("/login", post(user::login_user))
+            .nest("/user", user::user_router(st.clone()))
+            .nest("/admin", admin::admin_router(st.clone()))
             .route(
                 "/group",
                 post(group::create_group).layer(middleware::from_fn_with_state(
@@ -87,6 +70,14 @@ pub fn router(st: InfraPool) -> Router {
                     user_auth_middleware,
                 )),
             )
+            .route(
+                "/worker",
+                post(worker::register_worker).layer(middleware::from_fn_with_state(
+                    st.clone(),
+                    user_auth_middleware,
+                )),
+            )
+            .nest("/worker", worker::worker_router(st.clone()))
             .with_state(st)
             .layer(middleware::from_fn(print_request_addr))
             .layer(middleware::from_fn(print_request_response))

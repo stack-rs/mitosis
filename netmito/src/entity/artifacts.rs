@@ -2,13 +2,15 @@
 
 use sea_orm::entity::prelude::*;
 
+use super::content::ArtifactContentType;
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
 #[sea_orm(table_name = "artifacts")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
     pub task_id: Uuid,
-    pub content_type: i32,
+    pub content_type: ArtifactContentType,
     pub size: i64,
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,

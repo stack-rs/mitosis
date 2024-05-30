@@ -1,4 +1,7 @@
+use core::fmt;
+
 use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
 
 /// The type of content stored as an attachment.
 #[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq)]
@@ -8,7 +11,7 @@ pub enum AttachmentContentType {
 }
 
 /// The type of content stored as an artifact.
-#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq)]
+#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum ArtifactContentType {
     /// The artifact is a file containing the task's output.
@@ -18,5 +21,15 @@ pub enum ArtifactContentType {
     ExecLog = 1,
     /// The artifact contains stdout and stderr of the worker's sub-process executing task.
     /// Automatically retrieved by worker.
-    SystemLog = 2,
+    StdLog = 2,
+}
+
+impl fmt::Display for ArtifactContentType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ArtifactContentType::Result => write!(f, "result.tar.gz"),
+            ArtifactContentType::ExecLog => write!(f, "exec-log.tar.gz"),
+            ArtifactContentType::StdLog => write!(f, "std-log.tar.gz"),
+        }
+    }
 }

@@ -116,7 +116,7 @@ impl MigrationTrait for Migration {
                     )
                     .col(
                         ColumnDef::new(Groups::TaskCount)
-                            .integer()
+                            .big_integer()
                             .not_null()
                             .default(0),
                     )
@@ -203,7 +203,6 @@ impl MigrationTrait for Migration {
                             .unique_key()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(Workers::EncryptedToken).text().not_null())
                     .col(ColumnDef::new(Workers::CreatorId).big_integer().not_null())
                     .col(
                         ColumnDef::new(Workers::Tags)
@@ -279,7 +278,7 @@ impl MigrationTrait for Migration {
                             .name("fk-group_worker-worker_id")
                             .from(GroupWorker::Table, GroupWorker::WorkerId)
                             .to(Workers::Table, Workers::Id)
-                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_delete(ForeignKeyAction::Cascade)
                             .on_update(ForeignKeyAction::Cascade),
                     )
                     .index(
@@ -668,7 +667,6 @@ enum Workers {
     Table,
     Id,
     WorkerId,
-    EncryptedToken,
     CreatorId,
     Tags,
     CreatedAt,

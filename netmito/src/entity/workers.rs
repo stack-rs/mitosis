@@ -11,8 +11,6 @@ pub struct Model {
     pub id: i64,
     #[sea_orm(unique)]
     pub worker_id: Uuid,
-    #[sea_orm(column_type = "Text")]
-    pub encrypted_token: String,
     pub creator_id: i64,
     pub tags: Vec<String>,
     pub created_at: TimeDateTimeWithTimeZone,

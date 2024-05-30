@@ -15,7 +15,7 @@ pub struct Model {
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
     pub state: GroupState,
-    pub task_count: i32,
+    pub task_count: i64,
     pub storage_quota: i64,
     pub storage_used: i64,
 }

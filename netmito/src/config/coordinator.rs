@@ -15,6 +15,12 @@ use once_cell::sync::OnceCell;
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use time::Duration;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio_util::sync::CancellationToken;
+
+use crate::service::worker::{
+    WorkerHeartbeatQueue, WorkerHeartbeatQueueOp, WorkerTaskQueue, WorkerTaskQueueOp,
+};
 
 pub const DEFAULT_COORDINATOR_ADDR: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5000);
@@ -26,12 +32,14 @@ pub struct CoordinatorConfig {
     pub(crate) s3_url: String,
     pub(crate) s3_access_key: String,
     pub(crate) s3_secret_key: String,
-    pub(crate) admin_username: String,
+    pub(crate) admin_user: String,
     pub(crate) admin_password: String,
     pub(crate) access_token_private_path: RelativePathBuf,
     pub(crate) access_token_public_path: RelativePathBuf,
     #[serde(with = "humantime_serde")]
     pub(crate) access_token_expires_in: std::time::Duration,
+    #[serde(with = "humantime_serde")]
+    pub(crate) heartbeat_timeout: std::time::Duration,
 }
 
 #[derive(Args, Debug, Serialize, Default)]
@@ -64,7 +72,7 @@ pub struct CoordinatorConfigCli {
     /// The admin username
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-    pub admin_username: Option<String>,
+    pub admin_user: Option<String>,
     /// The admin password
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -81,6 +89,10 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub access_token_expires_in: Option<String>,
+    /// The heartheat timeout, default to 600 seconds
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub heartbeat_timeout: Option<String>,
 }
 
 impl Default for CoordinatorConfig {
@@ -91,17 +103,18 @@ impl Default for CoordinatorConfig {
             s3_url: "http://localhost:9000".to_string(),
             s3_access_key: "mitosis_access".to_string(),
             s3_secret_key: "mitosis_secret".to_string(),
-            admin_username: "mitosis_admin".to_string(),
+            admin_user: "mitosis_admin".to_string(),
             admin_password: "mitosis_admin".to_string(),
             access_token_private_path: "private.pem".to_string().into(),
             access_token_public_path: "public.pem".to_string().into(),
             access_token_expires_in: std::time::Duration::from_secs(60 * 60 * 24 * 7),
+            heartbeat_timeout: std::time::Duration::from_secs(600),
         }
     }
 }
 
 impl CoordinatorConfig {
-    pub fn new(cli: &mut CoordinatorConfigCli) -> crate::error::Result<Self> {
+    pub fn new(cli: &CoordinatorConfigCli) -> crate::error::Result<Self> {
         Ok(Figment::new()
             .merge(Serialized::from(Self::default(), "coordinator"))
             .merge(Toml::file(cli.config.as_deref().unwrap_or("config.toml")).nested())
@@ -111,7 +124,28 @@ impl CoordinatorConfig {
             .extract()?)
     }
 
-    pub async fn build_infra_pool(&self) -> crate::error::Result<InfraPool> {
+    pub fn build_worker_task_queue(
+        &self,
+        cancel_token: CancellationToken,
+        rx: UnboundedReceiver<WorkerTaskQueueOp>,
+    ) -> WorkerTaskQueue {
+        WorkerTaskQueue::new(cancel_token, rx)
+    }
+
+    pub fn build_worker_heartbeat_queue(
+        &self,
+        cancel_token: CancellationToken,
+        db: DatabaseConnection,
+        rx: UnboundedReceiver<WorkerHeartbeatQueueOp>,
+    ) -> WorkerHeartbeatQueue {
+        WorkerHeartbeatQueue::new(cancel_token, self.heartbeat_timeout, db, rx)
+    }
+
+    pub async fn build_infra_pool(
+        &self,
+        worker_task_queue_tx: UnboundedSender<WorkerTaskQueueOp>,
+        worker_heartbeat_queue_tx: UnboundedSender<WorkerHeartbeatQueueOp>,
+    ) -> crate::error::Result<InfraPool> {
         let db = sea_orm::Database::connect(&self.db_url).await?;
         let credential = Credentials::new(
             &self.s3_access_key,
@@ -127,23 +161,28 @@ impl CoordinatorConfig {
             .force_path_style(true)
             .build();
         let s3 = S3Client::from_conf(config);
-        Ok(InfraPool { db, s3 })
+        Ok(InfraPool {
+            db,
+            s3,
+            worker_task_queue_tx,
+            worker_heartbeat_queue_tx,
+        })
     }
 
-    pub async fn build_admin_user(&self) -> crate::error::Result<InitAdminUser> {
-        if self.admin_password.len() > 255 || self.admin_username.len() > 255 {
+    pub fn build_admin_user(&self) -> crate::error::Result<InitAdminUser> {
+        if self.admin_password.len() > 255 || self.admin_user.len() > 255 {
             Err(crate::error::Error::ConfigError(figment::Error::from(
                 "username or password too long",
             )))
         } else {
             Ok(InitAdminUser {
-                username: self.admin_username.clone(),
+                username: self.admin_user.clone(),
                 password: self.admin_password.clone(),
             })
         }
     }
 
-    pub async fn build_server_config(&self) -> crate::error::Result<ServerConfig> {
+    pub fn build_server_config(&self) -> crate::error::Result<ServerConfig> {
         Ok(ServerConfig {
             bind: self.bind,
             token_expires_in: Duration::try_from(self.access_token_expires_in)
@@ -166,6 +205,8 @@ impl CoordinatorConfig {
 pub struct InfraPool {
     pub db: DatabaseConnection,
     pub s3: S3Client,
+    pub worker_task_queue_tx: UnboundedSender<WorkerTaskQueueOp>,
+    pub worker_heartbeat_queue_tx: UnboundedSender<WorkerHeartbeatQueueOp>,
 }
 
 #[derive(Debug)]

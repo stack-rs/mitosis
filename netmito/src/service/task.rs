@@ -3,11 +3,13 @@ use sea_orm::sea_query::Query;
 use sea_orm::{prelude::*, FromQueryResult, Set};
 use uuid::Uuid;
 
+use crate::schema::{ArtifactQueryResp, TaskQueryResp};
 use crate::{config::InfraPool, schema::TaskSpec};
 
 use crate::{
     entity::{
-        active_tasks as ActiveTask, group_worker as GroupWorker, groups as Group, workers as Worker,
+        active_tasks as ActiveTask, archived_tasks as ArchivedTasks, artifacts as Artifact,
+        group_worker as GroupWorker, groups as Group, users as User, workers as Worker,
     },
     error::Error,
 };
@@ -90,6 +92,64 @@ pub async fn user_submit_task(
     } else {
         Ok((task.task_id, task.uuid))
     }
+}
+
+pub async fn get_task(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<TaskQueryResp> {
+    let task = match ActiveTask::Entity::find()
+        .filter(ActiveTask::Column::Uuid.eq(uuid))
+        .one(&pool.db)
+        .await?
+    {
+        Some(task) => Some(task.into()),
+        None => {
+            ArchivedTasks::Entity::find()
+                .filter(ArchivedTasks::Column::Uuid.eq(uuid))
+                .one(&pool.db)
+                .await?
+        }
+    }
+    .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
+        "Task with uuid {}",
+        uuid
+    ))))?;
+    let artifacts: Vec<ArtifactQueryResp> = Artifact::Entity::find()
+        .filter(Artifact::Column::TaskId.eq(uuid))
+        .all(&pool.db)
+        .await?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let creator_username = User::Entity::find_by_id(task.creator_id)
+        .one(&pool.db)
+        .await?
+        .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
+            "Task with uuid {}",
+            uuid
+        ))))?
+        .username;
+    let group_name = Group::Entity::find_by_id(task.group_id)
+        .one(&pool.db)
+        .await?
+        .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
+            "Task with uuid {}",
+            uuid
+        ))))?
+        .group_name;
+    Ok(TaskQueryResp {
+        uuid: task.uuid,
+        creator_username,
+        group_name,
+        task_id: task.task_id,
+        tags: task.tags,
+        created_at: task.created_at,
+        updated_at: task.updated_at,
+        state: task.state,
+        timeout: task.timeout,
+        priority: task.priority,
+        spec: serde_json::from_value(task.spec)?,
+        result: task.result.map(serde_json::from_value).transpose()?,
+        artifacts,
+    })
 }
 
 #[derive(Debug, Clone, FromQueryResult)]

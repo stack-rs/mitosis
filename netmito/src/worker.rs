@@ -393,6 +393,7 @@ async fn execute_task(
     let mut command = Command::new(task.spec.command.as_ref());
     command
         .args(task.spec.args)
+        .envs(task.spec.envs)
         .env("MITO_RESULT_DIR", cache_path.join("result"))
         .env("MITO_EXEC_EIR", cache_path.join("exec"))
         .stdin(std::process::Stdio::null());

@@ -2,14 +2,19 @@ use clap_repl::ClapEditor;
 use reqwest::Client;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use url::Url;
+use uuid::Uuid;
 
 use crate::{
     config::{
-        client::{ClientCommand, ClientInteractiveShell, CreateCommands, SubmitTaskArgs},
+        client::{
+            ClientCommand, ClientInteractiveShell, CreateCommands, GetCommands, SubmitTaskArgs,
+        },
         ClientConfig, ClientConfigCli,
     },
     error::{ErrorMsg, RequestError},
-    schema::{CreateGroupReq, CreateUserReq, SubmitTaskReq, SubmitTaskResp, TaskSpec},
+    schema::{
+        CreateGroupReq, CreateUserReq, SubmitTaskReq, SubmitTaskResp, TaskQueryResp, TaskSpec,
+    },
     service::auth::cred::get_user_credential,
 };
 
@@ -152,10 +157,47 @@ impl MitoClient {
                     }
                 }
             },
-            ClientCommand::Get => {
-                // TODO
-                tracing::error!("Get command is not supported yet");
-            }
+            ClientCommand::Get(args) => match args.command {
+                GetCommands::Task(args) => {
+                    let uuid = match Uuid::parse_str(&args.uuid) {
+                        Ok(uuid) => uuid,
+                        Err(e) => {
+                            tracing::error!("Fail to parse uuid: {}", e);
+                            return true;
+                        }
+                    };
+                    url.set_path(&format!("user/task/{}", uuid));
+                    match self
+                        .http_client
+                        .get(url.as_str())
+                        .bearer_auth(&self.credential)
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => {
+                            if resp.status().is_success() {
+                                match resp.json::<TaskQueryResp>().await {
+                                    Ok(resp) => {
+                                        tracing::info!("{:?}", resp);
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("{}", e);
+                                    }
+                                }
+                            } else {
+                                let resp: ErrorMsg = resp
+                                    .json()
+                                    .await
+                                    .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
+                                tracing::error!("{}", resp.msg);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    }
+                }
+            },
             ClientCommand::Submit(args) => {
                 url.set_path("user/task");
                 let req = self.gen_submit_task_req(args);
@@ -208,11 +250,7 @@ impl MitoClient {
             tags: args.tags.into_iter().collect(),
             timeout: args.timeout,
             priority: args.priority,
-            task_spec: TaskSpec {
-                command: args.shell,
-                args: args.spec,
-                terminal_output: args.terminal_output,
-            },
+            task_spec: TaskSpec::new(args.shell, args.spec, args.envs, args.terminal_output),
         }
     }
 }

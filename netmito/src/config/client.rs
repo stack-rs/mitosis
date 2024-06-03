@@ -65,7 +65,7 @@ pub enum ClientCommand {
     /// Create a new user or group
     Create(CreateArgs),
     /// Get the info of a user, group, worker or task (not implemented yet)
-    Get,
+    Get(GetArgs),
     /// Submit a task
     Submit(SubmitTaskArgs),
     /// Quit the client's interactive mode
@@ -78,12 +78,24 @@ pub struct CreateArgs {
     pub command: CreateCommands,
 }
 
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct GetArgs {
+    #[command(subcommand)]
+    pub command: GetCommands,
+}
+
 #[derive(Subcommand, Serialize, Debug, Deserialize)]
 pub enum CreateCommands {
     /// Create a new user
     User(CreateUserArgs),
     /// Create a new group
     Group(CreateGroupArgs),
+}
+
+#[derive(Subcommand, Serialize, Debug, Deserialize)]
+pub enum GetCommands {
+    /// Get the info of a task
+    Task(GetTaskArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -123,12 +135,37 @@ pub struct SubmitTaskArgs {
     /// The shell to use
     #[arg(short, long, value_enum, default_value_t=TaskCommand::Bash)]
     pub shell: TaskCommand,
+    /// The environment variables to set
+    #[arg(short, long, num_args = 0.., value_delimiter = ',', value_parser = parse_key_val::<String, String>)]
+    pub envs: Vec<(String, String)>,
     /// Whether to collect the terminal standard output and error of the executed task.
     #[arg(long = "terminal")]
     pub terminal_output: bool,
     /// The command to run
     #[arg(last = true)]
     pub spec: Vec<String>,
+}
+
+/// Parse a single key-value pair
+fn parse_key_val<T, U>(
+    s: &str,
+) -> Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
+where
+    T: std::str::FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
+    U: std::str::FromStr,
+    U::Err: std::error::Error + Send + Sync + 'static,
+{
+    let pos = s
+        .find('=')
+        .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
+    Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct GetTaskArgs {
+    /// The UUID of the task
+    pub uuid: String,
 }
 
 impl Default for ClientConfig {

@@ -1,12 +1,13 @@
 use std::net::SocketAddr;
 
 use axum::{
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, Path, State},
     http::StatusCode,
     middleware,
     routing::{get, post},
     Extension, Json, Router,
 };
+use uuid::Uuid;
 
 use crate::{
     config::InfraPool,
@@ -14,7 +15,7 @@ use crate::{
     schema::*,
     service::{
         auth::{user_auth_middleware, user_login, AuthUser},
-        task::user_submit_task,
+        task::{get_task, user_submit_task},
     },
 };
 
@@ -22,6 +23,7 @@ pub fn user_router(st: InfraPool) -> Router<InfraPool> {
     Router::new()
         .route("/auth", get(auth_user))
         .route("/task", post(submit_task))
+        .route("/task/:uuid", get(query_task))
         .layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -81,4 +83,20 @@ pub async fn submit_task(
         }
     })?;
     Ok(Json(SubmitTaskResp { task_id, uuid }))
+}
+
+pub async fn query_task(
+    Extension(_): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<TaskQueryResp>, ApiError> {
+    let task = get_task(&pool, uuid).await.map_err(|e| match e {
+        crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+        crate::error::Error::ApiError(e) => e,
+        _ => {
+            tracing::error!("{}", e);
+            ApiError::InternalServerError
+        }
+    })?;
+    Ok(Json(task))
 }

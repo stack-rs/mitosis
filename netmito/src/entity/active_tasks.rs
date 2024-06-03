@@ -58,3 +58,24 @@ impl Related<super::users::Entity> for Entity {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
+
+impl From<Model> for super::archived_tasks::Model {
+    fn from(task: Model) -> super::archived_tasks::Model {
+        Self {
+            id: task.id,
+            creator_id: task.creator_id,
+            group_id: task.group_id,
+            task_id: task.task_id,
+            uuid: task.uuid,
+            tags: task.tags,
+            created_at: task.created_at,
+            updated_at: task.updated_at,
+            state: task.state,
+            assigned_worker: task.assigned_worker,
+            timeout: task.timeout,
+            priority: task.priority,
+            spec: task.spec,
+            result: task.result,
+        }
+    }
+}

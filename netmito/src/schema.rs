@@ -1,9 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::entity::{content::ArtifactContentType, state::UserState};
+use crate::entity::{
+    content::ArtifactContentType,
+    state::{TaskState, UserState},
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateUserReq {
@@ -60,6 +64,8 @@ pub struct RegisterWorkerResp {
 pub struct TaskSpec {
     pub command: TaskCommand,
     pub args: Vec<String>,
+    #[serde(default)]
+    pub envs: HashMap<String, String>,
     #[serde(default)]
     pub terminal_output: bool,
 }
@@ -122,15 +128,43 @@ pub struct TaskResultSpec {
     pub exit_status: i32,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ArtifactQueryResp {
+    pub content_type: ArtifactContentType,
+    pub size: i64,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TaskQueryResp {
+    pub uuid: Uuid,
+    pub creator_username: String,
+    pub group_name: String,
+    pub task_id: i64,
+    pub tags: Vec<String>,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    pub state: TaskState,
+    pub timeout: i64,
+    pub priority: i32,
+    pub spec: TaskSpec,
+    pub result: Option<TaskResultSpec>,
+    pub artifacts: Vec<ArtifactQueryResp>,
+}
+
 impl TaskSpec {
-    pub fn new<T, I>(command: TaskCommand, args: I, terminal_output: bool) -> Self
+    pub fn new<T, I, P, Q>(command: TaskCommand, args: I, envs: P, terminal_output: bool) -> Self
     where
         I: IntoIterator<Item = T>,
         T: Into<String>,
+        P: IntoIterator<Item = Q>,
+        Q: Into<(String, String)>,
     {
         Self {
             command,
             args: args.into_iter().map(Into::into).collect(),
+            envs: envs.into_iter().map(Into::into).collect(),
             terminal_output,
         }
     }
@@ -142,6 +176,17 @@ impl AsRef<str> for TaskCommand {
             TaskCommand::Sh => "sh",
             TaskCommand::Bash => "bash",
             TaskCommand::Zsh => "zsh",
+        }
+    }
+}
+
+impl From<crate::entity::artifacts::Model> for ArtifactQueryResp {
+    fn from(model: crate::entity::artifacts::Model) -> Self {
+        Self {
+            content_type: model.content_type,
+            size: model.size,
+            created_at: model.created_at,
+            updated_at: model.updated_at,
         }
     }
 }

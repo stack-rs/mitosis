@@ -1,5 +1,8 @@
+use std::path::Path;
+
 use clap_repl::ClapEditor;
 use reqwest::Client;
+use tokio::{fs::File, io::AsyncWriteExt};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use url::Url;
 use uuid::Uuid;
@@ -13,7 +16,8 @@ use crate::{
     },
     error::{ErrorMsg, RequestError},
     schema::{
-        CreateGroupReq, CreateUserReq, SubmitTaskReq, SubmitTaskResp, TaskQueryResp, TaskSpec,
+        ArtifactDownloadResp, CreateGroupReq, CreateUserReq, SubmitTaskReq, SubmitTaskResp,
+        TaskQueryResp, TaskSpec,
     },
     service::auth::cred::get_user_credential,
 };
@@ -179,6 +183,147 @@ impl MitoClient {
                                 match resp.json::<TaskQueryResp>().await {
                                     Ok(resp) => {
                                         tracing::info!("{:?}", resp);
+                                        tracing::info!("Task UUID: {}", resp.uuid);
+                                        tracing::info!("State: {}", resp.state);
+                                        tracing::info!(
+                                            "Created by {} as the #{} task in Group {}",
+                                            resp.creator_username,
+                                            resp.task_id,
+                                            resp.group_name
+                                        );
+                                        tracing::info!("Tags: {:?}", resp.tags);
+                                        let timeout =
+                                            std::time::Duration::from_secs(resp.timeout as u64);
+                                        tracing::info!(
+                                            "Timeout {:?} and Priority {}",
+                                            timeout,
+                                            resp.priority
+                                        );
+                                        tracing::info!(
+                                            "Created at {} and Updated at {}",
+                                            resp.created_at,
+                                            resp.updated_at
+                                        );
+                                        tracing::info!("Task Spec: {:?}", resp.spec);
+                                        if let Some(result) = resp.result {
+                                            tracing::info!("Task Result: {:?}", result);
+                                        } else {
+                                            tracing::info!("Task Result: None");
+                                        }
+                                        if resp.artifacts.is_empty() {
+                                            tracing::info!("Artifacts: None");
+                                        } else {
+                                            for artifact in resp.artifacts {
+                                                tracing::info!(
+                                                    "Artifacts: {} of Size {}B, Created at {} and Updated at {}",
+                                                    artifact.content_type,
+                                                    artifact.size,
+                                                    artifact.created_at,
+                                                    artifact.updated_at
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("{}", e);
+                                    }
+                                }
+                            } else {
+                                let resp: ErrorMsg = resp
+                                    .json()
+                                    .await
+                                    .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
+                                tracing::error!("{}", resp.msg);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    }
+                }
+                GetCommands::Artifact(args) => {
+                    let file_path = args
+                        .output_path
+                        .and_then(|dir| {
+                            let dir = Path::new(&dir);
+                            if dir.is_dir() {
+                                let file_name = args.content_type.to_string();
+                                Some(dir.join(file_name))
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_else(|| {
+                            let file_name = args.content_type.to_string();
+                            Path::new("./").join(file_name)
+                        });
+                    let content_serde_str = match serde_json::to_string(&args.content_type) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                            return true;
+                        }
+                    };
+                    url.set_path(&format!(
+                        "user/artifacts/{}/{}",
+                        args.uuid, content_serde_str
+                    ));
+                    match self
+                        .http_client
+                        .get(url.as_str())
+                        .bearer_auth(&self.credential)
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => {
+                            if resp.status().is_success() {
+                                match resp.json::<ArtifactDownloadResp>().await {
+                                    Ok(resp) => {
+                                        match self.http_client.get(&resp.url).send().await {
+                                            Ok(mut resp) => {
+                                                if resp.status().is_success() {
+                                                    let mut file =
+                                                        match File::create(&file_path).await {
+                                                            Ok(file) => file,
+                                                            Err(e) => {
+                                                                tracing::error!("{}", e);
+                                                                return true;
+                                                            }
+                                                        };
+                                                    let hd = async {
+                                                        while let Some(chunk) =
+                                                            resp.chunk().await.map_err(|e| {
+                                                                RequestError::Custom(e)
+                                                            })?
+                                                        {
+                                                            file.write_all(&chunk).await?;
+                                                        }
+                                                        crate::error::Result::Ok(())
+                                                    };
+                                                    match hd.await {
+                                                        Ok(_) => {
+                                                            tracing::info!(
+                                                                "Artifact {} downloaded to {}",
+                                                                content_serde_str,
+                                                                file_path.display()
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::error!("{}", e);
+                                                        }
+                                                    }
+                                                } else {
+                                                    let resp: ErrorMsg =
+                                                        resp.json().await.unwrap_or_else(|e| {
+                                                            ErrorMsg { msg: e.to_string() }
+                                                        });
+                                                    tracing::error!("{}", resp.msg);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("{}", e);
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         tracing::error!("{}", e);

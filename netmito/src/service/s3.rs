@@ -1,8 +1,12 @@
 use std::time::Duration;
 
 use aws_sdk_s3::{error::SdkError, presigning::PresigningConfig, Client};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use uuid::Uuid;
 
-use crate::error::S3Error;
+use crate::entity::{artifacts as Artifact, content::ArtifactContentType};
+use crate::schema::ArtifactDownloadResp;
+use crate::{config::InfraPool, error::S3Error};
 
 pub async fn create_bucket(client: &Client, bucket_name: &str) -> Result<(), S3Error> {
     match client.create_bucket().bucket(bucket_name).send().await {
@@ -56,4 +60,27 @@ pub async fn get_presigned_download_link<T: Into<String>>(
         .presigned(PresigningConfig::expires_in(expires)?)
         .await?;
     Ok(resp.uri().to_string())
+}
+
+pub async fn get_artifact(
+    pool: &InfraPool,
+    uuid: Uuid,
+    content_type: ArtifactContentType,
+) -> Result<ArtifactDownloadResp, crate::error::Error> {
+    let artifact = Artifact::Entity::find()
+        .filter(Artifact::Column::TaskId.eq(uuid))
+        .filter(Artifact::Column::ContentType.eq(content_type))
+        .one(&pool.db)
+        .await?
+        .ok_or(crate::error::ApiError::NotFound(format!(
+            "Artifact with uuid {} and content type {}",
+            uuid, content_type
+        )))?;
+    let key = format!("{}/{}", uuid, content_type);
+    let url =
+        get_presigned_download_link(&pool.s3, "mitosis-artifacts", key, artifact.size).await?;
+    Ok(ArtifactDownloadResp {
+        url,
+        size: artifact.size,
+    })
 }

@@ -7,7 +7,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::schema::TaskCommand;
+use crate::{entity::content::ArtifactContentType, schema::TaskCommand};
 
 use super::coordinator::DEFAULT_COORDINATOR_ADDR;
 
@@ -96,6 +96,8 @@ pub enum CreateCommands {
 pub enum GetCommands {
     /// Get the info of a task
     Task(GetTaskArgs),
+    /// Download an artifact of a task
+    Artifact(GetArtifactArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -166,6 +168,18 @@ where
 pub struct GetTaskArgs {
     /// The UUID of the task
     pub uuid: String,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct GetArtifactArgs {
+    /// The UUID of the artifact
+    pub uuid: String,
+    /// The content type of the artifact
+    #[arg(value_enum)]
+    pub content_type: ArtifactContentType,
+    /// Specify the directory to download the artifact
+    #[arg(short, long = "output")]
+    pub output_path: Option<String>,
 }
 
 impl Default for ClientConfig {

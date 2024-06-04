@@ -153,6 +153,12 @@ pub struct TaskQueryResp {
     pub artifacts: Vec<ArtifactQueryResp>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ArtifactDownloadResp {
+    pub url: String,
+    pub size: i64,
+}
+
 impl TaskSpec {
     pub fn new<T, I, P, Q>(command: TaskCommand, args: I, envs: P, terminal_output: bool) -> Self
     where

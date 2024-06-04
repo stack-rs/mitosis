@@ -11,10 +11,12 @@ use uuid::Uuid;
 
 use crate::{
     config::InfraPool,
+    entity::content::ArtifactContentType,
     error::ApiError,
     schema::*,
     service::{
         auth::{user_auth_middleware, user_login, AuthUser},
+        s3::get_artifact,
         task::{get_task, user_submit_task},
     },
 };
@@ -24,6 +26,7 @@ pub fn user_router(st: InfraPool) -> Router<InfraPool> {
         .route("/auth", get(auth_user))
         .route("/task", post(submit_task))
         .route("/task/:uuid", get(query_task))
+        .route("/artifacts/:uuid/:content_type", get(download_artifact))
         .layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -99,4 +102,22 @@ pub async fn query_task(
         }
     })?;
     Ok(Json(task))
+}
+
+pub async fn download_artifact(
+    Extension(_): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path((uuid, content_type)): Path<(Uuid, ArtifactContentType)>,
+) -> Result<Json<ArtifactDownloadResp>, ApiError> {
+    let artifact = get_artifact(&pool, uuid, content_type)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(artifact))
 }

@@ -1,5 +1,6 @@
 use core::fmt;
 
+use clap::ValueEnum;
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -11,8 +12,11 @@ pub enum AttachmentContentType {
 }
 
 /// The type of content stored as an artifact.
-#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
+#[derive(
+    EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy, ValueEnum,
+)]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
+#[serde(rename_all = "kebab-case")]
 pub enum ArtifactContentType {
     /// The artifact is a file containing the task's output.
     Result = 0,

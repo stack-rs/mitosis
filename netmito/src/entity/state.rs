@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +33,19 @@ pub enum TaskState {
     /// Task is canceled by the worker due to timeout
     Cancelled = 4,
     Unknown = 5,
+}
+
+impl Display for TaskState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TaskState::Pending => write!(f, "Pending"),
+            TaskState::Ready => write!(f, "Ready"),
+            TaskState::Running => write!(f, "Running"),
+            TaskState::Finished => write!(f, "Finished"),
+            TaskState::Cancelled => write!(f, "Cancelled"),
+            TaskState::Unknown => write!(f, "Unknown"),
+        }
+    }
 }
 
 #[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq)]

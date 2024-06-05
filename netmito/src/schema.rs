@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -157,6 +160,12 @@ pub struct TaskQueryResp {
 pub struct ArtifactDownloadResp {
     pub url: String,
     pub size: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ArtifactDownloadInfo {
+    pub size: i64,
+    pub file_path: PathBuf,
 }
 
 impl TaskSpec {

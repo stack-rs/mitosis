@@ -206,3 +206,101 @@ impl ClientConfig {
             .extract()?)
     }
 }
+
+impl From<CreateArgs> for ClientCommand {
+    fn from(args: CreateArgs) -> Self {
+        Self::Create(args)
+    }
+}
+
+impl From<GetArgs> for ClientCommand {
+    fn from(args: GetArgs) -> Self {
+        Self::Get(args)
+    }
+}
+
+impl From<SubmitTaskArgs> for ClientCommand {
+    fn from(args: SubmitTaskArgs) -> Self {
+        Self::Submit(args)
+    }
+}
+
+impl From<CreateUserArgs> for CreateCommands {
+    fn from(args: CreateUserArgs) -> Self {
+        Self::User(args)
+    }
+}
+
+impl From<CreateUserArgs> for CreateArgs {
+    fn from(args: CreateUserArgs) -> Self {
+        Self {
+            command: CreateCommands::User(args),
+        }
+    }
+}
+
+impl From<CreateUserArgs> for ClientCommand {
+    fn from(args: CreateUserArgs) -> Self {
+        Self::Create(args.into())
+    }
+}
+
+impl From<CreateGroupArgs> for CreateCommands {
+    fn from(args: CreateGroupArgs) -> Self {
+        Self::Group(args)
+    }
+}
+
+impl From<CreateGroupArgs> for CreateArgs {
+    fn from(args: CreateGroupArgs) -> Self {
+        Self {
+            command: CreateCommands::Group(args),
+        }
+    }
+}
+
+impl From<CreateGroupArgs> for ClientCommand {
+    fn from(args: CreateGroupArgs) -> Self {
+        Self::Create(args.into())
+    }
+}
+
+impl From<GetTaskArgs> for GetCommands {
+    fn from(args: GetTaskArgs) -> Self {
+        Self::Task(args)
+    }
+}
+
+impl From<GetTaskArgs> for GetArgs {
+    fn from(args: GetTaskArgs) -> Self {
+        Self {
+            command: GetCommands::Task(args),
+        }
+    }
+}
+
+impl From<GetTaskArgs> for ClientCommand {
+    fn from(args: GetTaskArgs) -> Self {
+        Self::Get(args.into())
+    }
+}
+
+impl From<GetArtifactArgs> for GetCommands {
+    fn from(args: GetArtifactArgs) -> Self {
+        Self::Artifact(args)
+    }
+}
+
+impl From<GetArtifactArgs> for GetArgs {
+    fn from(args: GetArtifactArgs) -> Self {
+        Self {
+            command: GetCommands::Artifact(args),
+        }
+    }
+}
+
+impl From<GetArtifactArgs> for ClientCommand {
+    fn from(args: GetArtifactArgs) -> Self {
+        Self::Get(args.into())
+    }
+}

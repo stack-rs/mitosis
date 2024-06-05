@@ -45,6 +45,8 @@ pub enum Error {
     NixError(#[from] nix::Error),
     #[error("Serde error: {0}")]
     SerdeError(#[from] serde_json::Error),
+    #[error("Parse uuid error: {0}")]
+    ParseUuidError(#[from] uuid::Error),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -86,7 +88,15 @@ pub enum RequestError {
     #[error("Fail to connect to {0}")]
     ConnectionError(String),
     #[error(transparent)]
+    ClientError(#[from] ClientError),
+    #[error(transparent)]
     Custom(#[from] reqwest::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum ClientError {
+    #[error("{}, {}", .0, .1)]
+    Inner(StatusCode, ErrorMsg),
 }
 
 pub type ApiResult<T> = std::result::Result<T, ApiError>;
@@ -110,6 +120,12 @@ pub enum ApiError {
 #[derive(Serialize, Debug, Deserialize)]
 pub struct ErrorMsg {
     pub msg: String,
+}
+
+impl std::fmt::Display for ErrorMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.msg)
+    }
 }
 
 impl From<TransactionError<Error>> for Error {

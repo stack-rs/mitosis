@@ -18,9 +18,7 @@ use time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
-use crate::service::worker::{
-    WorkerHeartbeatQueue, WorkerHeartbeatQueueOp, WorkerTaskQueue, WorkerTaskQueueOp,
-};
+use crate::service::worker::{HeartbeatOp, HeartbeatQueue, TaskDispatcher, TaskDispatcherOp};
 
 pub const DEFAULT_COORDINATOR_ADDR: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5000);
@@ -139,24 +137,24 @@ impl CoordinatorConfig {
     pub fn build_worker_task_queue(
         &self,
         cancel_token: CancellationToken,
-        rx: UnboundedReceiver<WorkerTaskQueueOp>,
-    ) -> WorkerTaskQueue {
-        WorkerTaskQueue::new(cancel_token, rx)
+        rx: UnboundedReceiver<TaskDispatcherOp>,
+    ) -> TaskDispatcher {
+        TaskDispatcher::new(cancel_token, rx)
     }
 
     pub fn build_worker_heartbeat_queue(
         &self,
         cancel_token: CancellationToken,
         db: DatabaseConnection,
-        rx: UnboundedReceiver<WorkerHeartbeatQueueOp>,
-    ) -> WorkerHeartbeatQueue {
-        WorkerHeartbeatQueue::new(cancel_token, self.heartbeat_timeout, db, rx)
+        rx: UnboundedReceiver<HeartbeatOp>,
+    ) -> HeartbeatQueue {
+        HeartbeatQueue::new(cancel_token, self.heartbeat_timeout, db, rx)
     }
 
     pub async fn build_infra_pool(
         &self,
-        worker_task_queue_tx: UnboundedSender<WorkerTaskQueueOp>,
-        worker_heartbeat_queue_tx: UnboundedSender<WorkerHeartbeatQueueOp>,
+        worker_task_queue_tx: UnboundedSender<TaskDispatcherOp>,
+        worker_heartbeat_queue_tx: UnboundedSender<HeartbeatOp>,
     ) -> crate::error::Result<InfraPool> {
         let db = sea_orm::Database::connect(&self.db_url).await?;
         let credential = Credentials::new(
@@ -217,8 +215,8 @@ impl CoordinatorConfig {
 pub struct InfraPool {
     pub db: DatabaseConnection,
     pub s3: S3Client,
-    pub worker_task_queue_tx: UnboundedSender<WorkerTaskQueueOp>,
-    pub worker_heartbeat_queue_tx: UnboundedSender<WorkerHeartbeatQueueOp>,
+    pub worker_task_queue_tx: UnboundedSender<TaskDispatcherOp>,
+    pub worker_heartbeat_queue_tx: UnboundedSender<HeartbeatOp>,
 }
 
 #[derive(Debug)]

@@ -1,16 +1,14 @@
-use std::{cmp::Reverse, collections::HashMap, time::Duration};
+pub mod heartbeat;
+pub mod queue;
 
-use priority_queue::PriorityQueue;
+pub use heartbeat::{HeartbeatOp, HeartbeatQueue};
+pub use queue::{TaskDispatcher, TaskDispatcherOp};
+
 use sea_orm::{
     prelude::*,
     sea_query::{extension::postgres::PgExpr, OnConflict, Query},
     FromQueryResult, QuerySelect, Set, TransactionTrait,
 };
-use tokio::{
-    sync::{mpsc::UnboundedReceiver, oneshot::Sender},
-    time::Instant,
-};
-use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::InfraPool,
@@ -121,11 +119,11 @@ async fn setup_worker_queues(
 ) -> crate::error::Result<()> {
     if pool
         .worker_heartbeat_queue_tx
-        .send(WorkerHeartbeatQueueOp::Heartbeat(id))
+        .send(HeartbeatOp::Heartbeat(id))
         .is_err()
         || pool
             .worker_task_queue_tx
-            .send(WorkerTaskQueueOp::RegisterWorker(id))
+            .send(TaskDispatcherOp::RegisterWorker(id))
             .is_err()
     {
         Err(Error::Custom("send register worker failed".to_string()))
@@ -160,7 +158,7 @@ async fn setup_worker_queues(
             PartialActiveTask::find_by_statement(builder.build(&tasks_stmt))
                 .all(&pool.db)
                 .await?;
-        let op = WorkerTaskQueueOp::AddTasks(id, tasks.into_iter().map(Into::into).collect());
+        let op = TaskDispatcherOp::AddTasks(id, tasks.into_iter().map(Into::into).collect());
         if pool.worker_task_queue_tx.send(op).is_err() {
             Err(Error::Custom("send add tasks failed".to_string()))
         } else {
@@ -225,7 +223,7 @@ pub async fn unregister_worker(worker_id: i64, pool: &InfraPool) -> crate::error
             super::task::PartialWorkerId::find_by_statement(builder.build(&tasks_stmt))
                 .all(&pool.db)
                 .await?;
-        let op = WorkerTaskQueueOp::BatchAddTask(
+        let op = TaskDispatcherOp::BatchAddTask(
             workers.into_iter().map(i64::from).collect(),
             task.id,
             task.priority,
@@ -243,11 +241,11 @@ pub async fn unregister_worker(worker_id: i64, pool: &InfraPool) -> crate::error
         .await?;
     if pool
         .worker_task_queue_tx
-        .send(WorkerTaskQueueOp::UnregisterWorker(worker_id))
+        .send(TaskDispatcherOp::UnregisterWorker(worker_id))
         .is_err()
         || pool
             .worker_heartbeat_queue_tx
-            .send(WorkerHeartbeatQueueOp::UnregisterWorker(worker_id))
+            .send(HeartbeatOp::UnregisterWorker(worker_id))
             .is_err()
     {
         Err(Error::Custom("send unregister worker failed".to_string()))
@@ -283,7 +281,7 @@ pub async fn heartbeat(worker_id: i64, pool: &InfraPool) -> crate::error::Result
     let _worker = worker.update(&pool.db).await?;
     if pool
         .worker_heartbeat_queue_tx
-        .send(WorkerHeartbeatQueueOp::Heartbeat(worker_id))
+        .send(HeartbeatOp::Heartbeat(worker_id))
         .is_err()
     {
         Err(Error::Custom("send worker heartbeat failed".to_string()))
@@ -295,7 +293,7 @@ pub async fn heartbeat(worker_id: i64, pool: &InfraPool) -> crate::error::Result
 pub fn remove_task(task_id: i64, pool: &InfraPool) -> crate::error::Result<()> {
     if pool
         .worker_task_queue_tx
-        .send(WorkerTaskQueueOp::RemoveTask(task_id))
+        .send(TaskDispatcherOp::RemoveTask(task_id))
         .is_err()
     {
         Err(Error::Custom("send remove task failed".to_string()))
@@ -312,7 +310,7 @@ pub async fn fetch_task(
         let (tx, rx) = tokio::sync::oneshot::channel();
         if pool
             .worker_task_queue_tx
-            .send(WorkerTaskQueueOp::FetchTask(worker_id, tx))
+            .send(TaskDispatcherOp::FetchTask(worker_id, tx))
             .is_err()
         {
             break Err(Error::Custom("send fetch task failed".to_string()));
@@ -535,257 +533,4 @@ pub async fn report_task(
         }
     }
     Ok(None)
-}
-
-// MARK: WorkerTaskQueue
-#[derive(Debug)]
-pub struct WorkerTaskQueue {
-    /// Map from worker id to priority queue of tasks.
-    /// Every task is represented by a tuple of (task id, priority).
-    pub workers: HashMap<i64, PriorityQueue<i64, i32>>,
-    cancel_token: CancellationToken,
-    rx: UnboundedReceiver<WorkerTaskQueueOp>,
-}
-
-pub enum WorkerTaskQueueOp {
-    RegisterWorker(i64),
-    UnregisterWorker(i64),
-    /// Add a task to a worker. The first i64 is the worker_id, the second i64 is the task_id, and the i32 is the priority.
-    AddTask(i64, i64, i32),
-    AddTasks(i64, Vec<(i64, i32)>),
-    BatchAddTask(Vec<i64>, i64, i32),
-    BatchAddTasks(Vec<i64>, Vec<(i64, i32)>),
-    RemoveTask(i64),
-    FetchTask(i64, Sender<Option<i64>>),
-}
-
-impl WorkerTaskQueue {
-    pub fn new(cancel_token: CancellationToken, rx: UnboundedReceiver<WorkerTaskQueueOp>) -> Self {
-        Self {
-            workers: HashMap::new(),
-            cancel_token,
-            rx,
-        }
-    }
-
-    fn register_worker(&mut self, worker_id: i64) {
-        tracing::debug!("worker {} registered", worker_id);
-        self.workers.entry(worker_id).or_default();
-    }
-
-    fn unregister_worker(&mut self, worker_id: i64) {
-        tracing::debug!("worker {} unregistered", worker_id);
-        self.workers.remove(&worker_id);
-    }
-
-    fn add_task(&mut self, worker_id: i64, task_id: i64, priority: i32) {
-        tracing::debug!("Add task {} to worker {}", task_id, worker_id);
-        if let Some(worker) = self.workers.get_mut(&worker_id) {
-            worker.push(task_id, priority);
-        }
-    }
-
-    fn add_tasks(&mut self, worker_id: i64, tasks: Vec<(i64, i32)>) {
-        tracing::debug!("Add {} tasks to worker {}", tasks.len(), worker_id);
-        if let Some(worker) = self.workers.get_mut(&worker_id) {
-            tasks.into_iter().for_each(|(task_id, priority)| {
-                worker.push(task_id, priority);
-            });
-        }
-    }
-
-    fn batch_add_task(&mut self, worker_ids: Vec<i64>, task_id: i64, priority: i32) {
-        tracing::debug!("Batch add task {} to {} workers", task_id, worker_ids.len());
-        worker_ids.into_iter().for_each(|worker_id| {
-            self.add_task(worker_id, task_id, priority);
-        });
-    }
-
-    fn batch_add_tasks(&mut self, worker_ids: Vec<i64>, tasks: Vec<(i64, i32)>) {
-        tracing::debug!(
-            "Batch add {} tasks to {} workers",
-            tasks.len(),
-            worker_ids.len()
-        );
-        for worker_id in worker_ids {
-            self.add_tasks(worker_id, tasks.clone());
-        }
-    }
-
-    fn remove_task(&mut self, task_id: i64) {
-        tracing::debug!("Remove task {}", task_id);
-        self.workers.iter_mut().for_each(|(_, worker)| {
-            worker.remove(&task_id);
-        });
-    }
-
-    fn fetch_task(&mut self, worker_id: i64) -> Option<i64> {
-        tracing::debug!("Fetch task from worker {}", worker_id);
-        if let Some(worker) = self.workers.get_mut(&worker_id) {
-            worker.pop().map(|(task_id, _)| task_id)
-        } else {
-            None
-        }
-    }
-
-    fn handle_op(&mut self, op: Option<WorkerTaskQueueOp>) -> bool {
-        match op {
-            None => {
-                return true;
-            }
-            Some(op) => match op {
-                WorkerTaskQueueOp::RegisterWorker(worker_id) => {
-                    self.register_worker(worker_id);
-                }
-                WorkerTaskQueueOp::UnregisterWorker(worker_id) => {
-                    self.unregister_worker(worker_id);
-                }
-                WorkerTaskQueueOp::AddTask(worker_id, task_id, priority) => {
-                    self.add_task(worker_id, task_id, priority);
-                }
-                WorkerTaskQueueOp::AddTasks(worker_id, tasks) => {
-                    self.add_tasks(worker_id, tasks);
-                }
-                WorkerTaskQueueOp::BatchAddTask(worker_ids, task_id, priority) => {
-                    self.batch_add_task(worker_ids, task_id, priority);
-                }
-                WorkerTaskQueueOp::BatchAddTasks(worker_ids, tasks) => {
-                    self.batch_add_tasks(worker_ids, tasks);
-                }
-                WorkerTaskQueueOp::RemoveTask(task_id) => {
-                    self.remove_task(task_id);
-                }
-                WorkerTaskQueueOp::FetchTask(worker_id, tx) => {
-                    let task_id = self.fetch_task(worker_id);
-                    if let Err(e) = tx.send(task_id) {
-                        if !self.cancel_token.is_cancelled() {
-                            tracing::error!("send task id failed: {:?}", e);
-                        }
-                        return true;
-                    }
-                }
-            },
-        }
-        false
-    }
-
-    pub async fn run(&mut self) {
-        loop {
-            tokio::select! {
-                biased;
-                _ = self.cancel_token.cancelled() => {
-                    break;
-                }
-                op = self.rx.recv() => if self.handle_op(op) {
-                    self.cancel_token.cancel();
-                    break;
-                }
-            }
-        }
-    }
-}
-
-// MARK: WorkerHeartbeatQueue
-#[derive(Debug)]
-pub struct WorkerHeartbeatQueue {
-    pub workers: PriorityQueue<i64, Reverse<Instant>>,
-    cancel_token: CancellationToken,
-    heartbeat_timeout: Duration,
-    db: DatabaseConnection,
-    rx: UnboundedReceiver<WorkerHeartbeatQueueOp>,
-}
-
-pub enum WorkerHeartbeatQueueOp {
-    UnregisterWorker(i64),
-    Heartbeat(i64),
-}
-
-impl WorkerHeartbeatQueue {
-    pub fn new(
-        cancel_token: CancellationToken,
-        heartbeat_timeout: Duration,
-        db: DatabaseConnection,
-        rx: UnboundedReceiver<WorkerHeartbeatQueueOp>,
-    ) -> Self {
-        Self {
-            workers: PriorityQueue::new(),
-            cancel_token,
-            heartbeat_timeout,
-            db,
-            rx,
-        }
-    }
-
-    fn unregister_worker(&mut self, worker_id: i64) {
-        tracing::debug!("worker {} unregistered", worker_id);
-        self.workers.remove(&worker_id);
-    }
-
-    fn heartbeat(&mut self, worker_id: i64) {
-        tracing::debug!("worker {} heartbeat", worker_id);
-        self.workers
-            .push(worker_id, Reverse(Instant::now() + self.heartbeat_timeout));
-    }
-
-    fn handle_op(&mut self, op: WorkerHeartbeatQueueOp) {
-        match op {
-            WorkerHeartbeatQueueOp::UnregisterWorker(worker_id) => {
-                self.unregister_worker(worker_id);
-            }
-            WorkerHeartbeatQueueOp::Heartbeat(worker_id) => {
-                self.heartbeat(worker_id);
-            }
-        }
-    }
-
-    async fn handle_timeout(&mut self) -> Result<(), DbErr> {
-        if let Some(true) = self.workers.peek().map(|(_, r)| r.0 <= Instant::now()) {
-            let (worker_id, _) = self.workers.pop().unwrap();
-            GroupWorker::Entity::delete_many()
-                .filter(GroupWorker::Column::WorkerId.eq(worker_id))
-                .exec(&self.db)
-                .await?;
-            Worker::Entity::delete_by_id(worker_id)
-                .exec(&self.db)
-                .await?;
-        }
-        Ok(())
-    }
-
-    pub async fn run(&mut self) {
-        let mut timeout_duration = self.heartbeat_timeout;
-        loop {
-            tokio::select! {
-                biased;
-                _ = self.cancel_token.cancelled() => {
-                    break;
-                }
-                op = self.rx.recv() => match op {
-                    None => {
-                        break;
-                    }
-                    Some(op) => {
-                        self.handle_op(op);
-                        timeout_duration = self
-                            .workers
-                            .peek()
-                            .map(|(_, r)| r.0 - Instant::now())
-                            .unwrap_or(self.heartbeat_timeout);
-                    }
-                },
-                _ = tokio::time::sleep(timeout_duration) => {
-                    if let Err(e) = self.handle_timeout().await {
-                        tracing::error!("handle timeout failed: {:?}", e);
-                        self.cancel_token.cancel();
-                        break;
-                    }
-                    timeout_duration = self
-                            .workers
-                            .peek()
-                            .map(|(_, r)| r.0 - Instant::now())
-                            .unwrap_or(self.heartbeat_timeout);
-                }
-            }
-        }
-    }
 }

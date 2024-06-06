@@ -45,7 +45,7 @@ pub fn router(st: InfraPool) -> Router {
             )
             .route(
                 "/worker",
-                post(worker::register_worker).layer(middleware::from_fn_with_state(
+                post(worker::register).layer(middleware::from_fn_with_state(
                     st.clone(),
                     user_auth_middleware,
                 )),
@@ -72,7 +72,7 @@ pub fn router(st: InfraPool) -> Router {
             )
             .route(
                 "/worker",
-                post(worker::register_worker).layer(middleware::from_fn_with_state(
+                post(worker::register).layer(middleware::from_fn_with_state(
                     st.clone(),
                     user_auth_middleware,
                 )),

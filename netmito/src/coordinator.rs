@@ -9,13 +9,13 @@ use crate::api::router;
 use crate::config::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 use crate::migration::{Migrator, MigratorTrait};
 use crate::service::s3::create_bucket;
-use crate::service::worker::{restore_workers, WorkerHeartbeatQueue, WorkerTaskQueue};
+use crate::service::worker::{restore_workers, HeartbeatQueue, TaskDispatcher};
 use crate::signal::shutdown_signal;
 
 pub struct MitoCoordinator {
     pub infra_pool: InfraPool,
-    pub worker_task_queue: WorkerTaskQueue,
-    pub worker_heartbeat_queue: WorkerHeartbeatQueue,
+    pub worker_task_queue: TaskDispatcher,
+    pub worker_heartbeat_queue: HeartbeatQueue,
     pub cancel_token: CancellationToken,
     pub log_dir: PathBuf,
 }

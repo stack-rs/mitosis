@@ -14,7 +14,7 @@ use crate::{
     error::Error,
 };
 
-use super::worker::WorkerTaskQueueOp;
+use super::worker::TaskDispatcherOp;
 
 pub async fn user_submit_task(
     pool: &InfraPool,
@@ -82,7 +82,7 @@ pub async fn user_submit_task(
         PartialWorkerId::find_by_statement(builder.build(&tasks_stmt))
             .all(&pool.db)
             .await?;
-    let op = WorkerTaskQueueOp::BatchAddTask(
+    let op = TaskDispatcherOp::BatchAddTask(
         workers.into_iter().map(i64::from).collect(),
         task.id,
         task.priority,

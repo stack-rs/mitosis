@@ -17,9 +17,9 @@ use crate::{
 
 pub fn worker_router(st: InfraPool) -> Router<InfraPool> {
     Router::new()
-        .route("/", delete(unregister_worker))
+        .route("/", delete(unregister))
         .route("/heartbeat", post(heartbeat))
-        .route("/task", post(worker_report_task).get(worker_fetch_task))
+        .route("/task", post(report_task).get(fetch_task))
         .layer(middleware::from_fn_with_state(
             st.clone(),
             worker_auth_middleware,
@@ -27,7 +27,7 @@ pub fn worker_router(st: InfraPool) -> Router<InfraPool> {
         .with_state(st)
 }
 
-pub async fn register_worker(
+pub async fn register(
     Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
     Json(req): Json<RegisterWorkerReq>,
@@ -60,7 +60,7 @@ pub async fn register_worker(
     }))
 }
 
-pub async fn unregister_worker(
+pub async fn unregister(
     Extension(w): Extension<AuthWorker>,
     State(pool): State<InfraPool>,
 ) -> ApiResult<Json<()>> {
@@ -88,7 +88,7 @@ pub async fn heartbeat(
     }
 }
 
-pub async fn worker_fetch_task(
+pub async fn fetch_task(
     Extension(w): Extension<AuthWorker>,
     State(pool): State<InfraPool>,
 ) -> ApiResult<Json<Option<WorkerTaskResp>>> {
@@ -102,7 +102,7 @@ pub async fn worker_fetch_task(
     }
 }
 
-pub async fn worker_report_task(
+pub async fn report_task(
     Extension(w): Extension<AuthWorker>,
     State(pool): State<InfraPool>,
     Json(ReportTaskReq { id, op }): Json<ReportTaskReq>,

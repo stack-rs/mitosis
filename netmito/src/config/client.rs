@@ -7,7 +7,10 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::{entity::content::ArtifactContentType, schema::TaskCommand};
+use crate::{
+    entity::content::ArtifactContentType,
+    schema::{RemoteResourceDownload, TaskCommand},
+};
 
 use super::coordinator::DEFAULT_COORDINATOR_ADDR;
 
@@ -146,6 +149,8 @@ pub struct SubmitTaskArgs {
     /// The command to run
     #[arg(last = true)]
     pub spec: Vec<String>,
+    #[arg(skip)]
+    pub resources: Vec<RemoteResourceDownload>,
 }
 
 /// Parse a single key-value pair

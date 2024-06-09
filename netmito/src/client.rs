@@ -2,7 +2,6 @@ use std::path::Path;
 
 use clap_repl::ClapEditor;
 use reqwest::Client;
-use tokio::{fs::File, io::AsyncWriteExt};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use url::Url;
 use uuid::Uuid;
@@ -15,12 +14,12 @@ use crate::{
         },
         ClientConfig, ClientConfigCli,
     },
-    error::{ClientError, ErrorMsg, RequestError},
+    error::{get_error_from_resp, map_reqwest_err, RequestError},
     schema::{
-        ArtifactDownloadInfo, ArtifactDownloadResp, CreateGroupReq, CreateUserReq, SubmitTaskReq,
-        SubmitTaskResp, TaskQueryResp, TaskSpec,
+        CreateGroupReq, CreateUserReq, RemoteResourceDownloadResp, ResourceDownloadInfo,
+        SubmitTaskReq, SubmitTaskResp, TaskQueryResp, TaskSpec,
     },
-    service::auth::cred::get_user_credential,
+    service::{auth::cred::get_user_credential, s3::download_file},
 };
 
 pub struct MitoClient {
@@ -159,7 +158,7 @@ impl MitoClient {
     pub async fn get_artifact(
         &mut self,
         args: GetArtifactArgs,
-    ) -> crate::error::Result<ArtifactDownloadInfo> {
+    ) -> crate::error::Result<ResourceDownloadInfo> {
         let content_serde_val = serde_json::to_value(args.content_type)?;
         let content_serde_str = content_serde_val.as_str().unwrap_or("result");
         self.url.set_path(&format!(
@@ -175,46 +174,29 @@ impl MitoClient {
             .map_err(map_reqwest_err)?;
         if resp.status().is_success() {
             let download_resp = resp
-                .json::<ArtifactDownloadResp>()
+                .json::<RemoteResourceDownloadResp>()
                 .await
                 .map_err(RequestError::from)?;
-
-            let mut resp = self
-                .http_client
-                .get(&download_resp.url)
-                .send()
-                .await
-                .map_err(map_reqwest_err)?;
-            if resp.status().is_success() {
-                let file_path = args
-                    .output_path
-                    .and_then(|dir| {
-                        let dir = Path::new(&dir);
-                        if dir.is_dir() {
-                            let file_name = args.content_type.to_string();
-                            Some(dir.join(file_name))
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(|| {
+            let local_path = args
+                .output_path
+                .and_then(|dir| {
+                    let dir = Path::new(&dir);
+                    if dir.is_dir() {
                         let file_name = args.content_type.to_string();
-                        Path::new("./").join(file_name)
-                    });
-                if let Some(parent_dir) = file_path.parent() {
-                    tokio::fs::create_dir_all(parent_dir).await?;
-                }
-                let mut file = File::create(&file_path).await?;
-                while let Some(chunk) = resp.chunk().await.map_err(RequestError::from)? {
-                    file.write_all(&chunk).await?;
-                }
-                Ok(ArtifactDownloadInfo {
-                    size: download_resp.size,
-                    file_path,
+                        Some(dir.join(file_name))
+                    } else {
+                        None
+                    }
                 })
-            } else {
-                Err(get_error_from_resp(resp).await.into())
-            }
+                .unwrap_or_else(|| {
+                    let file_name = args.content_type.to_string();
+                    Path::new("./").join(file_name)
+                });
+            download_file(&self.http_client, &download_resp, &local_path).await?;
+            Ok(ResourceDownloadInfo {
+                size: download_resp.size,
+                local_path,
+            })
         } else {
             Err(get_error_from_resp(resp).await.into())
         }
@@ -319,7 +301,7 @@ impl MitoClient {
                         tracing::info!(
                             "Artifact of size {}B downloaded to {}",
                             info.size,
-                            info.file_path.display()
+                            info.local_path.display()
                         );
                     }
                     Err(e) => {
@@ -356,24 +338,13 @@ impl MitoClient {
             tags: args.tags.into_iter().collect(),
             timeout: args.timeout,
             priority: args.priority,
-            task_spec: TaskSpec::new(args.shell, args.spec, args.envs, args.terminal_output),
+            task_spec: TaskSpec::new(
+                args.shell,
+                args.spec,
+                args.envs,
+                args.resources,
+                args.terminal_output,
+            ),
         }
     }
-}
-
-fn map_reqwest_err(e: reqwest::Error) -> RequestError {
-    if e.is_request() && e.is_connect() {
-        RequestError::ConnectionError(e.to_string())
-    } else {
-        e.into()
-    }
-}
-
-async fn get_error_from_resp(resp: reqwest::Response) -> RequestError {
-    let status_code = resp.status();
-    let resp: ErrorMsg = resp
-        .json()
-        .await
-        .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
-    ClientError::Inner(status_code, resp).into()
 }

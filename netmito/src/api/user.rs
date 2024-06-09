@@ -108,7 +108,7 @@ pub async fn download_artifact(
     Extension(_): Extension<AuthUser>,
     State(pool): State<InfraPool>,
     Path((uuid, content_type)): Path<(Uuid, ArtifactContentType)>,
-) -> Result<Json<ArtifactDownloadResp>, ApiError> {
+) -> Result<Json<RemoteResourceDownloadResp>, ApiError> {
     let artifact = get_artifact(&pool, uuid, content_type)
         .await
         .map_err(|e| match e {

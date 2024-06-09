@@ -19,6 +19,7 @@ use url::Url;
 use crate::entity::content::ArtifactContentType;
 use crate::error::RequestError;
 use crate::schema::*;
+use crate::service::s3::download_file;
 use crate::{
     config::{WorkerConfig, WorkerConfigCli},
     error::{Error, ErrorMsg},
@@ -107,6 +108,7 @@ impl MitoWorker {
             tokio::fs::create_dir_all(&cache_path).await?;
             tokio::fs::create_dir_all(&cache_path.join("result")).await?;
             tokio::fs::create_dir_all(&cache_path.join("exec")).await?;
+            tokio::fs::create_dir_all(&cache_path.join("resource")).await?;
             tokio::fs::create_dir_all(&log_dir).await?;
             let guards = if !config.no_log_file {
                 config
@@ -389,13 +391,229 @@ async fn execute_task(
     task_fetch_interval: std::time::Duration,
     cache_path: &PathBuf,
 ) -> crate::error::Result<()> {
+    // TODO: may set the task state to pending while downloading resources
     let timeout_duration = task.timeout;
+    let timeout_until = tokio::time::Instant::now() + timeout_duration;
+    for resource in task.spec.resources {
+        match resource.remote_file {
+            RemoteResource::Artifact { uuid, content_type } => {
+                let content_serde_val = serde_json::to_value(content_type)?;
+                let content_serde_str = content_serde_val.as_str().unwrap_or("result");
+                task_url.set_path(&format!("worker/artifacts/{}/{}", uuid, content_serde_str));
+            }
+            RemoteResource::Attachment { key } => {
+                task_url.set_path(&format!("worker/attachments/{}", key));
+            }
+        };
+        let resp = loop {
+            match task_client
+                .get(task_url.as_str())
+                .bearer_auth(task_credential)
+                .send()
+                .await
+            {
+                Ok(resp) => break resp,
+                Err(e) => {
+                    if e.is_connect() && e.is_request() {
+                        tracing::error!(
+                            "Fetch resource info failed with connection error: {}. Retry after {:?}",
+                            e,
+                            task_fetch_interval
+                        );
+                        tokio::select! {
+                            biased;
+                            _ = task_cancel_token.cancelled() => return Ok(()),
+                            _ = tokio::time::sleep(task_fetch_interval) => {},
+                            _ = tokio::time::sleep_until(timeout_until) => {
+                                tracing::debug!("Fetching resource timeout, commit this task as canceled");
+                                let req = ReportTaskReq {
+                                    id: task.id,
+                                    op: ReportTaskOp::Cancel,
+                                };
+                                report_task(
+                                    (task_client, task_credential),
+                                    task_url,
+                                    task_cancel_token,
+                                    task_fetch_interval,
+                                    req,
+                                )
+                                .await?;
+                                let req = ReportTaskReq {
+                                    id: task.id,
+                                    op: ReportTaskOp::Commit(TaskResultSpec {
+                                        exit_status: 0,
+                                        msg: Some(TaskResultMessage::Timeout),
+                                    }),
+                                };
+                                report_task(
+                                    (task_client, task_credential),
+                                    task_url,
+                                    task_cancel_token,
+                                    task_fetch_interval,
+                                    req,
+                                )
+                                .await?;
+                                return Ok(());
+                            }
+                        }
+                        continue;
+                    } else {
+                        return Err(RequestError::from(e).into());
+                    }
+                }
+            }
+        };
+        if resp.status().is_success() {
+            let download_resp = resp
+                .json::<RemoteResourceDownloadResp>()
+                .await
+                .map_err(RequestError::from)?;
+            tokio::select! {
+                biased;
+                res = download_file(task_client, &download_resp, resource.local_path) => {
+                    if let Err(e) = res {
+                        tracing::error!("Failed to download resource: {}", e);
+                        let req = ReportTaskReq {
+                            id: task.id,
+                            op: ReportTaskOp::Cancel,
+                        };
+                        report_task(
+                            (task_client, task_credential),
+                            task_url,
+                            task_cancel_token,
+                            task_fetch_interval,
+                            req,
+                        )
+                        .await?;
+                        let req = ReportTaskReq {
+                            id: task.id,
+                            op: ReportTaskOp::Commit(TaskResultSpec {
+                                exit_status: 0,
+                                msg: Some(TaskResultMessage::ResourceForbidden),
+                            }),
+                        };
+                        report_task(
+                            (task_client, task_credential),
+                            task_url,
+                            task_cancel_token,
+                            task_fetch_interval,
+                            req,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                }
+                _ = task_cancel_token.cancelled() => return Ok(()),
+                _ = tokio::time::sleep_until(timeout_until) => {
+                    tracing::debug!("Fetching resource timeout, commit this task as canceled");
+                    let req = ReportTaskReq {
+                        id: task.id,
+                        op: ReportTaskOp::Cancel,
+                    };
+                    report_task(
+                        (task_client, task_credential),
+                        task_url,
+                        task_cancel_token,
+                        task_fetch_interval,
+                        req,
+                    )
+                    .await?;
+                    let req = ReportTaskReq {
+                        id: task.id,
+                        op: ReportTaskOp::Commit(TaskResultSpec {
+                            exit_status: 0,
+                            msg: Some(TaskResultMessage::Timeout),
+                        }),
+                    };
+                    report_task(
+                        (task_client, task_credential),
+                        task_url,
+                        task_cancel_token,
+                        task_fetch_interval,
+                        req,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+        } else if resp.status() == StatusCode::NOT_FOUND {
+            tracing::debug!("Resource not found, commit this task as canceled");
+            let req = ReportTaskReq {
+                id: task.id,
+                op: ReportTaskOp::Cancel,
+            };
+            report_task(
+                (task_client, task_credential),
+                task_url,
+                task_cancel_token,
+                task_fetch_interval,
+                req,
+            )
+            .await?;
+            let req = ReportTaskReq {
+                id: task.id,
+                op: ReportTaskOp::Commit(TaskResultSpec {
+                    exit_status: 0,
+                    msg: Some(TaskResultMessage::ResourceNotFound),
+                }),
+            };
+            report_task(
+                (task_client, task_credential),
+                task_url,
+                task_cancel_token,
+                task_fetch_interval,
+                req,
+            )
+            .await?;
+            return Ok(());
+        } else if resp.status() == StatusCode::FORBIDDEN {
+            tracing::debug!("Resource is forbidden to be fetched, commit this task as canceled");
+            let req = ReportTaskReq {
+                id: task.id,
+                op: ReportTaskOp::Cancel,
+            };
+            report_task(
+                (task_client, task_credential),
+                task_url,
+                task_cancel_token,
+                task_fetch_interval,
+                req,
+            )
+            .await?;
+            let req = ReportTaskReq {
+                id: task.id,
+                op: ReportTaskOp::Commit(TaskResultSpec {
+                    exit_status: 0,
+                    msg: Some(TaskResultMessage::ResourceForbidden),
+                }),
+            };
+            report_task(
+                (task_client, task_credential),
+                task_url,
+                task_cancel_token,
+                task_fetch_interval,
+                req,
+            )
+            .await?;
+            return Ok(());
+        } else {
+            let resp: ErrorMsg = resp
+                .json()
+                .await
+                .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
+            return Err(Error::Custom(format!(
+                "Fetch resource info failed with error: {}",
+                resp.msg
+            )));
+        }
+    }
     let mut command = Command::new(task.spec.command.as_ref());
     command
         .args(task.spec.args)
         .envs(task.spec.envs)
         .env("MITO_RESULT_DIR", cache_path.join("result"))
-        .env("MITO_EXEC_EIR", cache_path.join("exec"))
+        .env("MITO_EXEC_DIR", cache_path.join("exec"))
+        .env("MITO_RESOURCE_DIR", cache_path.join("resource"))
         .stdin(std::process::Stdio::null());
     if task.spec.terminal_output {
         command
@@ -446,7 +664,7 @@ async fn execute_task(
             return Ok(());
         },
         output = process_output => output.map(TaskResult::Finish),
-        _ = tokio::time::sleep(timeout_duration) => {
+        _ = tokio::time::sleep_until(timeout_until) => {
             tracing::debug!("Task execution timeout");
             if let Some(id) = child.id() {
                 // TODO: we may change this when once the `linux_pidfd` is stabilized in standard library
@@ -519,55 +737,14 @@ async fn process_task_result(
             ReportTaskOp::Cancel
         },
     };
-    task_url.set_path("worker/task");
-    loop {
-        let resp = task_client
-            .post(task_url.as_str())
-            .json(&req)
-            .bearer_auth(task_credential)
-            .send()
-            .await;
-        match resp {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    break;
-                } else if resp.status() == StatusCode::UNAUTHORIZED {
-                    tracing::info!("Report failed with coordinator force exit");
-                    task_cancel_token.cancel();
-                    return Ok(());
-                } else if resp.status() == StatusCode::NOT_FOUND {
-                    tracing::debug!("Task not found, ignore and go on for next cycle");
-                    return Ok(());
-                } else {
-                    let resp: ErrorMsg = resp
-                        .json()
-                        .await
-                        .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
-                    return Err(Error::Custom(format!(
-                        "Report failed with error: {}",
-                        resp.msg
-                    )));
-                }
-            }
-            Err(e) => {
-                if e.is_connect() && e.is_request() {
-                    tracing::error!(
-                        "Report failed with connection error: {}. Retry after {:?}",
-                        e,
-                        task_fetch_interval
-                    );
-                    tokio::select! {
-                        biased;
-                        _ = task_cancel_token.cancelled() => break,
-                        _ = tokio::time::sleep(task_fetch_interval) => {},
-                    }
-                    continue;
-                } else {
-                    return Err(RequestError::from(e).into());
-                }
-            }
-        }
-    }
+    report_task(
+        (task_client, task_credential),
+        task_url,
+        task_cancel_token,
+        task_fetch_interval,
+        req,
+    )
+    .await?;
     // Compress possible output and upload
     let (tx, mut rx) = mpsc::channel::<(ArtifactContentType, i64)>(3);
     // Spawn a task to archive the output
@@ -857,8 +1034,36 @@ async fn process_task_result(
         id,
         op: ReportTaskOp::Commit(TaskResultSpec {
             exit_status: exit_status.into_raw(),
+            msg: if is_finished {
+                None
+            } else {
+                Some(TaskResultMessage::Timeout)
+            },
         }),
     };
+    report_task(
+        (task_client, task_credential),
+        task_url,
+        task_cancel_token,
+        task_fetch_interval,
+        req,
+    )
+    .await?;
+    // clean the directory after all the artifacts uploaded and the task committed
+    tokio::fs::remove_dir_all(cache_path).await?;
+    tokio::fs::create_dir_all(cache_path).await?;
+    tokio::fs::create_dir_all(&cache_path.join("result")).await?;
+    tokio::fs::create_dir_all(&cache_path.join("exec")).await?;
+    Ok(())
+}
+
+async fn report_task(
+    (task_client, task_credential): (&Client, &String),
+    task_url: &mut Url,
+    task_cancel_token: &CancellationToken,
+    task_fetch_interval: std::time::Duration,
+    req: ReportTaskReq,
+) -> crate::error::Result<()> {
     task_url.set_path("worker/task");
     loop {
         let resp = task_client
@@ -872,7 +1077,7 @@ async fn process_task_result(
                 if resp.status().is_success() {
                     break;
                 } else if resp.status() == StatusCode::UNAUTHORIZED {
-                    tracing::info!("Commit task failed with coordinator force exit");
+                    tracing::info!("Report task failed with coordinator force exit");
                     task_cancel_token.cancel();
                     return Ok(());
                 } else if resp.status() == StatusCode::NOT_FOUND {
@@ -884,7 +1089,7 @@ async fn process_task_result(
                         .await
                         .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
                     return Err(Error::Custom(format!(
-                        "Commit task failed with error: {}",
+                        "Report task failed with error: {}",
                         resp.msg
                     )));
                 }
@@ -892,7 +1097,7 @@ async fn process_task_result(
             Err(e) => {
                 if e.is_connect() && e.is_request() {
                     tracing::error!(
-                        "Commit task failed with connection error: {}. Retry after {:?}",
+                        "Report task failed with connection error: {}. Retry after {:?}",
                         e,
                         task_fetch_interval
                     );
@@ -908,10 +1113,5 @@ async fn process_task_result(
             }
         }
     }
-    // clean the directory after all the artifacts uploaded and the task committed
-    tokio::fs::remove_dir_all(cache_path).await?;
-    tokio::fs::create_dir_all(cache_path).await?;
-    tokio::fs::create_dir_all(&cache_path.join("result")).await?;
-    tokio::fs::create_dir_all(&cache_path.join("exec")).await?;
     Ok(())
 }

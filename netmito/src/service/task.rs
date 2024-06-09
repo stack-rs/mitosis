@@ -16,6 +16,21 @@ use crate::{
 
 use super::worker::TaskDispatcherOp;
 
+fn check_task_spec(spec: &TaskSpec) -> crate::error::Result<()> {
+    if spec.resources.iter().any(|r| {
+        r.local_path.is_absolute()
+            || r.local_path.components().any(|c| {
+                matches!(c, std::path::Component::ParentDir)
+                    || matches!(c, std::path::Component::CurDir)
+            })
+    }) {
+        return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+            "Resource local path is absolute or contains `..` or `.`".to_string(),
+        )));
+    }
+    Ok(())
+}
+
 pub async fn user_submit_task(
     pool: &InfraPool,
     creator_id: i64,
@@ -45,6 +60,7 @@ pub async fn user_submit_task(
     let group_id = group.id;
     let task_id = group.task_count;
     let uuid = Uuid::new_v4();
+    check_task_spec(&spec)?;
     let spec = serde_json::to_value(spec)?;
     let task = ActiveTask::ActiveModel {
         creator_id: Set(creator_id),

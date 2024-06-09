@@ -1,11 +1,14 @@
+use std::path::Path;
 use std::time::Duration;
 
 use aws_sdk_s3::{error::SdkError, presigning::PresigningConfig, Client};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::entity::{artifacts as Artifact, content::ArtifactContentType};
-use crate::schema::ArtifactDownloadResp;
+use crate::error::{get_error_from_resp, map_reqwest_err, RequestError};
+use crate::schema::RemoteResourceDownloadResp;
 use crate::{config::InfraPool, error::S3Error};
 
 pub async fn create_bucket(client: &Client, bucket_name: &str) -> Result<(), S3Error> {
@@ -66,7 +69,7 @@ pub async fn get_artifact(
     pool: &InfraPool,
     uuid: Uuid,
     content_type: ArtifactContentType,
-) -> Result<ArtifactDownloadResp, crate::error::Error> {
+) -> Result<RemoteResourceDownloadResp, crate::error::Error> {
     let artifact = Artifact::Entity::find()
         .filter(Artifact::Column::TaskId.eq(uuid))
         .filter(Artifact::Column::ContentType.eq(content_type))
@@ -79,8 +82,32 @@ pub async fn get_artifact(
     let key = format!("{}/{}", uuid, content_type);
     let url =
         get_presigned_download_link(&pool.s3, "mitosis-artifacts", key, artifact.size).await?;
-    Ok(ArtifactDownloadResp {
+    Ok(RemoteResourceDownloadResp {
         url,
         size: artifact.size,
     })
+}
+
+pub async fn download_file(
+    client: &reqwest::Client,
+    resp: &RemoteResourceDownloadResp,
+    local_path: impl AsRef<Path>,
+) -> crate::error::Result<()> {
+    let mut resp = client
+        .get(&resp.url)
+        .send()
+        .await
+        .map_err(map_reqwest_err)?;
+    if resp.status().is_success() {
+        if let Some(parent_dir) = local_path.as_ref().parent() {
+            tokio::fs::create_dir_all(parent_dir).await?;
+        }
+        let mut file = tokio::fs::File::create(local_path).await?;
+        while let Some(chunk) = resp.chunk().await.map_err(RequestError::from)? {
+            file.write_all(&chunk).await?;
+        }
+        Ok(())
+    } else {
+        Err(get_error_from_resp(resp).await.into())
+    }
 }

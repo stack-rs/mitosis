@@ -70,6 +70,8 @@ pub struct TaskSpec {
     #[serde(default)]
     pub envs: HashMap<String, String>,
     #[serde(default)]
+    pub resources: Vec<RemoteResourceDownload>,
+    #[serde(default)]
     pub terminal_output: bool,
 }
 
@@ -129,6 +131,14 @@ pub struct SubmitTaskResp {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TaskResultSpec {
     pub exit_status: i32,
+    pub msg: Option<TaskResultMessage>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum TaskResultMessage {
+    Timeout,
+    ResourceNotFound,
+    ResourceForbidden,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -157,29 +167,56 @@ pub struct TaskQueryResp {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ArtifactDownloadResp {
+pub struct RemoteResourceDownloadResp {
     pub url: String,
     pub size: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ArtifactDownloadInfo {
+pub struct ResourceDownloadInfo {
     pub size: i64,
-    pub file_path: PathBuf,
+    pub local_path: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum RemoteResource {
+    Artifact {
+        uuid: Uuid,
+        content_type: ArtifactContentType,
+    },
+    Attachment {
+        key: String,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RemoteResourceDownload {
+    pub remote_file: RemoteResource,
+    /// The relative local file path of the resource downloaded to at the cache directory.
+    /// Will append the path to the worker's working directory.
+    pub local_path: PathBuf,
 }
 
 impl TaskSpec {
-    pub fn new<T, I, P, Q>(command: TaskCommand, args: I, envs: P, terminal_output: bool) -> Self
+    pub fn new<T, I, P, Q, V>(
+        command: TaskCommand,
+        args: I,
+        envs: P,
+        files: V,
+        terminal_output: bool,
+    ) -> Self
     where
         I: IntoIterator<Item = T>,
         T: Into<String>,
         P: IntoIterator<Item = Q>,
         Q: Into<(String, String)>,
+        V: IntoIterator<Item = RemoteResourceDownload>,
     {
         Self {
             command,
             args: args.into_iter().map(Into::into).collect(),
             envs: envs.into_iter().map(Into::into).collect(),
+            resources: files.into_iter().collect(),
             terminal_output,
         }
     }

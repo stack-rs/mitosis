@@ -187,3 +187,20 @@ impl IntoResponse for ApiError {
         (self.get_status_code(), Json(ErrorMsg::from(self))).into_response()
     }
 }
+
+pub(crate) fn map_reqwest_err(e: reqwest::Error) -> RequestError {
+    if e.is_request() && e.is_connect() {
+        RequestError::ConnectionError(e.to_string())
+    } else {
+        e.into()
+    }
+}
+
+pub(crate) async fn get_error_from_resp(resp: reqwest::Response) -> RequestError {
+    let status_code = resp.status();
+    let resp: ErrorMsg = resp
+        .json()
+        .await
+        .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
+    ClientError::Inner(status_code, resp).into()
+}

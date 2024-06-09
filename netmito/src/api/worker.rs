@@ -1,16 +1,19 @@
 use axum::{
-    extract::State,
+    extract::{Path, State},
     middleware,
-    routing::{delete, post},
+    routing::{delete, get, post},
     Extension, Json, Router,
 };
+use uuid::Uuid;
 
 use crate::{
     config::InfraPool,
+    entity::content::ArtifactContentType,
     error::{ApiError, ApiResult, Error},
     schema::*,
     service::{
         auth::{token::generate_token, worker_auth_middleware, AuthUser, AuthWorker},
+        s3::get_artifact,
         worker,
     },
 };
@@ -20,6 +23,7 @@ pub fn worker_router(st: InfraPool) -> Router<InfraPool> {
         .route("/", delete(unregister))
         .route("/heartbeat", post(heartbeat))
         .route("/task", post(report_task).get(fetch_task))
+        .route("/artifacts/:uuid/:content_type", get(download_artifact))
         .layer(middleware::from_fn_with_state(
             st.clone(),
             worker_auth_middleware,
@@ -115,4 +119,22 @@ pub async fn report_task(
             Err(ApiError::InternalServerError)
         }
     }
+}
+
+pub async fn download_artifact(
+    Extension(_): Extension<AuthWorker>,
+    State(pool): State<InfraPool>,
+    Path((uuid, content_type)): Path<(Uuid, ArtifactContentType)>,
+) -> Result<Json<RemoteResourceDownloadResp>, ApiError> {
+    let artifact = get_artifact(&pool, uuid, content_type)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(artifact))
 }

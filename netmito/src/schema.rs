@@ -136,7 +136,9 @@ pub struct TaskResultSpec {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum TaskResultMessage {
-    Timeout,
+    FetchResourceTimeout,
+    ExecTimeout,
+    UploadResultTimeout,
     ResourceNotFound,
     ResourceForbidden,
 }

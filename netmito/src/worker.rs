@@ -392,8 +392,8 @@ async fn execute_task(
     cache_path: &PathBuf,
 ) -> crate::error::Result<()> {
     // TODO: may set the task state to pending while downloading resources
-    let timeout_duration = task.timeout;
-    let timeout_until = tokio::time::Instant::now() + timeout_duration;
+    // Allow downloading resources for 5 minutes
+    let timeout_until = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
     for resource in task.spec.resources {
         match resource.remote_file {
             RemoteResource::Artifact { uuid, content_type } => {
@@ -442,7 +442,7 @@ async fn execute_task(
                                     id: task.id,
                                     op: ReportTaskOp::Commit(TaskResultSpec {
                                         exit_status: 0,
-                                        msg: Some(TaskResultMessage::Timeout),
+                                        msg: Some(TaskResultMessage::FetchResourceTimeout),
                                     }),
                                 };
                                 report_task(
@@ -522,7 +522,7 @@ async fn execute_task(
                         id: task.id,
                         op: ReportTaskOp::Commit(TaskResultSpec {
                             exit_status: 0,
-                            msg: Some(TaskResultMessage::Timeout),
+                            msg: Some(TaskResultMessage::FetchResourceTimeout),
                         }),
                     };
                     report_task(
@@ -607,6 +607,8 @@ async fn execute_task(
             )));
         }
     }
+
+    let timeout_until = tokio::time::Instant::now() + task.timeout;
     let mut command = Command::new(task.spec.command.as_ref());
     command
         .args(task.spec.args)
@@ -748,6 +750,8 @@ async fn process_task_result(
     // Compress possible output and upload
     let (tx, mut rx) = mpsc::channel::<(ArtifactContentType, i64)>(3);
     // Spawn a task to archive the output
+    let timeout_cancel_token = CancellationToken::new();
+    let archive_timeout_cancel_token = timeout_cancel_token.clone();
     let archive_cancel_token = task_cancel_token.clone();
     let archive_cache_path = cache_path.clone();
     let archive_hd = tokio::spawn(async move {
@@ -772,6 +776,14 @@ async fn process_task_result(
                     encoder.shutdown().await?;
                     tokio::fs::remove_file(archive_cache_path.join("result.tar.gz")).await?;
                     tracing::info!("Task output generation interrupted by shutdown signal");
+                    return Ok(());
+                }
+                _ = archive_timeout_cancel_token.cancelled() => {
+                    let mut encoder = ar.into_inner().await?;
+                    encoder.shutdown().await?;
+                    tokio::fs::remove_file(archive_cache_path.join("result.tar.gz")).await?;
+                    tracing::warn!("Task output generation timeout");
+                    return Ok(());
                 }
                 res = compress_task => {
                     match res {
@@ -820,6 +832,14 @@ async fn process_task_result(
                     encoder.shutdown().await?;
                     tokio::fs::remove_file(archive_cache_path.join(&file_name)).await?;
                     tracing::info!("Task output generation interrupted by shutdown signal");
+                    return Ok(());
+                }
+                _ = archive_timeout_cancel_token.cancelled() => {
+                    let mut encoder = ar.into_inner().await?;
+                    encoder.shutdown().await?;
+                    tokio::fs::remove_file(archive_cache_path.join(&file_name)).await?;
+                    tracing::warn!("Task output generation timeout");
+                    return Ok(());
                 }
                 res = compress_task => {
                     match res {
@@ -871,6 +891,14 @@ async fn process_task_result(
                     encoder.shutdown().await?;
                     tokio::fs::remove_file(archive_cache_path.join("std-log.tar.gz")).await?;
                     tracing::info!("Task output generation interrupted by shutdown signal");
+                    return Ok(());
+                }
+                _ = archive_timeout_cancel_token.cancelled() => {
+                    let mut encoder = ar.into_inner().await?;
+                    encoder.shutdown().await?;
+                    tokio::fs::remove_file(archive_cache_path.join("std-log.tar.gz")).await?;
+                    tracing::warn!("Task output generation timeout");
+                    return Ok(());
                 }
                 res = compress_task => {
                     match res {
@@ -989,6 +1017,10 @@ async fn process_task_result(
                             tracing::info!("Upload failed with shutdown signal");
                             return Ok(());
                         }
+                        _ = timeout_cancel_token.cancelled() => {
+                            tracing::warn!("Upload failed with timeout");
+                            return Ok(());
+                        }
                         resp = upload_file => resp
                     };
                     match resp {
@@ -1013,6 +1045,10 @@ async fn process_task_result(
                                 tokio::select! {
                                     biased;
                                     _ = task_cancel_token.cancelled() => return Ok(()),
+                                    _ = timeout_cancel_token.cancelled() => {
+                                        tracing::warn!("Upload failed with timeout");
+                                        return Ok(());
+                                    }
                                     _ = tokio::time::sleep(task_fetch_interval) => {},
                                 }
                                 continue;
@@ -1026,29 +1062,56 @@ async fn process_task_result(
         }
         crate::error::Result::Ok(())
     };
-    upload_artifact_fut.await?;
-    archive_hd.await??;
+    let timeout_until = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+    tokio::select! {
+        biased;
+        _ = tokio::time::sleep_until(timeout_until) => {
+            tracing::warn!("Upload result timeout");
+            timeout_cancel_token.cancel();
+            // Commit the task result
+            let req = ReportTaskReq {
+                id,
+                op: ReportTaskOp::Commit(TaskResultSpec {
+                    exit_status: exit_status.into_raw(),
+                    msg: Some(TaskResultMessage::UploadResultTimeout),
+                }),
+            };
+            report_task(
+                (task_client, task_credential),
+                task_url,
+                task_cancel_token,
+                task_fetch_interval,
+                req,
+            )
+            .await?;
+            archive_hd.await??;
+        }
+        res = upload_artifact_fut => {
+            res?;
+            archive_hd.await??;
+            // Commit the task result
+            let req = ReportTaskReq {
+                id,
+                op: ReportTaskOp::Commit(TaskResultSpec {
+                    exit_status: exit_status.into_raw(),
+                    msg: if is_finished {
+                        None
+                    } else {
+                        Some(TaskResultMessage::ExecTimeout)
+                    },
+                }),
+            };
+            report_task(
+                (task_client, task_credential),
+                task_url,
+                task_cancel_token,
+                task_fetch_interval,
+                req,
+            )
+            .await?;
+        }
+    }
 
-    // Commit the task result
-    let req = ReportTaskReq {
-        id,
-        op: ReportTaskOp::Commit(TaskResultSpec {
-            exit_status: exit_status.into_raw(),
-            msg: if is_finished {
-                None
-            } else {
-                Some(TaskResultMessage::Timeout)
-            },
-        }),
-    };
-    report_task(
-        (task_client, task_credential),
-        task_url,
-        task_cancel_token,
-        task_fetch_interval,
-        req,
-    )
-    .await?;
     // clean the directory after all the artifacts uploaded and the task committed
     tokio::fs::remove_dir_all(cache_path).await?;
     tokio::fs::create_dir_all(cache_path).await?;

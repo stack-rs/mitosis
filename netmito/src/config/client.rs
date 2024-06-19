@@ -7,10 +7,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::{
-    entity::content::ArtifactContentType,
-    schema::{RemoteResourceDownload, TaskCommand},
-};
+use crate::{entity::content::ArtifactContentType, schema::RemoteResourceDownload};
 
 use super::coordinator::DEFAULT_COORDINATOR_ADDR;
 
@@ -137,9 +134,6 @@ pub struct SubmitTaskArgs {
     /// The priority of the task.
     #[arg(short, long, default_value_t = 0)]
     pub priority: i32,
-    /// The shell to use
-    #[arg(short, long, value_enum, default_value_t=TaskCommand::Bash)]
-    pub shell: TaskCommand,
     /// The environment variables to set
     #[arg(short, long, num_args = 0.., value_delimiter = ',', value_parser = parse_key_val::<String, String>)]
     pub envs: Vec<(String, String)>,
@@ -148,7 +142,7 @@ pub struct SubmitTaskArgs {
     pub terminal_output: bool,
     /// The command to run
     #[arg(last = true)]
-    pub spec: Vec<String>,
+    pub command: Vec<String>,
     #[arg(skip)]
     pub resources: Vec<RemoteResourceDownload>,
 }

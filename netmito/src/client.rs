@@ -339,8 +339,7 @@ impl MitoClient {
             timeout: args.timeout,
             priority: args.priority,
             task_spec: TaskSpec::new(
-                args.shell,
-                args.spec,
+                args.command,
                 args.envs,
                 args.resources,
                 args.terminal_output,

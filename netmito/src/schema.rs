@@ -65,7 +65,6 @@ pub struct RegisterWorkerResp {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TaskSpec {
-    pub command: TaskCommand,
     pub args: Vec<String>,
     #[serde(default)]
     pub envs: HashMap<String, String>,
@@ -73,13 +72,6 @@ pub struct TaskSpec {
     pub resources: Vec<RemoteResourceDownload>,
     #[serde(default)]
     pub terminal_output: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, clap::ValueEnum)]
-pub enum TaskCommand {
-    Sh,
-    Bash,
-    Zsh,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -200,13 +192,7 @@ pub struct RemoteResourceDownload {
 }
 
 impl TaskSpec {
-    pub fn new<T, I, P, Q, V>(
-        command: TaskCommand,
-        args: I,
-        envs: P,
-        files: V,
-        terminal_output: bool,
-    ) -> Self
+    pub fn new<T, I, P, Q, V>(args: I, envs: P, files: V, terminal_output: bool) -> Self
     where
         I: IntoIterator<Item = T>,
         T: Into<String>,
@@ -215,21 +201,10 @@ impl TaskSpec {
         V: IntoIterator<Item = RemoteResourceDownload>,
     {
         Self {
-            command,
             args: args.into_iter().map(Into::into).collect(),
             envs: envs.into_iter().map(Into::into).collect(),
             resources: files.into_iter().collect(),
             terminal_output,
-        }
-    }
-}
-
-impl AsRef<str> for TaskCommand {
-    fn as_ref(&self) -> &str {
-        match self {
-            TaskCommand::Sh => "sh",
-            TaskCommand::Bash => "bash",
-            TaskCommand::Zsh => "zsh",
         }
     }
 }

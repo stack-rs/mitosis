@@ -609,7 +609,7 @@ async fn execute_task(
     }
 
     let timeout_until = tokio::time::Instant::now() + task.timeout;
-    let mut command = Command::new(task.spec.command.as_ref());
+    let mut command = Command::new("/usr/bin/env");
     command
         .args(task.spec.args)
         .envs(task.spec.envs)

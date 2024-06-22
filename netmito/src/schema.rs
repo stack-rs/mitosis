@@ -61,6 +61,7 @@ pub struct RegisterWorkerReq {
 pub struct RegisterWorkerResp {
     pub worker_id: Uuid,
     pub token: String,
+    pub redis_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,6 +78,7 @@ pub struct TaskSpec {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkerTaskResp {
     pub id: i64,
+    pub uuid: Uuid,
     #[serde(with = "humantime_serde")]
     pub timeout: std::time::Duration,
     pub spec: TaskSpec,
@@ -158,6 +160,11 @@ pub struct TaskQueryResp {
     pub spec: TaskSpec,
     pub result: Option<TaskResultSpec>,
     pub artifacts: Vec<ArtifactQueryResp>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RedisConnectionInfo {
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -102,6 +102,14 @@ impl MitoCoordinator {
         crate::config::INIT_ADMIN_USER
             .set(init_admin_user)
             .map_err(|_| crate::error::Error::Custom("set init admin user failed".to_string()))?;
+        let redis_connection_info = config.build_redis_connection_info().await?;
+        if let Some(info) = redis_connection_info {
+            crate::config::REDIS_CONNECTION_INFO
+                .set(info)
+                .map_err(|_| {
+                    crate::error::Error::Custom("set redis connection info failed".to_string())
+                })?;
+        }
         let cancel_token = CancellationToken::new();
 
         let (worker_task_queue_tx, worker_task_queue_rx) = tokio::sync::mpsc::unbounded_channel();

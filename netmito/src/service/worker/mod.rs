@@ -342,6 +342,7 @@ pub async fn fetch_task(
                         let spec: TaskSpec = serde_json::from_value(task.spec)?;
                         let task_resp = WorkerTaskResp {
                             id: task.id,
+                            uuid: task.uuid,
                             timeout: std::time::Duration::from_secs(task.timeout as u64),
                             spec,
                         };

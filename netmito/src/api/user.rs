@@ -10,7 +10,7 @@ use axum::{
 use uuid::Uuid;
 
 use crate::{
-    config::InfraPool,
+    config::{InfraPool, REDIS_CONNECTION_INFO},
     entity::content::ArtifactContentType,
     error::ApiError,
     schema::*,
@@ -27,6 +27,7 @@ pub fn user_router(st: InfraPool) -> Router<InfraPool> {
         .route("/task", post(submit_task))
         .route("/task/:uuid", get(query_task))
         .route("/artifacts/:uuid/:content_type", get(download_artifact))
+        .route("/redis", get(query_redis_connection_info))
         .layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -120,4 +121,11 @@ pub async fn download_artifact(
             }
         })?;
     Ok(Json(artifact))
+}
+
+pub async fn query_redis_connection_info(
+    Extension(_): Extension<AuthUser>,
+) -> Result<Json<RedisConnectionInfo>, ApiError> {
+    let url = REDIS_CONNECTION_INFO.get().map(|info| info.client_url());
+    Ok(Json(RedisConnectionInfo { url }))
 }

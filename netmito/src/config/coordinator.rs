@@ -12,6 +12,7 @@ use figment::{
 };
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use once_cell::sync::OnceCell;
+use redis::{acl::Rule, AsyncCommands};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use time::Duration;
@@ -30,6 +31,9 @@ pub struct CoordinatorConfig {
     pub(crate) s3_url: String,
     pub(crate) s3_access_key: String,
     pub(crate) s3_secret_key: String,
+    pub(crate) redis_url: Option<String>,
+    pub(crate) redis_worker_password: Option<String>,
+    pub(crate) redis_client_password: Option<String>,
     pub(crate) admin_user: String,
     pub(crate) admin_password: String,
     pub(crate) access_token_private_path: RelativePathBuf,
@@ -69,6 +73,18 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub s3_secret_key: Option<String>,
+    // The Redis URL
+    #[arg(long = "redis")]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub redis_url: Option<String>,
+    /// The Redis worker password
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub redis_worker_password: Option<String>,
+    /// The Redis client password
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub redis_client_password: Option<String>,
     /// The admin username
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -108,6 +124,9 @@ impl Default for CoordinatorConfig {
         Self {
             bind: DEFAULT_COORDINATOR_ADDR,
             db_url: "postgres://mitosis:mitosis@localhost/mitosis".to_string(),
+            redis_url: None,
+            redis_worker_password: None,
+            redis_client_password: None,
             s3_url: "http://localhost:9000".to_string(),
             s3_access_key: "mitosis_access".to_string(),
             s3_secret_key: "mitosis_secret".to_string(),
@@ -149,6 +168,64 @@ impl CoordinatorConfig {
         rx: UnboundedReceiver<HeartbeatOp>,
     ) -> HeartbeatQueue {
         HeartbeatQueue::new(cancel_token, self.heartbeat_timeout, db, rx)
+    }
+
+    pub async fn build_redis_connection_info(
+        &self,
+    ) -> crate::error::Result<Option<RedisConnectionInfo>> {
+        match self.redis_url {
+            Some(ref redis_url) => {
+                let client = redis::Client::open(redis_url.clone())?;
+                let mut conn = client.get_multiplexed_tokio_connection().await?;
+                let rules = [Rule::Reset];
+                let _: String = conn.acl_setuser_rules("mitosis_worker", &rules).await?;
+                let _: String = conn.acl_setuser_rules("mitosis_client", &rules).await?;
+                let worker_pass = {
+                    if let Some(worker_pass) = &self.redis_worker_password {
+                        worker_pass.clone()
+                    } else {
+                        conn.acl_genpass().await?
+                    }
+                };
+                let rules = [
+                    Rule::On,
+                    Rule::AddPass(worker_pass.clone()),
+                    Rule::Pattern("task:*".to_string()),
+                    Rule::Other("&task:*".to_string()),
+                    Rule::AddCategory("read".to_string()),
+                    Rule::AddCategory("write".to_string()),
+                    Rule::AddCategory("connection".to_string()),
+                    Rule::AddCategory("pubsub".to_string()),
+                    Rule::RemoveCategory("dangerous".to_string()),
+                ];
+                let client_pass = {
+                    if let Some(client_pass) = &self.redis_client_password {
+                        client_pass.clone()
+                    } else {
+                        conn.acl_genpass().await?
+                    }
+                };
+                let _: String = conn.acl_setuser_rules("mitosis_worker", &rules).await?;
+                let rules = [
+                    Rule::On,
+                    Rule::AddPass(client_pass.clone()),
+                    Rule::Pattern("task:*".to_string()),
+                    Rule::Other("&task:*".to_string()),
+                    Rule::AddCategory("read".to_string()),
+                    Rule::AddCategory("pubsub".to_string()),
+                    Rule::AddCategory("connection".to_string()),
+                    Rule::RemoveCategory("dangerous".to_string()),
+                ];
+                let _: String = conn.acl_setuser_rules("mitosis_client", &rules).await?;
+                let conn_info = client.get_connection_info();
+                Ok(Some(RedisConnectionInfo::new(
+                    conn_info.addr.clone(),
+                    worker_pass,
+                    client_pass,
+                )))
+            }
+            None => Ok(None),
+        }
     }
 
     pub async fn build_infra_pool(
@@ -231,7 +308,33 @@ pub struct InitAdminUser {
     pub password: String,
 }
 
+#[derive(Debug)]
+pub struct RedisConnectionInfo {
+    addr: redis::ConnectionAddr,
+    worker_pass: String,
+    client_pass: String,
+}
+
+impl RedisConnectionInfo {
+    pub fn new(addr: redis::ConnectionAddr, worker_pass: String, client_pass: String) -> Self {
+        Self {
+            addr,
+            worker_pass,
+            client_pass,
+        }
+    }
+
+    pub fn worker_url(&self) -> String {
+        format!("redis://mitosis_worker:{}@{}", self.worker_pass, self.addr)
+    }
+
+    pub fn client_url(&self) -> String {
+        format!("redis://mitosis_client:{}@{}", self.client_pass, self.addr)
+    }
+}
+
 pub(crate) static SERVER_CONFIG: OnceCell<ServerConfig> = OnceCell::new();
 pub(crate) static INIT_ADMIN_USER: OnceCell<InitAdminUser> = OnceCell::new();
 pub(crate) static ENCODING_KEY: OnceCell<EncodingKey> = OnceCell::new();
 pub(crate) static DECODING_KEY: OnceCell<DecodingKey> = OnceCell::new();
+pub(crate) static REDIS_CONNECTION_INFO: OnceCell<RedisConnectionInfo> = OnceCell::new();

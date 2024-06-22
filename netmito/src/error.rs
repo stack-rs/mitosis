@@ -47,6 +47,8 @@ pub enum Error {
     SerdeError(#[from] serde_json::Error),
     #[error("Parse uuid error: {0}")]
     ParseUuidError(#[from] uuid::Error),
+    #[error("Redis error: {0}")]
+    RedisError(#[from] redis::RedisError),
 }
 
 #[derive(thiserror::Error, Debug)]

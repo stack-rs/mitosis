@@ -7,7 +7,7 @@ use axum::{
 use uuid::Uuid;
 
 use crate::{
-    config::InfraPool,
+    config::{InfraPool, REDIS_CONNECTION_INFO},
     entity::content::ArtifactContentType,
     error::{ApiError, ApiResult, Error},
     schema::*,
@@ -58,9 +58,11 @@ pub async fn register(
             ApiError::InternalServerError
         }
     })?;
+    let redis_url = REDIS_CONNECTION_INFO.get().map(|info| info.worker_url());
     Ok(Json(RegisterWorkerResp {
         worker_id: uuid,
         token,
+        redis_url,
     }))
 }
 

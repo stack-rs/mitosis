@@ -15,6 +15,7 @@ pub struct Model {
     #[sea_orm(unique)]
     pub uuid: Uuid,
     pub tags: Vec<String>,
+    pub labels: Vec<String>,
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
     pub state: TaskState,
@@ -68,6 +69,7 @@ impl From<Model> for super::archived_tasks::Model {
             task_id: task.task_id,
             uuid: task.uuid,
             tags: task.tags,
+            labels: task.labels,
             created_at: task.created_at,
             updated_at: task.updated_at,
             state: task.state,

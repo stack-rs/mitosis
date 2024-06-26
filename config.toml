@@ -5,8 +5,22 @@ db_url = "postgres://mitosis:mitosis@localhost/mitosis"
 s3_url = "http://localhost:9000"
 s3_access_key = "mitosis_access"
 s3_secret_key = "mitosis_secret"
-admin_username = "mitosis_admin"
+admin_user = "mitosis_admin"
 admin_password = "mitosis_admin"
 access_token_private_path = "private.pem"
 access_token_public_path = "public.pem"
 access_token_expires_in = "7d"
+
+[worker]
+coordinator_addr = "http://127.0.0.1:5000"
+fetch_task_interval = "3m"
+heartbeat_interval = "5m"
+# credential_path is not set
+# user is not set
+# password is not set
+# groups are not set
+# tags are not set
+
+[client]
+# user = "mitosis_admin"
+# password = "mitosis_admin"

@@ -125,9 +125,12 @@ pub struct SubmitTaskArgs {
     /// The name of the group this task is submitted to
     #[arg(short = 'g', long = "group")]
     pub group_name: Option<String>,
-    /// The tags of the task
+    /// The tags of the task, used to filter workers to execute the task
     #[arg(short, long, num_args = 0.., value_delimiter = ',')]
     pub tags: Vec<String>,
+    /// The labels of the task, used for querying tasks
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub labels: Vec<String>,
     /// The timeout of the task.
     #[arg(long, value_parser = humantime_serde::re::humantime::parse_duration, default_value="10min")]
     pub timeout: std::time::Duration,

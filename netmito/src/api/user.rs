@@ -60,33 +60,19 @@ pub async fn auth_user(Extension(_): Extension<AuthUser>) -> StatusCode {
 pub async fn submit_task(
     Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
-    Json(SubmitTaskReq {
-        group_name,
-        tags,
-        timeout,
-        priority,
-        task_spec,
-    }): Json<SubmitTaskReq>,
+    Json(req): Json<SubmitTaskReq>,
 ) -> Result<Json<SubmitTaskResp>, ApiError> {
-    let (task_id, uuid) = user_submit_task(
-        &pool,
-        u.id,
-        group_name,
-        Vec::from_iter(tags),
-        timeout,
-        priority,
-        task_spec,
-    )
-    .await
-    .map_err(|e| match e {
-        crate::error::Error::AuthError(err) => ApiError::AuthError(err),
-        crate::error::Error::ApiError(e) => e,
-        _ => {
-            tracing::error!("{}", e);
-            ApiError::InternalServerError
-        }
-    })?;
-    Ok(Json(SubmitTaskResp { task_id, uuid }))
+    let resp = user_submit_task(&pool, u.id, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(resp))
 }
 
 pub async fn query_task(

@@ -15,6 +15,7 @@ pub struct Model {
     #[sea_orm(unique)]
     pub uuid: Uuid,
     pub tags: Vec<String>,
+    pub labels: Vec<String>,
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
     pub state: TaskState,

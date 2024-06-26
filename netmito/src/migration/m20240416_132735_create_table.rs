@@ -327,6 +327,11 @@ impl MigrationTrait for Migration {
                             .not_null(),
                     )
                     .col(
+                        ColumnDef::new(ActiveTasks::Labels)
+                            .array(ColumnType::Text)
+                            .not_null(),
+                    )
+                    .col(
                         ColumnDef::new(ActiveTasks::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null(),
@@ -416,6 +421,11 @@ impl MigrationTrait for Migration {
                     )
                     .col(
                         ColumnDef::new(ArchivedTasks::Tags)
+                            .array(ColumnType::Text)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ArchivedTasks::Labels)
                             .array(ColumnType::Text)
                             .not_null(),
                     )
@@ -694,6 +704,7 @@ enum ActiveTasks {
     TaskId,
     Uuid,
     Tags,
+    Labels,
     CreatedAt,
     UpdatedAt,
     State,
@@ -713,6 +724,7 @@ enum ArchivedTasks {
     TaskId,
     Uuid,
     Tags,
+    Labels,
     CreatedAt,
     UpdatedAt,
     State,

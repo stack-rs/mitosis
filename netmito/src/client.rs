@@ -348,6 +348,7 @@ impl MitoClient {
                             resp.group_name
                         );
                         tracing::info!("Tags: {:?}", resp.tags);
+                        tracing::info!("Labels: {:?}", resp.labels);
                         let timeout = std::time::Duration::from_secs(resp.timeout as u64);
                         tracing::info!("Timeout {:?} and Priority {}", timeout, resp.priority);
                         tracing::info!(
@@ -419,6 +420,7 @@ impl MitoClient {
         SubmitTaskReq {
             group_name: args.group_name.unwrap_or(self.username.clone()),
             tags: args.tags.into_iter().collect(),
+            labels: args.labels.into_iter().collect(),
             timeout: args.timeout,
             priority: args.priority,
             task_spec: TaskSpec::new(

@@ -410,6 +410,7 @@ pub async fn report_task(
                 task_id: Set(task.task_id),
                 uuid: Set(task.uuid),
                 tags: Set(task.tags),
+                labels: Set(task.labels),
                 created_at: Set(task.created_at),
                 updated_at: Set(now),
                 state: Set(task.state),

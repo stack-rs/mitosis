@@ -3,7 +3,7 @@ use sea_orm::sea_query::Query;
 use sea_orm::{prelude::*, FromQueryResult, Set};
 use uuid::Uuid;
 
-use crate::schema::{ArtifactQueryResp, TaskQueryResp};
+use crate::schema::{ArtifactQueryResp, SubmitTaskReq, SubmitTaskResp, TaskQueryResp};
 use crate::{config::InfraPool, schema::TaskSpec};
 
 use crate::{
@@ -34,12 +34,17 @@ fn check_task_spec(spec: &TaskSpec) -> crate::error::Result<()> {
 pub async fn user_submit_task(
     pool: &InfraPool,
     creator_id: i64,
-    group_name: String,
-    tags: Vec<String>,
-    timeout: std::time::Duration,
-    priority: i32,
-    spec: TaskSpec,
-) -> crate::error::Result<(i64, Uuid)> {
+    SubmitTaskReq {
+        group_name,
+        tags,
+        labels,
+        timeout,
+        priority,
+        task_spec,
+    }: SubmitTaskReq,
+) -> crate::error::Result<SubmitTaskResp> {
+    let tags = Vec::from_iter(tags);
+    let labels = Vec::from_iter(labels);
     let now = TimeDateTimeWithTimeZone::now_utc();
     let group = Group::Entity::update_many()
         .col_expr(
@@ -60,14 +65,15 @@ pub async fn user_submit_task(
     let group_id = group.id;
     let task_id = group.task_count;
     let uuid = Uuid::new_v4();
-    check_task_spec(&spec)?;
-    let spec = serde_json::to_value(spec)?;
+    check_task_spec(&task_spec)?;
+    let spec = serde_json::to_value(task_spec)?;
     let task = ActiveTask::ActiveModel {
         creator_id: Set(creator_id),
         group_id: Set(group_id),
         task_id: Set(task_id),
         uuid: Set(uuid),
         tags: Set(tags),
+        labels: Set(labels),
         created_at: Set(now),
         updated_at: Set(now),
         state: Set(crate::entity::state::TaskState::Ready),
@@ -106,7 +112,10 @@ pub async fn user_submit_task(
     if pool.worker_task_queue_tx.send(op).is_err() {
         Err(Error::Custom("send batch add task failed".to_string()))
     } else {
-        Ok((task.task_id, task.uuid))
+        Ok(SubmitTaskResp {
+            task_id: task.task_id,
+            uuid: task.uuid,
+        })
     }
 }
 
@@ -157,6 +166,7 @@ pub async fn get_task(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<Task
         group_name,
         task_id: task.task_id,
         tags: task.tags,
+        labels: task.labels,
         created_at: task.created_at,
         updated_at: task.updated_at,
         state: task.state,

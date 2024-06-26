@@ -110,6 +110,7 @@ pub struct ReportTaskResp {
 pub struct SubmitTaskReq {
     pub group_name: String,
     pub tags: HashSet<String>,
+    pub labels: HashSet<String>,
     #[serde(with = "humantime_serde")]
     pub timeout: std::time::Duration,
     pub priority: i32,
@@ -152,6 +153,7 @@ pub struct TaskQueryResp {
     pub group_name: String,
     pub task_id: i64,
     pub tags: Vec<String>,
+    pub labels: Vec<String>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
     pub state: TaskState,

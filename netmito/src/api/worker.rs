@@ -14,6 +14,7 @@ use crate::{
     service::{
         auth::{token::generate_token, worker_auth_middleware, AuthUser, AuthWorker},
         s3::get_artifact,
+        task::get_task,
         worker,
     },
 };
@@ -23,6 +24,7 @@ pub fn worker_router(st: InfraPool) -> Router<InfraPool> {
         .route("/", delete(unregister))
         .route("/heartbeat", post(heartbeat))
         .route("/task", post(report_task).get(fetch_task))
+        .route("/task/:uuid", get(query_task))
         .route("/artifacts/:uuid/:content_type", get(download_artifact))
         .layer(middleware::from_fn_with_state(
             st.clone(),
@@ -139,4 +141,20 @@ pub async fn download_artifact(
             }
         })?;
     Ok(Json(artifact))
+}
+
+pub async fn query_task(
+    Extension(_): Extension<AuthWorker>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<TaskQueryResp>, ApiError> {
+    let task = get_task(&pool, uuid).await.map_err(|e| match e {
+        crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+        crate::error::Error::ApiError(e) => e,
+        _ => {
+            tracing::error!("{}", e);
+            ApiError::InternalServerError
+        }
+    })?;
+    Ok(Json(task))
 }

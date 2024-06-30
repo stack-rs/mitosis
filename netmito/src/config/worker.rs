@@ -14,7 +14,7 @@ use super::coordinator::DEFAULT_COORDINATOR_ADDR;
 pub struct WorkerConfig {
     pub(crate) coordinator_addr: Url,
     #[serde(with = "humantime_serde")]
-    pub(crate) fetch_task_interval: Duration,
+    pub(crate) polling_interval: Duration,
     #[serde(with = "humantime_serde")]
     pub(crate) heartbeat_interval: Duration,
     pub(crate) credential_path: Option<RelativePathBuf>,
@@ -37,10 +37,10 @@ pub struct WorkerConfigCli {
     #[arg(short, long = "coordinator")]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub coordinator_addr: Option<String>,
-    /// The interval to fetch tasks
-    #[arg(long = "fetch-interval")]
+    /// The interval to poll tasks or resources
+    #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-    pub fetch_task_interval: Option<String>,
+    pub polling_interval: Option<String>,
     /// The interval to send heartbeat
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -79,7 +79,7 @@ impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             coordinator_addr: Url::parse(&format!("http://{}", DEFAULT_COORDINATOR_ADDR)).unwrap(),
-            fetch_task_interval: Duration::from_secs(5),
+            polling_interval: Duration::from_secs(5),
             heartbeat_interval: Duration::from_secs(10),
             credential_path: None,
             user: None,

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::entity::{
     content::ArtifactContentType,
-    state::{TaskState, UserState},
+    state::{TaskExecState, TaskState, UserState},
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -73,6 +73,7 @@ pub struct TaskSpec {
     pub resources: Vec<RemoteResourceDownload>,
     #[serde(default)]
     pub terminal_output: bool,
+    pub watch: Option<(Uuid, TaskExecState)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -136,6 +137,7 @@ pub enum TaskResultMessage {
     UploadResultTimeout,
     ResourceNotFound,
     ResourceForbidden,
+    WatchTimeout,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -201,19 +203,27 @@ pub struct RemoteResourceDownload {
 }
 
 impl TaskSpec {
-    pub fn new<T, I, P, Q, V>(args: I, envs: P, files: V, terminal_output: bool) -> Self
+    pub fn new<T, I, P, Q, V, U>(
+        args: I,
+        envs: P,
+        files: V,
+        terminal_output: bool,
+        watch: U,
+    ) -> Self
     where
         I: IntoIterator<Item = T>,
         T: Into<String>,
         P: IntoIterator<Item = Q>,
         Q: Into<(String, String)>,
         V: IntoIterator<Item = RemoteResourceDownload>,
+        U: Into<Option<(Uuid, TaskExecState)>>,
     {
         Self {
             args: args.into_iter().map(Into::into).collect(),
             envs: envs.into_iter().map(Into::into).collect(),
             resources: files.into_iter().collect(),
             terminal_output,
+            watch: watch.into(),
         }
     }
 }

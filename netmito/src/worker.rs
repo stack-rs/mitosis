@@ -3,15 +3,17 @@ use std::path::PathBuf;
 use std::process::ExitStatus;
 
 use async_compression::tokio::write::GzipEncoder;
+use futures::StreamExt;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
-use redis::aio::MultiplexedConnection;
+use redis::aio::{MultiplexedConnection, PubSub};
 use redis::AsyncCommands;
 use reqwest::header::CONTENT_LENGTH;
 use reqwest::{Client, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tokio_tar::{Builder, Header};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
@@ -46,26 +48,40 @@ pub struct TaskExecutor {
     pub(crate) task_credential: String,
     pub(crate) task_url: Url,
     pub(crate) task_cancel_token: CancellationToken,
-    pub(crate) task_fetch_interval: std::time::Duration,
+    pub(crate) polling_interval: std::time::Duration,
     pub(crate) task_cache_path: PathBuf,
     pub(crate) task_redis_conn: Option<MultiplexedConnection>,
+    pub(crate) task_redis_pubsub: Option<PubSub>,
 }
 
 impl TaskExecutor {
     async fn set_task_state_ex(&mut self, uuid: &Uuid, state: i32, ex: u64) {
         if let Some(ref mut conn) = self.task_redis_conn {
+            tracing::trace!("Set task state: {} -> {}", uuid, state);
             let _: Result<String, _> = conn.set_ex(format!("task:{}", uuid), state, ex).await;
         }
     }
 
     async fn set_task_state(&mut self, uuid: &Uuid, state: i32) {
         if let Some(ref mut conn) = self.task_redis_conn {
+            tracing::trace!("Set task state: {} -> {}", uuid, state);
             let _: Result<String, _> = conn.set(format!("task:{}", uuid), state).await;
+        }
+    }
+
+    async fn get_task_state(&mut self, uuid: &Uuid) -> Option<TaskExecState> {
+        if let Some(ref mut conn) = self.task_redis_conn {
+            tracing::trace!("Get task state: {}", uuid);
+            let state: Result<i32, _> = conn.get(format!("task:{}", uuid)).await;
+            state.ok().map(TaskExecState::from)
+        } else {
+            None
         }
     }
 
     async fn publish_state(&mut self, uuid: &Uuid, state: i32) {
         if let Some(ref mut conn) = self.task_redis_conn {
+            tracing::trace!("Publish task state: {} -> {}", uuid, state);
             let _: Result<i32, _> = conn.publish(format!("task:{}", uuid), state).await;
         }
     }
@@ -78,6 +94,126 @@ impl TaskExecutor {
     async fn announce_task_state_ex(&mut self, uuid: &Uuid, state: i32, ex: u64) {
         self.set_task_state_ex(uuid, state, ex).await;
         self.publish_state(uuid, state).await;
+    }
+
+    async fn watch_task(&mut self, uuid: &Uuid, state: TaskExecState) {
+        tracing::debug!("Watch task: {} -> {:?}", uuid, state);
+        let mut wait_until = Instant::now();
+        if let Some(pubsub) = self.task_redis_pubsub.as_mut() {
+            let channel_name = format!("task:{}", uuid);
+            let _ = pubsub.subscribe(&channel_name).await;
+            let mut stream = pubsub.on_message();
+            loop {
+                tokio::select! {
+                    biased;
+                    msg = stream.next() => {
+                        if let Some(msg) = msg {
+                            if msg.get_channel_name() == channel_name {
+                                if let Ok(task_state) = msg.get_payload::<i32>() {
+                                    let cur_state = TaskExecState::from(task_state);
+                                    if cur_state.is_reach(&state) {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    _ = tokio::time::sleep_until(wait_until) => {
+                        wait_until = Instant::now() + self.polling_interval;
+                        let cur_state = if let Some(ref mut conn) = self.task_redis_conn {
+                            tracing::trace!("Get task state: {}", uuid);
+                            let state: Result<i32, _> = conn.get(format!("task:{}", uuid)).await;
+                            state.ok().map(TaskExecState::from)
+                        } else {
+                            None
+                        };
+                        if let Some(cur_state) = cur_state {
+                            if cur_state.is_reach(&state) {
+                                break;
+                            }
+                        }
+                        self.task_url
+                            .set_path(format!("worker/task/{}", uuid).as_str());
+                        let resp = self
+                            .task_client
+                            .get(self.task_url.as_str())
+                            .bearer_auth(&self.task_credential)
+                            .send()
+                            .await;
+                        match resp {
+                            Ok(resp) => {
+                                if resp.status().is_success() {
+                                    if let Ok(task) = resp.json::<TaskQueryResp>().await {
+                                        if task.state.is_reach(&state, task.result) {
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    let resp: ErrorMsg = resp
+                                        .json()
+                                        .await
+                                        .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
+                                    tracing::error!("Get Task failed with error: {}", resp.msg);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Get task failed with error: {}", e);
+                            }
+                        }
+                    },
+                }
+            }
+        } else {
+            loop {
+                tokio::time::sleep_until(wait_until).await;
+                wait_until = Instant::now() + self.polling_interval;
+                if let Some(cur_state) = self.get_task_state(uuid).await {
+                    if cur_state.is_reach(&state) {
+                        break;
+                    }
+                }
+                self.task_url
+                    .set_path(format!("worker/task/{}", uuid).as_str());
+                let resp = self
+                    .task_client
+                    .get(self.task_url.as_str())
+                    .bearer_auth(&self.task_credential)
+                    .send()
+                    .await;
+                match resp {
+                    Ok(resp) => {
+                        if resp.status().is_success() {
+                            if let Ok(task) = resp.json::<TaskQueryResp>().await {
+                                if task.state.is_reach(&state, task.result) {
+                                    break;
+                                }
+                            }
+                        } else {
+                            let resp: ErrorMsg = resp
+                                .json()
+                                .await
+                                .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
+                            tracing::error!("Get Task failed with error: {}", resp.msg);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Get task failed with error: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn subscribe_task_exec_state(&mut self, uuid: &Uuid) {
+        if let Some(pubsub) = self.task_redis_pubsub.as_mut() {
+            let _ = pubsub.subscribe(format!("task:{}", uuid)).await;
+        }
+    }
+
+    pub async fn unsubscribe_task_exec_state(&mut self, uuid: &Uuid) {
+        if let Some(pubsub) = self.task_redis_pubsub.as_mut() {
+            let _ = pubsub.unsubscribe(format!("task:{}", uuid)).await;
+        }
     }
 }
 
@@ -223,14 +359,24 @@ impl MitoWorker {
         } else {
             None
         };
+        let task_redis_pubsub = if let Some(ref client) = self.redis_client {
+            client
+                .get_async_pubsub()
+                .await
+                .inspect_err(|e| tracing::warn!("{}", e))
+                .ok()
+        } else {
+            None
+        };
         TaskExecutor {
             task_client: self.http_client.clone(),
             task_credential: self.credential.clone(),
             task_url: self.config.coordinator_addr.clone(),
             task_cancel_token: self.cancel_token.clone(),
-            task_fetch_interval: self.config.fetch_task_interval,
+            polling_interval: self.config.polling_interval,
             task_cache_path: self.cache_path.clone(),
             task_redis_conn,
+            task_redis_pubsub,
         }
     }
 
@@ -318,12 +464,12 @@ impl MitoWorker {
                                     None => {
                                         tracing::debug!(
                                             "No task fetched. Next fetch after {:?}",
-                                            task_executor.task_fetch_interval
+                                            task_executor.polling_interval
                                         );
                                         tokio::select! {
                                             biased;
                                             _ = task_executor.task_cancel_token.cancelled() => break,
-                                            _ = tokio::time::sleep(task_executor.task_fetch_interval) => {},
+                                            _ = tokio::time::sleep(task_executor.polling_interval) => {},
                                         }
                                     }
                                 },
@@ -352,12 +498,12 @@ impl MitoWorker {
                             tracing::error!(
                                 "Fetching task failed with connection error: {}. Retry after {:?}",
                                 e,
-                                task_executor.task_fetch_interval
+                                task_executor.polling_interval
                             );
                             tokio::select! {
                                 biased;
                                 _ = task_executor.task_cancel_token.cancelled() => break,
-                                _ = tokio::time::sleep(task_executor.task_fetch_interval) => {},
+                                _ = tokio::time::sleep(task_executor.polling_interval) => {},
                             }
                             continue;
                         } else {
@@ -477,19 +623,16 @@ async fn execute_task(
             {
                 Ok(resp) => break resp,
                 Err(e) => {
-                    task_executor
-                        .announce_task_state(&task.uuid, TaskExecState::FetchResourceError as i32)
-                        .await;
                     if e.is_connect() && e.is_request() {
                         tracing::error!(
                             "Fetch resource info failed with connection error: {}. Retry after {:?}",
                             e,
-                            task_executor.task_fetch_interval
+                            task_executor.polling_interval
                         );
                         tokio::select! {
                             biased;
                             _ = task_executor.task_cancel_token.cancelled() => return Ok(()),
-                            _ = tokio::time::sleep(task_executor.task_fetch_interval) => {},
+                            _ = tokio::time::sleep(task_executor.polling_interval) => {},
                             _ = tokio::time::sleep_until(timeout_until) => {
                                 tracing::debug!("Fetching resource timeout, commit this task as canceled");
                                 let req = ReportTaskReq {
@@ -517,6 +660,13 @@ async fn execute_task(
                         }
                         continue;
                     } else {
+                        task_executor
+                            .announce_task_state_ex(
+                                &task.uuid,
+                                TaskExecState::FetchResourceError as i32,
+                                60,
+                            )
+                            .await;
                         return Err(RequestError::from(e).into());
                     }
                 }
@@ -637,6 +787,52 @@ async fn execute_task(
         }
     }
 
+    if let Some((watched_task_uuid, watched_task_state)) = task.spec.watch {
+        // Watch other tasks to specified state to trigger this task
+        if task_executor.task_redis_conn.is_some() && task_executor.task_redis_pubsub.is_some() {
+            task_executor
+                .announce_task_state(&task.uuid, TaskExecState::Watch as i32)
+                .await;
+            let tmp_cancel_token = task_executor.task_cancel_token.clone();
+            tokio::select! {
+                biased;
+                _ = tmp_cancel_token.cancelled() => {
+                    tracing::info!("Task watching interrupted by shutdown signal");
+                    task_executor.unsubscribe_task_exec_state(&watched_task_uuid).await;
+                    task_executor
+                        .announce_task_state_ex(&task.uuid, TaskExecState::WorkerExited as i32, 60)
+                        .await;
+                    return Ok(());
+                },
+                _ = task_executor.watch_task(&watched_task_uuid, watched_task_state) => {},
+                _ = tokio::time::sleep_until(timeout_until) => {
+                    tracing::debug!("Watching timeout, commit this task as canceled");
+                    task_executor.unsubscribe_task_exec_state(&watched_task_uuid).await;
+                    let req = ReportTaskReq {
+                        id: task.id,
+                        op: ReportTaskOp::Cancel,
+                    };
+                    report_task(task_executor, req).await?;
+                    let req = ReportTaskReq {
+                        id: task.id,
+                        op: ReportTaskOp::Commit(TaskResultSpec {
+                            exit_status: 0,
+                            msg: Some(TaskResultMessage::WatchTimeout),
+                        }),
+                    };
+                    report_task(task_executor, req).await?;
+                    task_executor
+                        .announce_task_state_ex(
+                            &task.uuid,
+                            TaskExecState::WatchTimeout as i32,
+                            60,
+                        )
+                        .await;
+                }
+            }
+        }
+    }
+
     task_executor
         .announce_task_state_ex(
             &task.uuid,
@@ -668,6 +864,7 @@ async fn execute_task(
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
     }
+
     let mut child = command.spawn().inspect_err(|e| {
         tracing::error!("Failed to spawn task: {}", e);
     })?;
@@ -713,7 +910,12 @@ async fn execute_task(
                 .await;
             return Ok(());
         },
-        output = process_output => output.map(TaskResult::Finish),
+        output = process_output => {
+            task_executor
+                .announce_task_state_ex(&task.uuid, TaskExecState::ExecFinished as i32, 660)
+                .await;
+            output.map(TaskResult::Finish)
+        },
         _ = tokio::time::sleep_until(timeout_until) => {
             tracing::debug!("Task execution timeout");
             task_executor
@@ -755,10 +957,12 @@ async fn execute_task(
                     exit_status,
                 }))
             }
-
         },
     }?;
     tracing::debug!("Task execution finished");
+    task_executor
+        .announce_task_state_ex(&task.uuid, TaskExecState::UploadResult as i32, 660)
+        .await;
     process_task_result(task.id, task.uuid, task_executor, output).await?;
     Ok(())
 }
@@ -774,12 +978,12 @@ async fn process_task_result(
         id,
         op: if is_finished {
             task_executor
-                .announce_task_state_ex(&uuid, TaskExecState::UploadFinishResult as i32, 660)
+                .announce_task_state_ex(&uuid, TaskExecState::UploadFinishedResult as i32, 660)
                 .await;
             ReportTaskOp::Finish
         } else {
             task_executor
-                .announce_task_state_ex(&uuid, TaskExecState::UploadCancelResult as i32, 660)
+                .announce_task_state_ex(&uuid, TaskExecState::UploadCancelledResult as i32, 660)
                 .await;
             ReportTaskOp::Cancel
         },
@@ -1026,12 +1230,12 @@ async fn process_task_result(
                             tracing::error!(
                                     "Request upload url failed with connection error: {}. Retry after {:?}",
                                     e,
-                                    task_executor.task_fetch_interval
+                                    task_executor.polling_interval
                                 );
                             tokio::select! {
                                 biased;
                                 _ = task_executor.task_cancel_token.cancelled() => return Ok(()),
-                                _ = tokio::time::sleep(task_executor.task_fetch_interval) => {},
+                                _ = tokio::time::sleep(task_executor.polling_interval) => {},
                             }
                             continue;
                         } else {
@@ -1084,7 +1288,7 @@ async fn process_task_result(
                                 tracing::error!(
                                     "Upload failed with connection error: {}. Retry after {:?}",
                                     e,
-                                    task_executor.task_fetch_interval
+                                    task_executor.polling_interval
                                 );
                                 tokio::select! {
                                     biased;
@@ -1093,7 +1297,7 @@ async fn process_task_result(
                                         tracing::warn!("Upload failed with timeout");
                                         return Ok(());
                                     }
-                                    _ = tokio::time::sleep(task_executor.task_fetch_interval) => {},
+                                    _ = tokio::time::sleep(task_executor.polling_interval) => {},
                                 }
                                 continue;
                             } else {
@@ -1136,6 +1340,9 @@ async fn process_task_result(
                     .await;
                 return Ok(());
             }
+            task_executor
+                .announce_task_state_ex(&uuid, TaskExecState::UploadResultFinished as i32, 60)
+                .await;
             // Commit the task result
             let req = ReportTaskReq {
                 id,
@@ -1203,12 +1410,12 @@ async fn report_task(
                     tracing::error!(
                         "Report task failed with connection error: {}. Retry after {:?}",
                         e,
-                        task_executor.task_fetch_interval
+                        task_executor.polling_interval
                     );
                     tokio::select! {
                         biased;
                         _ = task_executor.task_cancel_token.cancelled() => break,
-                        _ = tokio::time::sleep(task_executor.task_fetch_interval) => {},
+                        _ = tokio::time::sleep(task_executor.polling_interval) => {},
                     }
                     continue;
                 } else {

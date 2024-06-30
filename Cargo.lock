@@ -1861,6 +1861,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
+name = "matrix_match"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "652245b458eca972de41799ddaa5d2f221454f4511c8f7263431ab4a54bf5bc1"
+
+[[package]]
 name = "md-5"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1962,6 +1968,7 @@ dependencies = [
  "http-body-util",
  "humantime-serde",
  "jsonwebtoken",
+ "matrix_match",
  "md5",
  "nix 0.28.0",
  "once_cell",

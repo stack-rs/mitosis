@@ -6,8 +6,12 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use url::Url;
+use uuid::Uuid;
 
-use crate::{entity::content::ArtifactContentType, schema::RemoteResourceDownload};
+use crate::{
+    entity::{content::ArtifactContentType, state::TaskExecState},
+    schema::RemoteResourceDownload,
+};
 
 use super::coordinator::DEFAULT_COORDINATOR_ADDR;
 
@@ -148,6 +152,10 @@ pub struct SubmitTaskArgs {
     pub command: Vec<String>,
     #[arg(skip)]
     pub resources: Vec<RemoteResourceDownload>,
+    /// The UUID and the state of the task to watch before triggering this task.
+    /// Should specify it as `UUID,STATE`, e.g. `123e4567-e89b-12d3-a456-426614174000,ExecSpawned`.
+    #[arg(long, value_parser = parse_watch_task::<Uuid, TaskExecState>)]
+    pub watch: Option<(Uuid, TaskExecState)>,
 }
 
 /// Parse a single key-value pair
@@ -163,6 +171,22 @@ where
     let pos = s
         .find('=')
         .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
+    Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
+}
+
+/// Parse a single key-value pair
+fn parse_watch_task<T, U>(
+    s: &str,
+) -> Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
+where
+    T: std::str::FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
+    U: std::str::FromStr,
+    U::Err: std::error::Error + Send + Sync + 'static,
+{
+    let pos = s
+        .find(',')
+        .ok_or_else(|| format!("invalid watched task: no `,` found in `{s}`"))?;
     Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
 }
 

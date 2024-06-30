@@ -428,6 +428,7 @@ impl MitoClient {
                 args.envs,
                 args.resources,
                 args.terminal_output,
+                args.watch,
             ),
         }
     }

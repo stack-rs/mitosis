@@ -16,11 +16,11 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_tar::{Builder, Header};
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use url::Url;
 use uuid::Uuid;
 
+use crate::config::TracingGuard;
 use crate::entity::content::ArtifactContentType;
 use crate::entity::state::TaskExecState;
 use crate::error::RequestError;
@@ -239,15 +239,7 @@ impl MitoWorker {
         }
     }
 
-    pub async fn setup(
-        cli: &WorkerConfigCli,
-    ) -> crate::error::Result<(
-        Self,
-        Option<(
-            tracing::subscriber::DefaultGuard,
-            tracing_appender::non_blocking::WorkerGuard,
-        )>,
-    )> {
+    pub async fn setup(cli: &WorkerConfigCli) -> crate::error::Result<(Self, TracingGuard)> {
         tracing::debug!("Worker is setting up");
         let config = WorkerConfig::new(cli)?;
         let http_client = Client::new();
@@ -291,40 +283,7 @@ impl MitoWorker {
             tokio::fs::create_dir_all(&cache_path.join("exec")).await?;
             tokio::fs::create_dir_all(&cache_path.join("resource")).await?;
             tokio::fs::create_dir_all(&log_dir).await?;
-            let guards = if !config.no_log_file {
-                config
-                    .log_file
-                    .as_ref()
-                    .map(|p| p.relative())
-                    .or_else(|| {
-                        dirs::cache_dir().map(|mut p| {
-                            p.push("mitosis");
-                            p.push("worker");
-                            p
-                        })
-                    })
-                    .map(|log_dir| {
-                        let file_logger = tracing_appender::rolling::daily(
-                            log_dir,
-                            format!("{}.log", resp.worker_id),
-                        );
-                        let stdout = std::io::stdout.with_max_level(tracing::Level::INFO);
-                        let (non_blocking, _guard) = tracing_appender::non_blocking(file_logger);
-                        let _coordinator_subscriber = tracing_subscriber::registry()
-                            .with(
-                                tracing_subscriber::EnvFilter::try_from_default_env()
-                                    .unwrap_or_else(|_| "netmito=info".into()),
-                            )
-                            .with(
-                                tracing_subscriber::fmt::layer()
-                                    .with_writer(stdout.and(non_blocking)),
-                            )
-                            .set_default();
-                        (_coordinator_subscriber, _guard)
-                    })
-            } else {
-                None
-            };
+            let guards = config.setup_tracing_subscriber::<&uuid::Uuid, _>(&resp.worker_id)?;
             let redis_client = resp.redis_url.and_then(|url| {
                 redis::Client::open(url)
                     .inspect_err(|e| tracing::warn!("{}", e))

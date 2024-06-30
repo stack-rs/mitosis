@@ -6,4 +6,11 @@ pub use coordinator::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 pub(crate) use coordinator::{
     DECODING_KEY, ENCODING_KEY, INIT_ADMIN_USER, REDIS_CONNECTION_INFO, SERVER_CONFIG,
 };
+use tracing::subscriber::DefaultGuard;
+use tracing_appender::non_blocking::WorkerGuard;
 pub use worker::{WorkerConfig, WorkerConfigCli};
+
+pub struct TracingGuard {
+    pub subscriber_guard: Option<DefaultGuard>,
+    pub file_guard: Option<WorkerGuard>,
+}

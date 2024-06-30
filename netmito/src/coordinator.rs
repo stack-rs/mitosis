@@ -2,7 +2,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::api::router;
@@ -31,41 +30,9 @@ impl MitoCoordinator {
             .init();
         match CoordinatorConfig::new(&cli) {
             Ok(config) => {
-                let _guards = if !config.no_log_file {
-                    config
-                        .log_file
-                        .as_ref()
-                        .map(|p| p.relative())
-                        .or_else(|| {
-                            dirs::cache_dir().map(|mut p| {
-                                p.push("mitosis");
-                                p.push("coordinator");
-                                p
-                            })
-                        })
-                        .map(|log_dir| {
-                            let file_logger = tracing_appender::rolling::daily(
-                                log_dir,
-                                format!("{}.log", config.bind),
-                            );
-                            let stdout = std::io::stdout.with_max_level(tracing::Level::INFO);
-                            let (non_blocking, _guard) =
-                                tracing_appender::non_blocking(file_logger);
-                            let _coordinator_subscriber = tracing_subscriber::registry()
-                                .with(
-                                    tracing_subscriber::EnvFilter::try_from_default_env()
-                                        .unwrap_or_else(|_| "netmito=info".into()),
-                                )
-                                .with(
-                                    tracing_subscriber::fmt::layer()
-                                        .with_writer(stdout.and(non_blocking)),
-                                )
-                                .set_default();
-                            (_coordinator_subscriber, _guard)
-                        })
-                } else {
-                    None
-                };
+                let _guards = config.setup_tracing_subscriber().inspect_err(|e| {
+                    tracing::error!("{}", e);
+                });
                 match Self::setup(config).await {
                     Ok(coordinator) => {
                         if let Err(e) = coordinator.run().await {

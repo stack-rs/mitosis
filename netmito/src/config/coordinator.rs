@@ -18,8 +18,14 @@ use serde::{Deserialize, Serialize};
 use time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
-use crate::service::worker::{HeartbeatOp, HeartbeatQueue, TaskDispatcher, TaskDispatcherOp};
+use crate::{
+    error::Error,
+    service::worker::{HeartbeatOp, HeartbeatQueue, TaskDispatcher, TaskDispatcherOp},
+};
+
+use super::TracingGuard;
 
 pub const DEFAULT_COORDINATOR_ADDR: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5000);
@@ -42,8 +48,8 @@ pub struct CoordinatorConfig {
     pub(crate) access_token_expires_in: std::time::Duration,
     #[serde(with = "humantime_serde")]
     pub(crate) heartbeat_timeout: std::time::Duration,
-    pub(crate) log_file: Option<RelativePathBuf>,
-    pub(crate) no_log_file: bool,
+    pub(crate) log_path: Option<RelativePathBuf>,
+    pub(crate) file_log: bool,
 }
 
 #[derive(Args, Debug, Serialize, Default)]
@@ -109,14 +115,14 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub heartbeat_timeout: Option<String>,
-    /// The log file path. if not specified, then the default log file path would be used.
-    /// Use `--no-log-file`` to disable logging to file
+    /// The log file path. If not specified, then the default rolling log file path would be used.
+    /// If specified, then the log file would be exactly at the path specified.
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-    pub log_file: Option<String>,
-    /// Disable logging to file
+    pub log_path: Option<String>,
+    /// Enable logging to file
     #[arg(long)]
-    pub no_log_file: bool,
+    pub file_log: bool,
 }
 
 impl Default for CoordinatorConfig {
@@ -136,8 +142,8 @@ impl Default for CoordinatorConfig {
             access_token_public_path: "public.pem".to_string().into(),
             access_token_expires_in: std::time::Duration::from_secs(60 * 60 * 24 * 7),
             heartbeat_timeout: std::time::Duration::from_secs(600),
-            log_file: None,
-            no_log_file: false,
+            log_path: None,
+            file_log: false,
         }
     }
 }
@@ -285,6 +291,72 @@ impl CoordinatorConfig {
     pub async fn build_jwt_decoding_key(&self) -> crate::error::Result<DecodingKey> {
         let public_key = tokio::fs::read(&self.access_token_public_path.relative()).await?;
         Ok(DecodingKey::from_ed_pem(&public_key)?)
+    }
+
+    pub fn setup_tracing_subscriber(&self) -> crate::error::Result<TracingGuard> {
+        if self.file_log {
+            let file_logger = self
+                .log_path
+                .as_ref()
+                .and_then(|p| {
+                    let path = p.relative();
+                    let dir = path.parent();
+                    let file_name = path.file_name();
+                    match (dir, file_name) {
+                        (Some(dir), Some(file_name)) => {
+                            Some(tracing_appender::rolling::never(dir, file_name))
+                        }
+                        _ => None,
+                    }
+                })
+                .or_else(|| {
+                    dirs::cache_dir()
+                        .map(|mut p| {
+                            p.push("mitosis");
+                            p.push("coordinator");
+                            p
+                        })
+                        .map(|dir| {
+                            tracing_appender::rolling::daily(dir, format!("{}.log", self.bind))
+                        })
+                })
+                .ok_or(Error::ConfigError(figment::Error::from(
+                    "log path not valid and cache directory not found",
+                )))?;
+            let (non_blocking, guard) = tracing_appender::non_blocking(file_logger);
+            let env_filter = tracing_subscriber::EnvFilter::try_from_env("MITO_FILE_LOG")
+                .unwrap_or_else(|_| "netmito=info".into());
+            let coordinator_guard = tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer().with_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "netmito=info".into()),
+                    ),
+                )
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(non_blocking)
+                        .with_filter(env_filter),
+                )
+                .set_default();
+            Ok(TracingGuard {
+                subscriber_guard: Some(coordinator_guard),
+                file_guard: Some(guard),
+            })
+        } else {
+            let coordinator_guard = tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer().with_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "netmito=info".into()),
+                    ),
+                )
+                .set_default();
+            Ok(TracingGuard {
+                subscriber_guard: Some(coordinator_guard),
+                file_guard: None,
+            })
+        }
     }
 }
 

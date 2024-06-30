@@ -6,9 +6,12 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, time::Duration};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use url::Url;
 
-use super::coordinator::DEFAULT_COORDINATOR_ADDR;
+use crate::error::Error;
+
+use super::{coordinator::DEFAULT_COORDINATOR_ADDR, TracingGuard};
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct WorkerConfig {
@@ -22,8 +25,8 @@ pub struct WorkerConfig {
     pub(crate) password: Option<String>,
     pub(crate) groups: HashSet<String>,
     pub(crate) tags: HashSet<String>,
-    pub(crate) log_file: Option<RelativePathBuf>,
-    pub(crate) no_log_file: bool,
+    pub(crate) log_path: Option<RelativePathBuf>,
+    pub(crate) file_log: bool,
 }
 
 #[derive(Args, Debug, Serialize, Default)]
@@ -65,14 +68,14 @@ pub struct WorkerConfigCli {
     #[arg(short, long, num_args = 0.., value_delimiter = ',')]
     #[serde(skip_serializing_if = "::std::vec::Vec::is_empty")]
     pub tags: Vec<String>,
-    /// The log file path. if not specified, then the default log file path would be used.
-    /// Use `--no-log-file`` to disable logging to file
+    /// The log file path. If not specified, then the default rolling log file path would be used.
+    /// If specified, then the log file would be exactly at the path specified.
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-    pub log_file: Option<String>,
-    /// Disable logging to file
+    pub log_path: Option<String>,
+    /// Enable logging to file
     #[arg(long)]
-    pub no_log_file: bool,
+    pub file_log: bool,
 }
 
 impl Default for WorkerConfig {
@@ -86,8 +89,8 @@ impl Default for WorkerConfig {
             password: None,
             groups: HashSet::new(),
             tags: HashSet::new(),
-            log_file: None,
-            no_log_file: false,
+            log_path: None,
+            file_log: false,
         }
     }
 }
@@ -101,5 +104,76 @@ impl WorkerConfig {
             .merge(Serialized::from(cli, "worker"))
             .select("worker")
             .extract()?)
+    }
+
+    pub fn setup_tracing_subscriber<T, U>(&self, worker_id: U) -> crate::error::Result<TracingGuard>
+    where
+        T: std::fmt::Display,
+        U: Into<T>,
+    {
+        if self.file_log {
+            let file_logger = self
+                .log_path
+                .as_ref()
+                .and_then(|p| {
+                    let path = p.relative();
+                    let dir = path.parent();
+                    let file_name = path.file_name();
+                    match (dir, file_name) {
+                        (Some(dir), Some(file_name)) => {
+                            Some(tracing_appender::rolling::never(dir, file_name))
+                        }
+                        _ => None,
+                    }
+                })
+                .or_else(|| {
+                    dirs::cache_dir()
+                        .map(|mut p| {
+                            p.push("mitosis");
+                            p.push("worker");
+                            p
+                        })
+                        .map(|dir| {
+                            let id = worker_id.into();
+                            tracing_appender::rolling::never(dir, format!("{}.log", id))
+                        })
+                })
+                .ok_or(Error::ConfigError(figment::Error::from(
+                    "log path not valid and cache directory not found",
+                )))?;
+            let (non_blocking, guard) = tracing_appender::non_blocking(file_logger);
+            let env_filter = tracing_subscriber::EnvFilter::try_from_env("MITO_FILE_LOG")
+                .unwrap_or_else(|_| "netmito=info".into());
+            let coordinator_guard = tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer().with_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "netmito=info".into()),
+                    ),
+                )
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(non_blocking)
+                        .with_filter(env_filter),
+                )
+                .set_default();
+            Ok(TracingGuard {
+                subscriber_guard: Some(coordinator_guard),
+                file_guard: Some(guard),
+            })
+        } else {
+            let coordinator_guard = tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer().with_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "netmito=info".into()),
+                    ),
+                )
+                .set_default();
+            Ok(TracingGuard {
+                subscriber_guard: Some(coordinator_guard),
+                file_guard: None,
+            })
+        }
     }
 }

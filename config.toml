@@ -2,9 +2,10 @@
 [coordinator]
 bind = "127.0.0.1:5000"
 db_url = "postgres://mitosis:mitosis@localhost/mitosis"
-s3_url = "http://localhost:9000"
+s3_url = "http://127.0.0.1:9000"
 s3_access_key = "mitosis_access"
 s3_secret_key = "mitosis_secret"
+redis_url = "redis://:mitosis@localhost"
 admin_user = "mitosis_admin"
 admin_password = "mitosis_admin"
 access_token_private_path = "private.pem"

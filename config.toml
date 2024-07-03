@@ -13,7 +13,7 @@ access_token_expires_in = "7d"
 
 [worker]
 coordinator_addr = "http://127.0.0.1:5000"
-fetch_task_interval = "3m"
+polling_interval = "3m"
 heartbeat_interval = "5m"
 # credential_path is not set
 # user is not set

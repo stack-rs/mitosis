@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use clap_repl::ClapEditor;
 use redis::{
     aio::{MultiplexedConnection, PubSub},
@@ -22,13 +20,12 @@ use crate::{
     error::{get_error_from_resp, map_reqwest_err, RequestError},
     schema::{
         CreateGroupReq, CreateUserReq, RedisConnectionInfo, RemoteResourceDownloadResp,
-        ResourceDownloadInfo, SubmitTaskReq, SubmitTaskResp, TaskQueryResp, TaskSpec,
+        ResourceDownloadInfo, SubmitTaskReq, SubmitTaskResp, TaskQueryResp,
     },
     service::{auth::cred::get_user_credential, s3::download_file},
 };
 
 pub struct MitoClient {
-    config: ClientConfig,
     http_client: Client,
     url: Url,
     credential: String,
@@ -37,7 +34,7 @@ pub struct MitoClient {
 }
 
 impl MitoClient {
-    pub async fn main(cli: ClientConfigCli) {
+    pub async fn main(mut cli: ClientConfigCli) {
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::EnvFilter::try_from_default_env()
@@ -45,21 +42,38 @@ impl MitoClient {
             )
             .with(tracing_subscriber::fmt::layer())
             .init();
-        match Self::setup(&cli).await {
-            Ok(mut client) => {
-                if let Err(e) = client.run().await {
+        match ClientConfig::new(&cli) {
+            Ok(config) => match Self::setup(&config).await {
+                Ok(mut client) => {
+                    if let Some(cmd) = cli.command.take() {
+                        client.handle_command(cmd).await;
+                    }
+                    if cli.interactive {
+                        tracing::info!("Client is running in interactive mode. Enter 'quit' to exit and 'help' to see available commands.");
+                        let mut rl = ClapEditor::<ClientInteractiveShell>::new_with_prompt(
+                            "[mito::client]> ",
+                        );
+                        loop {
+                            if let Some(c) = rl.read_command() {
+                                if !client.handle_command(c.command).await {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
                     tracing::error!("{}", e);
                 }
-            }
+            },
             Err(e) => {
                 tracing::error!("{}", e);
             }
         }
     }
 
-    pub async fn setup(cli: &ClientConfigCli) -> crate::error::Result<Self> {
+    pub async fn setup(config: &ClientConfig) -> crate::error::Result<Self> {
         tracing::debug!("Client is setting up");
-        let config = ClientConfig::new(cli)?;
         let http_client = Client::new();
         let (username, credential) = get_user_credential(
             config.credential_path.as_ref(),
@@ -71,7 +85,6 @@ impl MitoClient {
         .await?;
         let url = config.coordinator_addr.clone();
         Ok(MitoClient {
-            config,
             http_client,
             url,
             credential,
@@ -156,25 +169,6 @@ impl MitoClient {
         }
     }
 
-    pub async fn run(&mut self) -> crate::error::Result<()> {
-        if let Some(cmd) = self.config.command.take() {
-            self.handle_command(cmd).await;
-        }
-        if self.config.interactive {
-            tracing::info!("Client is running in interactive mode. Enter 'quit' to exit and 'help' to see available commands.");
-            let mut rl = ClapEditor::<ClientInteractiveShell>::new_with_prompt("[mito::client]> ");
-            loop {
-                if let Some(c) = rl.read_command() {
-                    if !self.handle_command(c.command).await {
-                        break;
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     pub async fn create_user(&mut self, args: CreateUserArgs) -> crate::error::Result<()> {
         self.url.set_path("admin/user");
         let req = CreateUserReq {
@@ -218,8 +212,7 @@ impl MitoClient {
     }
 
     pub async fn get_task(&mut self, args: GetTaskArgs) -> crate::error::Result<TaskQueryResp> {
-        let uuid = Uuid::parse_str(&args.uuid)?;
-        self.url.set_path(&format!("user/task/{}", uuid));
+        self.url.set_path(&format!("user/task/{}", args.uuid));
         let resp = self
             .http_client
             .get(self.url.as_str())
@@ -260,25 +253,10 @@ impl MitoClient {
                 .json::<RemoteResourceDownloadResp>()
                 .await
                 .map_err(RequestError::from)?;
-            let local_path = args
-                .output_path
-                .and_then(|dir| {
-                    let dir = Path::new(&dir);
-                    if dir.is_dir() {
-                        let file_name = args.content_type.to_string();
-                        Some(dir.join(file_name))
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| {
-                    let file_name = args.content_type.to_string();
-                    Path::new("./").join(file_name)
-                });
-            download_file(&self.http_client, &download_resp, &local_path).await?;
+            download_file(&self.http_client, &download_resp, &args.output_path).await?;
             Ok(ResourceDownloadInfo {
                 size: download_resp.size,
-                local_path,
+                local_path: args.output_path,
             })
         } else {
             Err(get_error_from_resp(resp).await.into())
@@ -380,7 +358,7 @@ impl MitoClient {
                         tracing::error!("{}", e);
                     }
                 },
-                GetCommands::Artifact(args) => match self.get_artifact(args).await {
+                GetCommands::Artifact(args) => match self.get_artifact(args.into()).await {
                     Ok(info) => {
                         tracing::info!(
                             "Artifact of size {}B downloaded to {}",
@@ -395,7 +373,7 @@ impl MitoClient {
             },
             ClientCommand::Submit(args) => {
                 let group_name = args.group_name.clone().unwrap_or(self.username.clone());
-                match self.submit_task(args).await {
+                match self.submit_task(args.into()).await {
                     Ok(resp) => {
                         tracing::info!(
                             "Task submitted with id {} in group {} and a global uuid {}",
@@ -419,17 +397,11 @@ impl MitoClient {
     fn gen_submit_task_req(&self, args: SubmitTaskArgs) -> SubmitTaskReq {
         SubmitTaskReq {
             group_name: args.group_name.unwrap_or(self.username.clone()),
-            tags: args.tags.into_iter().collect(),
-            labels: args.labels.into_iter().collect(),
+            tags: args.tags,
+            labels: args.labels,
             timeout: args.timeout,
             priority: args.priority,
-            task_spec: TaskSpec::new(
-                args.command,
-                args.envs,
-                args.resources,
-                args.terminal_output,
-                args.watch,
-            ),
+            task_spec: args.task_spec,
         }
     }
 }

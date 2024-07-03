@@ -93,6 +93,11 @@ pub async fn download_file(
     resp: &RemoteResourceDownloadResp,
     local_path: impl AsRef<Path>,
 ) -> crate::error::Result<()> {
+    tracing::debug!(
+        "Downloading file from {} to {:?}",
+        resp.url,
+        local_path.as_ref()
+    );
     let mut resp = client
         .get(&resp.url)
         .send()

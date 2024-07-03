@@ -1,3 +1,8 @@
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
+
 use clap::{Args, Parser, Subcommand};
 use figment::{
     providers::{Env, Format, Serialized, Toml},
@@ -10,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     entity::{content::ArtifactContentType, state::TaskExecState},
-    schema::RemoteResourceDownload,
+    schema::{RemoteResourceDownload, TaskSpec},
 };
 
 use super::coordinator::DEFAULT_COORDINATOR_ADDR;
@@ -21,8 +26,6 @@ pub struct ClientConfig {
     pub(crate) credential_path: Option<RelativePathBuf>,
     pub(crate) user: Option<String>,
     pub(crate) password: Option<String>,
-    pub(crate) interactive: bool,
-    pub(crate) command: Option<ClientCommand>,
 }
 
 #[derive(Args, Debug, Serialize, Default)]
@@ -71,7 +74,7 @@ pub enum ClientCommand {
     /// Get the info of a user, group, worker or task (not implemented yet)
     Get(GetArgs),
     /// Submit a task
-    Submit(SubmitTaskArgs),
+    Submit(SubmitTaskCmdArgs),
     /// Quit the client's interactive mode
     Quit,
 }
@@ -101,7 +104,7 @@ pub enum GetCommands {
     /// Get the info of a task
     Task(GetTaskArgs),
     /// Download an artifact of a task
-    Artifact(GetArtifactArgs),
+    Artifact(GetArtifactCmdArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -124,8 +127,24 @@ pub struct CreateGroupArgs {
     pub name: String,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize)]
 pub struct SubmitTaskArgs {
+    /// The name of the group this task is submitted to
+    pub group_name: Option<String>,
+    /// The tags of the task, used to filter workers to execute the task
+    pub tags: HashSet<String>,
+    /// The labels of the task, used for querying tasks
+    pub labels: HashSet<String>,
+    /// The timeout of the task.
+    pub timeout: std::time::Duration,
+    /// The priority of the task.
+    pub priority: i32,
+    /// The specification of the task
+    pub task_spec: TaskSpec,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct SubmitTaskCmdArgs {
     /// The name of the group this task is submitted to
     #[arg(short = 'g', long = "group")]
     pub group_name: Option<String>,
@@ -193,19 +212,29 @@ where
 #[derive(Serialize, Debug, Deserialize, Args)]
 pub struct GetTaskArgs {
     /// The UUID of the task
-    pub uuid: String,
+    pub uuid: Uuid,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
-pub struct GetArtifactArgs {
+pub struct GetArtifactCmdArgs {
     /// The UUID of the artifact
-    pub uuid: String,
+    pub uuid: Uuid,
     /// The content type of the artifact
     #[arg(value_enum)]
     pub content_type: ArtifactContentType,
     /// Specify the directory to download the artifact
     #[arg(short, long = "output")]
     pub output_path: Option<String>,
+}
+
+#[derive(Serialize, Debug, Deserialize)]
+pub struct GetArtifactArgs {
+    /// The UUID of the artifact
+    pub uuid: Uuid,
+    /// The content type of the artifact
+    pub content_type: ArtifactContentType,
+    /// Specify the path to download the artifact
+    pub output_path: PathBuf,
 }
 
 impl Default for ClientConfig {
@@ -215,8 +244,6 @@ impl Default for ClientConfig {
             credential_path: None,
             user: None,
             password: None,
-            interactive: false,
-            command: None,
         }
     }
 }
@@ -245,8 +272,8 @@ impl From<GetArgs> for ClientCommand {
     }
 }
 
-impl From<SubmitTaskArgs> for ClientCommand {
-    fn from(args: SubmitTaskArgs) -> Self {
+impl From<SubmitTaskCmdArgs> for ClientCommand {
+    fn from(args: SubmitTaskCmdArgs) -> Self {
         Self::Submit(args)
     }
 }
@@ -311,22 +338,67 @@ impl From<GetTaskArgs> for ClientCommand {
     }
 }
 
-impl From<GetArtifactArgs> for GetCommands {
-    fn from(args: GetArtifactArgs) -> Self {
+impl From<GetArtifactCmdArgs> for GetCommands {
+    fn from(args: GetArtifactCmdArgs) -> Self {
         Self::Artifact(args)
     }
 }
 
-impl From<GetArtifactArgs> for GetArgs {
-    fn from(args: GetArtifactArgs) -> Self {
+impl From<GetArtifactCmdArgs> for GetArgs {
+    fn from(args: GetArtifactCmdArgs) -> Self {
         Self {
             command: GetCommands::Artifact(args),
         }
     }
 }
 
-impl From<GetArtifactArgs> for ClientCommand {
-    fn from(args: GetArtifactArgs) -> Self {
+impl From<GetArtifactCmdArgs> for ClientCommand {
+    fn from(args: GetArtifactCmdArgs) -> Self {
         Self::Get(args.into())
+    }
+}
+
+impl From<GetArtifactCmdArgs> for GetArtifactArgs {
+    fn from(args: GetArtifactCmdArgs) -> Self {
+        let output_path = args
+            .output_path
+            .map(|dir| {
+                let dir = Path::new(&dir);
+                if dir.is_dir() {
+                    let file_name = args.content_type.to_string();
+                    dir.join(file_name)
+                } else {
+                    dir.to_path_buf()
+                }
+            })
+            .unwrap_or_else(|| {
+                let file_name = args.content_type.to_string();
+                Path::new("").join(file_name)
+            });
+        Self {
+            uuid: args.uuid,
+            content_type: args.content_type,
+            output_path,
+        }
+    }
+}
+
+impl From<SubmitTaskCmdArgs> for SubmitTaskArgs {
+    fn from(args: SubmitTaskCmdArgs) -> Self {
+        let task_spec = TaskSpec::new(
+            args.command,
+            args.envs,
+            args.resources,
+            args.terminal_output,
+            args.watch,
+        );
+        Self {
+            group_name: args.group_name,
+            tags: args.tags.into_iter().collect(),
+            labels: args.labels.into_iter().collect(),
+            timeout: args.timeout,
+            priority: args.priority,
+            task_spec,
+        }
     }
 }

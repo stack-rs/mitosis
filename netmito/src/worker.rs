@@ -226,22 +226,26 @@ impl MitoWorker {
             )
             .with(tracing_subscriber::fmt::layer())
             .init();
-        match Self::setup(&cli).await {
-            Ok((mut worker, _guards)) => {
-                if let Err(e) = worker.run().await {
+        match WorkerConfig::new(&cli) {
+            Ok(config) => match Self::setup(config).await {
+                Ok((mut worker, _guards)) => {
+                    if let Err(e) = worker.run().await {
+                        tracing::error!("{}", e);
+                    }
+                    worker.cleanup().await;
+                }
+                Err(e) => {
                     tracing::error!("{}", e);
                 }
-                worker.cleanup().await;
-            }
+            },
             Err(e) => {
                 tracing::error!("{}", e);
             }
         }
     }
 
-    pub async fn setup(cli: &WorkerConfigCli) -> crate::error::Result<(Self, TracingGuard)> {
+    pub async fn setup(config: WorkerConfig) -> crate::error::Result<(Self, TracingGuard)> {
         tracing::debug!("Worker is setting up");
-        let config = WorkerConfig::new(cli)?;
         let http_client = Client::new();
         let (_, credential) = get_user_credential(
             config.credential_path.as_ref(),

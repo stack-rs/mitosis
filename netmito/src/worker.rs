@@ -144,7 +144,7 @@ impl TaskExecutor {
                             Ok(resp) => {
                                 if resp.status().is_success() {
                                     if let Ok(task) = resp.json::<TaskQueryResp>().await {
-                                        if task.state.is_reach(&state, task.result) {
+                                        if task.info.state.is_reach(&state, task.info.result) {
                                             break;
                                         }
                                     }
@@ -184,7 +184,7 @@ impl TaskExecutor {
                     Ok(resp) => {
                         if resp.status().is_success() {
                             if let Ok(task) = resp.json::<TaskQueryResp>().await {
-                                if task.state.is_reach(&state, task.result) {
+                                if task.info.state.is_reach(&state, task.info.result) {
                                     break;
                                 }
                             }

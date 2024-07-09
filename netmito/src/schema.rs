@@ -3,6 +3,7 @@ use std::{
     path::PathBuf,
 };
 
+use sea_orm::FromQueryResult;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -148,8 +149,25 @@ pub struct ArtifactQueryResp {
     pub updated_at: OffsetDateTime,
 }
 
+#[derive(Debug, Serialize, Deserialize, FromQueryResult)]
+pub struct TaskQueryInfo {
+    pub uuid: Uuid,
+    pub creator_username: String,
+    pub group_name: String,
+    pub task_id: i64,
+    pub tags: Vec<String>,
+    pub labels: Vec<String>,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    pub state: TaskState,
+    pub timeout: i64,
+    pub priority: i32,
+    pub spec: serde_json::Value,
+    pub result: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
-pub struct TaskQueryResp {
+pub struct ParsedTaskQueryInfo {
     pub uuid: Uuid,
     pub creator_username: String,
     pub group_name: String,
@@ -163,6 +181,11 @@ pub struct TaskQueryResp {
     pub priority: i32,
     pub spec: TaskSpec,
     pub result: Option<TaskResultSpec>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TaskQueryResp {
+    pub info: ParsedTaskQueryInfo,
     pub artifacts: Vec<ArtifactQueryResp>,
 }
 

@@ -317,25 +317,25 @@ impl MitoClient {
             ClientCommand::Get(args) => match args.command {
                 GetCommands::Task(args) => match self.get_task(args).await {
                     Ok(resp) => {
-                        tracing::info!("Task UUID: {}", resp.uuid);
-                        tracing::info!("State: {}", resp.state);
+                        tracing::info!("Task UUID: {}", resp.info.uuid);
+                        tracing::info!("State: {}", resp.info.state);
                         tracing::info!(
                             "Created by user {} as the #{} task in Group {}",
-                            resp.creator_username,
-                            resp.task_id,
-                            resp.group_name
+                            resp.info.creator_username,
+                            resp.info.task_id,
+                            resp.info.group_name
                         );
-                        tracing::info!("Tags: {:?}", resp.tags);
-                        tracing::info!("Labels: {:?}", resp.labels);
-                        let timeout = std::time::Duration::from_secs(resp.timeout as u64);
-                        tracing::info!("Timeout {:?} and Priority {}", timeout, resp.priority);
+                        tracing::info!("Tags: {:?}", resp.info.tags);
+                        tracing::info!("Labels: {:?}", resp.info.labels);
+                        let timeout = std::time::Duration::from_secs(resp.info.timeout as u64);
+                        tracing::info!("Timeout {:?} and Priority {}", timeout, resp.info.priority);
                         tracing::info!(
                             "Created at {} and Updated at {}",
-                            resp.created_at,
-                            resp.updated_at
+                            resp.info.created_at,
+                            resp.info.updated_at
                         );
-                        tracing::info!("Task Spec: {:?}", resp.spec);
-                        if let Some(result) = resp.result {
+                        tracing::info!("Task Spec: {:?}", resp.info.spec);
+                        if let Some(result) = resp.info.result {
                             tracing::info!("Task Result: {:?}", result);
                         } else {
                             tracing::info!("Task Result: None");

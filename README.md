@@ -1,21 +1,23 @@
 # Mitosis: A Unified Transport Evaluation Framework
 
-## Preparation
+## Usage
 
-### Generate keys
+### Coordinator
+
+#### Dependencies
+
+pkg-config, libssl-dev
+
+#### Generate keys
 
 ```bash
 openssl genpkey -algorithm ed25519 -out private.pem
 openssl pkey -in private.pem -pubout -out public.pem
 ```
 
-### Set .env file
+#### Set .env file
 
 Copy `.env.example` to `.env` and set the variables in it.
-
-## Usage
-
-### Coordinator
 
 Configuring all the relevant options in config.toml for coordinator and run the following command:
 

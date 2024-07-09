@@ -1,9 +1,12 @@
 use sea_orm::sea_query::extension::postgres::PgExpr;
-use sea_orm::sea_query::Query;
+use sea_orm::sea_query::{Alias, Query};
 use sea_orm::{prelude::*, FromQueryResult, Set};
 use uuid::Uuid;
 
-use crate::schema::{ArtifactQueryResp, SubmitTaskReq, SubmitTaskResp, TaskQueryResp};
+use crate::schema::{
+    ArtifactQueryResp, ParsedTaskQueryInfo, SubmitTaskReq, SubmitTaskResp, TaskQueryInfo,
+    TaskQueryResp,
+};
 use crate::{config::InfraPool, schema::TaskSpec};
 
 use crate::{
@@ -120,15 +123,94 @@ pub async fn user_submit_task(
 }
 
 pub async fn get_task(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<TaskQueryResp> {
-    let task = match ActiveTask::Entity::find()
-        .filter(ActiveTask::Column::Uuid.eq(uuid))
+    let active_task_stmt = Query::select()
+        .columns([
+            (ActiveTask::Entity, ActiveTask::Column::Uuid),
+            (ActiveTask::Entity, ActiveTask::Column::TaskId),
+            (ActiveTask::Entity, ActiveTask::Column::Tags),
+            (ActiveTask::Entity, ActiveTask::Column::Labels),
+            (ActiveTask::Entity, ActiveTask::Column::CreatedAt),
+            (ActiveTask::Entity, ActiveTask::Column::UpdatedAt),
+            (ActiveTask::Entity, ActiveTask::Column::State),
+            (ActiveTask::Entity, ActiveTask::Column::Timeout),
+            (ActiveTask::Entity, ActiveTask::Column::Priority),
+            (ActiveTask::Entity, ActiveTask::Column::Spec),
+            (ActiveTask::Entity, ActiveTask::Column::Result),
+        ])
+        .expr_as(
+            Expr::col((User::Entity, User::Column::Username)),
+            Alias::new("creator_username"),
+        )
+        .expr_as(
+            Expr::col((Group::Entity, Group::Column::GroupName)),
+            Alias::new("group_name"),
+        )
+        .from(ActiveTask::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            User::Entity,
+            Expr::col((User::Entity, User::Column::Id)).eq(Expr::col((
+                ActiveTask::Entity,
+                ActiveTask::Column::CreatorId,
+            ))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((ActiveTask::Entity, ActiveTask::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        .and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::Uuid)).eq(uuid))
+        .limit(1)
+        .to_owned();
+    let archive_task_stmt = Query::select()
+        .columns([
+            (ArchivedTasks::Entity, ArchivedTasks::Column::Uuid),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::TaskId),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::Tags),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::Labels),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::CreatedAt),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::UpdatedAt),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::State),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::Timeout),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::Priority),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::Spec),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::Result),
+        ])
+        .expr_as(
+            Expr::col((User::Entity, User::Column::Username)),
+            Alias::new("creator_username"),
+        )
+        .expr_as(
+            Expr::col((Group::Entity, Group::Column::GroupName)),
+            Alias::new("group_name"),
+        )
+        .from(ArchivedTasks::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            User::Entity,
+            Expr::col((User::Entity, User::Column::Id)).eq(Expr::col((
+                ArchivedTasks::Entity,
+                ArchivedTasks::Column::CreatorId,
+            ))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        .and_where(Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Uuid)).eq(uuid))
+        .limit(1)
+        .to_owned();
+    let builder = pool.db.get_database_backend();
+    let info = match TaskQueryInfo::find_by_statement(builder.build(&active_task_stmt))
         .one(&pool.db)
         .await?
     {
-        Some(task) => Some(task.into()),
+        Some(task) => Some(task),
         None => {
-            ArchivedTasks::Entity::find()
-                .filter(ArchivedTasks::Column::Uuid.eq(uuid))
+            TaskQueryInfo::find_by_statement(builder.build(&archive_task_stmt))
                 .one(&pool.db)
                 .await?
         }
@@ -144,38 +226,22 @@ pub async fn get_task(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<Task
         .into_iter()
         .map(Into::into)
         .collect();
-    let creator_username = User::Entity::find_by_id(task.creator_id)
-        .one(&pool.db)
-        .await?
-        .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
-            "Task with uuid {}",
-            uuid
-        ))))?
-        .username;
-    let group_name = Group::Entity::find_by_id(task.group_id)
-        .one(&pool.db)
-        .await?
-        .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
-            "Task with uuid {}",
-            uuid
-        ))))?
-        .group_name;
-    Ok(TaskQueryResp {
-        uuid: task.uuid,
-        creator_username,
-        group_name,
-        task_id: task.task_id,
-        tags: task.tags,
-        labels: task.labels,
-        created_at: task.created_at,
-        updated_at: task.updated_at,
-        state: task.state,
-        timeout: task.timeout,
-        priority: task.priority,
-        spec: serde_json::from_value(task.spec)?,
-        result: task.result.map(serde_json::from_value).transpose()?,
-        artifacts,
-    })
+    let info = ParsedTaskQueryInfo {
+        uuid: info.uuid,
+        creator_username: info.creator_username,
+        group_name: info.group_name,
+        task_id: info.task_id,
+        tags: info.tags,
+        labels: info.labels,
+        created_at: info.created_at,
+        updated_at: info.updated_at,
+        state: info.state,
+        timeout: info.timeout,
+        priority: info.priority,
+        spec: serde_json::from_value(info.spec)?,
+        result: info.result.map(serde_json::from_value).transpose()?,
+    };
+    Ok(TaskQueryResp { info, artifacts })
 }
 
 #[derive(Debug, Clone, FromQueryResult)]

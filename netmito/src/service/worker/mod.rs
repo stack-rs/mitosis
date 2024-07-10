@@ -43,25 +43,27 @@ pub async fn register_worker(
         ..Default::default()
     };
     let worker = worker.insert(&pool.db).await?;
-    let write_groups: Vec<i64> = Group::Entity::find()
-        .filter(Expr::col(Group::Column::GroupName).eq(sea_orm::sea_query::PgFunc::any(groups)))
-        .select_only()
-        .column(Group::Column::Id)
-        .into_tuple()
-        .all(&pool.db)
-        .await?;
-    let write_group_relations = write_groups
-        .into_iter()
-        .map(|group_id| GroupWorker::ActiveModel {
-            group_id: Set(group_id),
-            worker_id: Set(worker.id),
-            role: Set(GroupWorkerRole::Write),
-            ..Default::default()
-        })
-        .collect::<Vec<_>>();
-    GroupWorker::Entity::insert_many(write_group_relations)
-        .exec(&pool.db)
-        .await?;
+    if !groups.is_empty() {
+        let write_groups: Vec<i64> = Group::Entity::find()
+            .filter(Expr::col(Group::Column::GroupName).eq(sea_orm::sea_query::PgFunc::any(groups)))
+            .select_only()
+            .column(Group::Column::Id)
+            .into_tuple()
+            .all(&pool.db)
+            .await?;
+        let write_group_relations = write_groups
+            .into_iter()
+            .map(|group_id| GroupWorker::ActiveModel {
+                group_id: Set(group_id),
+                worker_id: Set(worker.id),
+                role: Set(GroupWorkerRole::Write),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        GroupWorker::Entity::insert_many(write_group_relations)
+            .exec(&pool.db)
+            .await?;
+    }
 
     let builder = pool.db.get_database_backend();
     let group_id_stmt = Query::select()

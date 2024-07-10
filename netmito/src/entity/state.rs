@@ -1,5 +1,6 @@
 use std::{convert::Infallible, fmt::Display, str::FromStr};
 
+use clap::ValueEnum;
 use matrix_match::matrix_match;
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -22,7 +23,9 @@ pub enum GroupState {
     Deleted = 2,
 }
 
-#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy, ValueEnum,
+)]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum TaskState {
     /// Reserved for future use

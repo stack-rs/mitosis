@@ -183,6 +183,20 @@ pub struct ParsedTaskQueryInfo {
     pub result: Option<TaskResultSpec>,
 }
 
+/// Each field in the query request is optional, and the server will return all tasks if no field is specified.
+///
+/// The relationship between the fields is AND.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TasksQueryReq {
+    pub creator_username: Option<String>,
+    pub group_name: Option<String>,
+    pub tags: Option<HashSet<String>>,
+    pub labels: Option<HashSet<String>>,
+    pub state: Option<TaskState>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TaskQueryResp {
     pub info: ParsedTaskQueryInfo,

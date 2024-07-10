@@ -14,8 +14,11 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    entity::{content::ArtifactContentType, state::TaskExecState},
-    schema::{RemoteResourceDownload, TaskSpec},
+    entity::{
+        content::ArtifactContentType,
+        state::{TaskExecState, TaskState},
+    },
+    schema::{RemoteResourceDownload, TaskSpec, TasksQueryReq},
 };
 
 use super::coordinator::DEFAULT_COORDINATOR_ADDR;
@@ -105,6 +108,8 @@ pub enum GetCommands {
     Task(GetTaskArgs),
     /// Download an artifact of a task
     Artifact(GetArtifactCmdArgs),
+    /// Query a list of tasks subject to the filter
+    Tasks(GetTasksArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -225,6 +230,31 @@ pub struct GetArtifactCmdArgs {
     /// Specify the directory to download the artifact
     #[arg(short, long = "output")]
     pub output_path: Option<String>,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct GetTasksArgs {
+    /// The username of the creator who submitted the tasks
+    #[arg(short, long)]
+    pub creator: Option<String>,
+    /// The name of the group the tasks belong to
+    #[arg(short, long)]
+    pub group: Option<String>,
+    /// The tags of the tasks
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub tags: Vec<String>,
+    /// The labels of the tasks
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub labels: Vec<String>,
+    /// The state of the tasks
+    #[arg(short, long)]
+    pub state: Option<TaskState>,
+    /// The limit of the tasks to query
+    #[arg(long)]
+    pub limit: Option<u64>,
+    /// The offset of the tasks to query
+    #[arg(long)]
+    pub offset: Option<u64>,
 }
 
 #[derive(Serialize, Debug, Deserialize)]
@@ -383,6 +413,26 @@ impl From<GetArtifactCmdArgs> for GetArtifactArgs {
     }
 }
 
+impl From<GetTasksArgs> for GetCommands {
+    fn from(args: GetTasksArgs) -> Self {
+        Self::Tasks(args)
+    }
+}
+
+impl From<GetTasksArgs> for GetArgs {
+    fn from(args: GetTasksArgs) -> Self {
+        Self {
+            command: GetCommands::Tasks(args),
+        }
+    }
+}
+
+impl From<GetTasksArgs> for ClientCommand {
+    fn from(args: GetTasksArgs) -> Self {
+        Self::Get(args.into())
+    }
+}
+
 impl From<SubmitTaskCmdArgs> for SubmitTaskArgs {
     fn from(args: SubmitTaskCmdArgs) -> Self {
         let task_spec = TaskSpec::new(
@@ -399,6 +449,28 @@ impl From<SubmitTaskCmdArgs> for SubmitTaskArgs {
             timeout: args.timeout,
             priority: args.priority,
             task_spec,
+        }
+    }
+}
+
+impl From<GetTasksArgs> for TasksQueryReq {
+    fn from(args: GetTasksArgs) -> Self {
+        Self {
+            creator_username: args.creator,
+            group_name: args.group,
+            tags: if args.tags.is_empty() {
+                None
+            } else {
+                Some(args.tags.into_iter().collect())
+            },
+            labels: if args.labels.is_empty() {
+                None
+            } else {
+                Some(args.labels.into_iter().collect())
+            },
+            state: args.state,
+            limit: args.limit,
+            offset: args.offset,
         }
     }
 }

@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::schema::{
     ArtifactQueryResp, ParsedTaskQueryInfo, SubmitTaskReq, SubmitTaskResp, TaskQueryInfo,
-    TaskQueryResp,
+    TaskQueryResp, TasksQueryReq,
 };
 use crate::{config::InfraPool, schema::TaskSpec};
 
@@ -242,6 +242,142 @@ pub async fn get_task(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<Task
         result: info.result.map(serde_json::from_value).transpose()?,
     };
     Ok(TaskQueryResp { info, artifacts })
+}
+
+pub async fn query_task_list(
+    pool: &InfraPool,
+    query: TasksQueryReq,
+) -> crate::error::Result<Vec<TaskQueryInfo>> {
+    let mut active_stmt = Query::select();
+    active_stmt
+        .columns([
+            (ActiveTask::Entity, ActiveTask::Column::Uuid),
+            (ActiveTask::Entity, ActiveTask::Column::TaskId),
+            (ActiveTask::Entity, ActiveTask::Column::Tags),
+            (ActiveTask::Entity, ActiveTask::Column::Labels),
+            (ActiveTask::Entity, ActiveTask::Column::CreatedAt),
+            (ActiveTask::Entity, ActiveTask::Column::UpdatedAt),
+            (ActiveTask::Entity, ActiveTask::Column::State),
+            (ActiveTask::Entity, ActiveTask::Column::Timeout),
+            (ActiveTask::Entity, ActiveTask::Column::Priority),
+            (ActiveTask::Entity, ActiveTask::Column::Spec),
+            (ActiveTask::Entity, ActiveTask::Column::Result),
+        ])
+        .expr_as(
+            Expr::col((User::Entity, User::Column::Username)),
+            Alias::new("creator_username"),
+        )
+        .expr_as(
+            Expr::col((Group::Entity, Group::Column::GroupName)),
+            Alias::new("group_name"),
+        )
+        .from(ActiveTask::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            User::Entity,
+            Expr::col((User::Entity, User::Column::Id)).eq(Expr::col((
+                ActiveTask::Entity,
+                ActiveTask::Column::CreatorId,
+            ))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((ActiveTask::Entity, ActiveTask::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        );
+    let mut archive_stmt = Query::select();
+    archive_stmt
+        .columns([
+            (ArchivedTasks::Entity, ArchivedTasks::Column::Uuid),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::TaskId),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::Tags),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::Labels),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::CreatedAt),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::UpdatedAt),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::State),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::Timeout),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::Priority),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::Spec),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::Result),
+        ])
+        .expr_as(
+            Expr::col((User::Entity, User::Column::Username)),
+            Alias::new("creator_username"),
+        )
+        .expr_as(
+            Expr::col((Group::Entity, Group::Column::GroupName)),
+            Alias::new("group_name"),
+        )
+        .from(ArchivedTasks::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            User::Entity,
+            Expr::col((User::Entity, User::Column::Id)).eq(Expr::col((
+                ArchivedTasks::Entity,
+                ArchivedTasks::Column::CreatorId,
+            ))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        );
+    if let Some(creator_username) = query.creator_username {
+        active_stmt.and_where(
+            Expr::col((User::Entity, User::Column::Username)).eq(creator_username.clone()),
+        );
+        archive_stmt
+            .and_where(Expr::col((User::Entity, User::Column::Username)).eq(creator_username));
+    }
+    if let Some(group_name) = query.group_name {
+        active_stmt
+            .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()));
+        archive_stmt.and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name));
+    }
+    if let Some(tags) = query.tags {
+        let tags = Vec::from_iter(tags);
+        active_stmt.and_where(
+            Expr::col((ActiveTask::Entity, ActiveTask::Column::Tags)).contains(tags.clone()),
+        );
+        archive_stmt.and_where(
+            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Tags)).contains(tags),
+        );
+    }
+    if let Some(labels) = query.labels {
+        let labels = Vec::from_iter(labels);
+        active_stmt.and_where(
+            Expr::col((ActiveTask::Entity, ActiveTask::Column::Labels)).contains(labels.clone()),
+        );
+        archive_stmt.and_where(
+            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Labels)).contains(labels),
+        );
+    }
+    if let Some(state) = query.state {
+        active_stmt.and_where(
+            Expr::col((ActiveTask::Entity, ActiveTask::Column::State)).eq(state),
+        );
+        archive_stmt
+            .and_where(Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::State)).eq(state));
+    }
+    if let Some(limit) = query.limit {
+        active_stmt.limit(limit);
+        archive_stmt.limit(limit);
+    }
+    if let Some(offset) = query.offset {
+        active_stmt.offset(offset);
+        archive_stmt.offset(offset);
+    }
+    let builder = pool.db.get_database_backend();
+    let mut active_info = TaskQueryInfo::find_by_statement(builder.build(&active_stmt))
+        .all(&pool.db)
+        .await?;
+    let mut archive_info = TaskQueryInfo::find_by_statement(builder.build(&archive_stmt))
+        .all(&pool.db)
+        .await?;
+    active_info.append(&mut archive_info);
+    Ok(active_info)
 }
 
 #[derive(Debug, Clone, FromQueryResult)]

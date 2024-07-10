@@ -19,8 +19,9 @@ use crate::{
     entity::state::TaskExecState,
     error::{get_error_from_resp, map_reqwest_err, RequestError},
     schema::{
-        CreateGroupReq, CreateUserReq, RedisConnectionInfo, RemoteResourceDownloadResp,
-        ResourceDownloadInfo, SubmitTaskReq, SubmitTaskResp, TaskQueryResp,
+        CreateGroupReq, CreateUserReq, ParsedTaskQueryInfo, RedisConnectionInfo,
+        RemoteResourceDownloadResp, ResourceDownloadInfo, SubmitTaskReq, SubmitTaskResp,
+        TaskQueryInfo, TaskQueryResp, TasksQueryReq,
     },
     service::{auth::cred::get_user_credential, s3::download_file},
 };
@@ -263,6 +264,30 @@ impl MitoClient {
         }
     }
 
+    pub async fn get_tasks(
+        &mut self,
+        args: TasksQueryReq,
+    ) -> crate::error::Result<Vec<TaskQueryInfo>> {
+        self.url.set_path("user/tasks");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .json(&args)
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<Vec<TaskQueryInfo>>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn submit_task(
         &mut self,
         args: SubmitTaskArgs,
@@ -317,29 +342,7 @@ impl MitoClient {
             ClientCommand::Get(args) => match args.command {
                 GetCommands::Task(args) => match self.get_task(args).await {
                     Ok(resp) => {
-                        tracing::info!("Task UUID: {}", resp.info.uuid);
-                        tracing::info!("State: {}", resp.info.state);
-                        tracing::info!(
-                            "Created by user {} as the #{} task in Group {}",
-                            resp.info.creator_username,
-                            resp.info.task_id,
-                            resp.info.group_name
-                        );
-                        tracing::info!("Tags: {:?}", resp.info.tags);
-                        tracing::info!("Labels: {:?}", resp.info.labels);
-                        let timeout = std::time::Duration::from_secs(resp.info.timeout as u64);
-                        tracing::info!("Timeout {:?} and Priority {}", timeout, resp.info.priority);
-                        tracing::info!(
-                            "Created at {} and Updated at {}",
-                            resp.info.created_at,
-                            resp.info.updated_at
-                        );
-                        tracing::info!("Task Spec: {:?}", resp.info.spec);
-                        if let Some(result) = resp.info.result {
-                            tracing::info!("Task Result: {:?}", result);
-                        } else {
-                            tracing::info!("Task Result: None");
-                        }
+                        output_parsed_task_info(&resp.info);
                         if resp.artifacts.is_empty() {
                             tracing::info!("Artifacts: None");
                         } else {
@@ -365,6 +368,16 @@ impl MitoClient {
                             info.size,
                             info.local_path.display()
                         );
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                GetCommands::Tasks(args) => match self.get_tasks(args.into()).await {
+                    Ok(tasks) => {
+                        for task in tasks {
+                            output_task_info(&task);
+                        }
                     }
                     Err(e) => {
                         tracing::error!("{}", e);
@@ -403,5 +416,57 @@ impl MitoClient {
             priority: args.priority,
             task_spec: args.task_spec,
         }
+    }
+}
+
+fn output_parsed_task_info(info: &ParsedTaskQueryInfo) {
+    tracing::info!("Task UUID: {}", info.uuid);
+    tracing::info!("State: {}", info.state);
+    tracing::info!(
+        "Created by user {} as the #{} task in Group {}",
+        info.creator_username,
+        info.task_id,
+        info.group_name
+    );
+    tracing::info!("Tags: {:?}", info.tags);
+    tracing::info!("Labels: {:?}", info.labels);
+    let timeout = std::time::Duration::from_secs(info.timeout as u64);
+    tracing::info!("Timeout {:?} and Priority {}", timeout, info.priority);
+    tracing::info!(
+        "Created at {} and Updated at {}",
+        info.created_at,
+        info.updated_at
+    );
+    tracing::info!("Task Spec: {:?}", info.spec);
+    if let Some(result) = &info.result {
+        tracing::info!("Task Result: {:?}", result);
+    } else {
+        tracing::info!("Task Result: None");
+    }
+}
+
+fn output_task_info(info: &TaskQueryInfo) {
+    tracing::info!("Task UUID: {}", info.uuid);
+    tracing::info!("State: {}", info.state);
+    tracing::info!(
+        "Created by user {} as the #{} task in Group {}",
+        info.creator_username,
+        info.task_id,
+        info.group_name
+    );
+    tracing::info!("Tags: {:?}", info.tags);
+    tracing::info!("Labels: {:?}", info.labels);
+    let timeout = std::time::Duration::from_secs(info.timeout as u64);
+    tracing::info!("Timeout {:?} and Priority {}", timeout, info.priority);
+    tracing::info!(
+        "Created at {} and Updated at {}",
+        info.created_at,
+        info.updated_at
+    );
+    tracing::info!("Task Spec: {}", info.spec);
+    if let Some(result) = &info.result {
+        tracing::info!("Task Result: {}", result);
+    } else {
+        tracing::info!("Task Result: None");
     }
 }

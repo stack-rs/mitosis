@@ -78,6 +78,8 @@ pub enum ClientCommand {
     Get(GetArgs),
     /// Submit a task
     Submit(SubmitTaskCmdArgs),
+    /// Download an attachment to a group
+    Upload(UploadAttachmentArgs),
     /// Quit the client's interactive mode
     Quit,
 }
@@ -108,6 +110,8 @@ pub enum GetCommands {
     Task(GetTaskArgs),
     /// Download an artifact of a task
     Artifact(GetArtifactCmdArgs),
+    /// Download an attachment of a group
+    Attachment(GetAttachmentCmdArgs),
     /// Query a list of tasks subject to the filter
     Tasks(GetTasksArgs),
 }
@@ -267,6 +271,38 @@ pub struct GetArtifactArgs {
     pub output_path: PathBuf,
 }
 
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct GetAttachmentCmdArgs {
+    /// The group of the attachment belongs to
+    pub group_name: String,
+    /// The key of the attachment
+    pub key: String,
+    /// Specify the path to download the artifact
+    #[arg(short, long = "output")]
+    pub output_path: Option<String>,
+}
+
+#[derive(Serialize, Debug, Deserialize)]
+pub struct GetAttachmentArgs {
+    /// The group of the attachment belongs to
+    pub group_name: String,
+    /// The key of the attachment
+    pub key: String,
+    /// Specify the path to download the artifact
+    pub output_path: PathBuf,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct UploadAttachmentArgs {
+    /// The group of the attachment uploaded to
+    #[arg(short = 'g', long = "group")]
+    pub group_name: Option<String>,
+    /// The path of the local file to upload
+    pub local_file: PathBuf,
+    /// The key of the attachment uploaded to. If not specified, the filename will be used.
+    pub key: Option<String>,
+}
+
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
@@ -413,6 +449,51 @@ impl From<GetArtifactCmdArgs> for GetArtifactArgs {
     }
 }
 
+impl From<GetAttachmentCmdArgs> for GetCommands {
+    fn from(args: GetAttachmentCmdArgs) -> Self {
+        Self::Attachment(args)
+    }
+}
+
+impl From<GetAttachmentCmdArgs> for GetArgs {
+    fn from(args: GetAttachmentCmdArgs) -> Self {
+        Self {
+            command: GetCommands::Attachment(args),
+        }
+    }
+}
+
+impl From<GetAttachmentCmdArgs> for ClientCommand {
+    fn from(args: GetAttachmentCmdArgs) -> Self {
+        Self::Get(args.into())
+    }
+}
+
+impl From<GetAttachmentCmdArgs> for GetAttachmentArgs {
+    fn from(args: GetAttachmentCmdArgs) -> Self {
+        let output_path = args
+            .output_path
+            .map(|dir| {
+                let dir = Path::new(&dir);
+                if dir.is_dir() {
+                    let file_name = args.key.clone();
+                    dir.join(file_name)
+                } else {
+                    dir.to_path_buf()
+                }
+            })
+            .unwrap_or_else(|| {
+                let file_name = args.key.clone();
+                Path::new("").join(file_name)
+            });
+        Self {
+            group_name: args.group_name,
+            key: args.key,
+            output_path,
+        }
+    }
+}
+
 impl From<GetTasksArgs> for GetCommands {
     fn from(args: GetTasksArgs) -> Self {
         Self::Tasks(args)
@@ -472,5 +553,11 @@ impl From<GetTasksArgs> for TasksQueryReq {
             limit: args.limit,
             offset: args.offset,
         }
+    }
+}
+
+impl From<UploadAttachmentArgs> for ClientCommand {
+    fn from(args: UploadAttachmentArgs) -> Self {
+        Self::Upload(args)
     }
 }

@@ -3,7 +3,7 @@ use redis::{
     aio::{MultiplexedConnection, PubSub},
     AsyncCommands, Msg,
 };
-use reqwest::Client;
+use reqwest::{header::CONTENT_LENGTH, Client};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use url::Url;
 use uuid::Uuid;
@@ -12,7 +12,8 @@ use crate::{
     config::{
         client::{
             ClientCommand, ClientInteractiveShell, CreateCommands, CreateGroupArgs, CreateUserArgs,
-            GetArtifactArgs, GetCommands, GetTaskArgs, SubmitTaskArgs,
+            GetArtifactArgs, GetAttachmentArgs, GetCommands, GetTaskArgs, SubmitTaskArgs,
+            UploadAttachmentArgs,
         },
         ClientConfig, ClientConfigCli,
     },
@@ -21,7 +22,7 @@ use crate::{
     schema::{
         CreateGroupReq, CreateUserReq, ParsedTaskQueryInfo, RedisConnectionInfo,
         RemoteResourceDownloadResp, ResourceDownloadInfo, SubmitTaskReq, SubmitTaskResp,
-        TaskQueryInfo, TaskQueryResp, TasksQueryReq,
+        TaskQueryInfo, TaskQueryResp, TasksQueryReq, UploadAttachmentReq, UploadAttachmentResp,
     },
     service::{auth::cred::get_user_credential, s3::download_file},
 };
@@ -264,6 +265,36 @@ impl MitoClient {
         }
     }
 
+    pub async fn get_attachment(
+        &mut self,
+        args: GetAttachmentArgs,
+    ) -> crate::error::Result<ResourceDownloadInfo> {
+        self.url.set_path(&format!(
+            "user/attachments/{}/{}",
+            args.group_name, args.key
+        ));
+        let resp = self
+            .http_client
+            .get(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let download_resp = resp
+                .json::<RemoteResourceDownloadResp>()
+                .await
+                .map_err(RequestError::from)?;
+            download_file(&self.http_client, &download_resp, &args.output_path).await?;
+            Ok(ResourceDownloadInfo {
+                size: download_resp.size,
+                local_path: args.output_path,
+            })
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn get_tasks(
         &mut self,
         args: TasksQueryReq,
@@ -308,6 +339,62 @@ impl MitoClient {
                 .await
                 .map_err(RequestError::from)?;
             Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn upload_attachment(
+        &mut self,
+        args: UploadAttachmentArgs,
+    ) -> crate::error::Result<()> {
+        self.url.set_path("user/attachment");
+        let key = match args.key {
+            Some(k) => k,
+            None => args
+                .local_file
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .ok_or(crate::error::Error::Custom("Key is required".to_string()))?,
+        };
+        let content_length = args
+            .local_file
+            .metadata()
+            .map_err(crate::error::Error::from)?
+            .len();
+        let req = UploadAttachmentReq {
+            group_name: args.group_name.unwrap_or(self.username.clone()),
+            key,
+            content_length: content_length as i64,
+        };
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .json(&req)
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<UploadAttachmentResp>()
+                .await
+                .map_err(RequestError::from)?;
+            let file = tokio::fs::File::open(args.local_file).await?;
+            let upload_file = self
+                .http_client
+                .put(resp.url)
+                .header(CONTENT_LENGTH, content_length)
+                .body(file)
+                .send()
+                .await
+                .map_err(map_reqwest_err)?;
+            if upload_file.status().is_success() {
+                Ok(())
+            } else {
+                Err(get_error_from_resp(upload_file).await.into())
+            }
         } else {
             Err(get_error_from_resp(resp).await.into())
         }
@@ -383,6 +470,18 @@ impl MitoClient {
                         tracing::error!("{}", e);
                     }
                 },
+                GetCommands::Attachment(args) => match self.get_attachment(args.into()).await {
+                    Ok(info) => {
+                        tracing::info!(
+                            "Attachment of size {}B downloaded to {}",
+                            info.size,
+                            info.local_path.display()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
             },
             ClientCommand::Submit(args) => {
                 let group_name = args.group_name.clone().unwrap_or(self.username.clone());
@@ -400,6 +499,14 @@ impl MitoClient {
                     }
                 }
             }
+            ClientCommand::Upload(args) => match self.upload_attachment(args).await {
+                Ok(_) => {
+                    tracing::info!("Attachment uploaded successfully");
+                }
+                Err(e) => {
+                    tracing::error!("{}", e);
+                }
+            },
             ClientCommand::Quit => {
                 return false;
             }

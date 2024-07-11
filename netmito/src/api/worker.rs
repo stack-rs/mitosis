@@ -13,7 +13,7 @@ use crate::{
     schema::*,
     service::{
         auth::{token::generate_token, worker_auth_middleware, AuthUser, AuthWorker},
-        s3::get_artifact,
+        s3::{get_artifact, get_attachment},
         task::get_task,
         worker,
     },
@@ -26,6 +26,7 @@ pub fn worker_router(st: InfraPool) -> Router<InfraPool> {
         .route("/task", post(report_task).get(fetch_task))
         .route("/task/:uuid", get(query_task))
         .route("/artifacts/:uuid/:content_type", get(download_artifact))
+        .route("/attachments/:uuid/*key", get(download_attachment))
         .layer(middleware::from_fn_with_state(
             st.clone(),
             worker_auth_middleware,
@@ -141,6 +142,24 @@ pub async fn download_artifact(
             }
         })?;
     Ok(Json(artifact))
+}
+
+pub async fn download_attachment(
+    Extension(_): Extension<AuthWorker>,
+    State(pool): State<InfraPool>,
+    Path((uuid, key)): Path<(Uuid, String)>,
+) -> Result<Json<RemoteResourceDownloadResp>, ApiError> {
+    let attachment = get_attachment(&pool, uuid, key)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(attachment))
 }
 
 pub async fn query_task(

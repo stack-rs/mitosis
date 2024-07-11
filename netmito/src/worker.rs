@@ -573,7 +573,7 @@ async fn execute_task(
             RemoteResource::Attachment { key } => {
                 task_executor
                     .task_url
-                    .set_path(&format!("worker/attachments/{}", key));
+                    .set_path(&format!("worker/attachments/{}/{}", task.uuid, key));
             }
         };
         let resp = loop {

@@ -525,7 +525,7 @@ impl MigrationTrait for Migration {
                     )
                     .index(
                         Index::create()
-                            .name("idx_attachments-group_id-path")
+                            .name("idx_attachments-group_id-key")
                             .table(Attachments::Table)
                             .unique()
                             .col(Attachments::GroupId)

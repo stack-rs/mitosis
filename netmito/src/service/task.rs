@@ -355,9 +355,7 @@ pub async fn query_task_list(
         );
     }
     if let Some(state) = query.state {
-        active_stmt.and_where(
-            Expr::col((ActiveTask::Entity, ActiveTask::Column::State)).eq(state),
-        );
+        active_stmt.and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::State)).eq(state));
         archive_stmt
             .and_where(Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::State)).eq(state));
     }

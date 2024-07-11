@@ -464,7 +464,7 @@ pub async fn report_task(
                 .transaction::<_, String, Error>(|txn| {
                     Box::pin(async move {
                         let group = Group::Entity::find_by_id(group_id).one(txn).await?.ok_or(
-                            ApiError::InvalidRequest("Group fot the task not found".to_string()),
+                            ApiError::InvalidRequest("Group for the task not found".to_string()),
                         )?;
                         if group.state != GroupState::Active {
                             return Err(ApiError::InvalidRequest(

@@ -16,7 +16,7 @@ use crate::{
     schema::*,
     service::{
         auth::{user_auth_middleware, user_login, AuthUser},
-        s3::get_artifact,
+        s3::{get_artifact, user_get_attachment, user_upload_attachment},
         task::{get_task, query_task_list, user_submit_task},
     },
 };
@@ -28,6 +28,8 @@ pub fn user_router(st: InfraPool) -> Router<InfraPool> {
         .route("/task/:uuid", get(query_task))
         .route("/tasks", post(query_tasks))
         .route("/artifacts/:uuid/:content_type", get(download_artifact))
+        .route("/attachments/:group_name/*key", get(download_attachment))
+        .route("/attachment", post(upload_attachment))
         .route("/redis", get(query_redis_connection_info))
         .layer(middleware::from_fn_with_state(
             st.clone(),
@@ -124,6 +126,42 @@ pub async fn download_artifact(
             }
         })?;
     Ok(Json(artifact))
+}
+
+pub async fn upload_attachment(
+    Extension(_): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Json(req): Json<UploadAttachmentReq>,
+) -> Result<Json<UploadAttachmentResp>, ApiError> {
+    let url = user_upload_attachment(&pool, req.group_name, req.key, req.content_length)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(UploadAttachmentResp { url }))
+}
+
+pub async fn download_attachment(
+    Extension(_): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path((group_name, key)): Path<(String, String)>,
+) -> Result<Json<RemoteResourceDownloadResp>, ApiError> {
+    let attachment = user_get_attachment(&pool, group_name, key)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(attachment))
 }
 
 pub async fn query_redis_connection_info(

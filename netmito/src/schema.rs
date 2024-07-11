@@ -109,6 +109,18 @@ pub struct ReportTaskResp {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct UploadAttachmentReq {
+    pub group_name: String,
+    pub key: String,
+    pub content_length: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UploadAttachmentResp {
+    pub url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SubmitTaskReq {
     pub group_name: String,
     pub tags: HashSet<String>,

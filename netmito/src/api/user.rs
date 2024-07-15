@@ -131,11 +131,11 @@ pub async fn download_artifact(
 }
 
 pub async fn upload_attachment(
-    Extension(_): Extension<AuthUser>,
+    Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
     Json(req): Json<UploadAttachmentReq>,
 ) -> Result<Json<UploadAttachmentResp>, ApiError> {
-    let url = user_upload_attachment(&pool, req.group_name, req.key, req.content_length)
+    let url = user_upload_attachment(u.id, &pool, req.group_name, req.key, req.content_length)
         .await
         .map_err(|e| match e {
             crate::error::Error::AuthError(err) => ApiError::AuthError(err),

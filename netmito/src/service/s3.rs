@@ -10,14 +10,18 @@ use sea_orm::{
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-use crate::entity::{
-    active_tasks as ActiveTask, archived_tasks as ArchivedTask, artifacts as Artifact,
-    attachments as Attachment, content::ArtifactContentType, groups as Group,
-};
 use crate::entity::{content::AttachmentContentType, state::GroupState};
 use crate::error::{get_error_from_resp, map_reqwest_err, ApiError, RequestError};
 use crate::schema::RemoteResourceDownloadResp;
 use crate::{config::InfraPool, error::S3Error};
+use crate::{
+    entity::{
+        active_tasks as ActiveTask, archived_tasks as ArchivedTask, artifacts as Artifact,
+        attachments as Attachment, content::ArtifactContentType, groups as Group,
+        role::UserGroupRole, user_group as UserGroup,
+    },
+    error::AuthError,
+};
 
 pub async fn create_bucket(client: &Client, bucket_name: &str) -> Result<(), S3Error> {
     match client.create_bucket().bucket(bucket_name).send().await {
@@ -208,6 +212,7 @@ pub async fn user_get_attachment(
 }
 
 pub async fn user_upload_attachment(
+    user_id: i64,
     pool: &InfraPool,
     group_name: String,
     key: String,
@@ -233,6 +238,15 @@ pub async fn user_upload_attachment(
                     .ok_or(ApiError::NotFound(format!("Group {}", group_name)))?;
                 if group.state != GroupState::Active {
                     return Err(ApiError::InvalidRequest("Group is not active".to_string()).into());
+                }
+                let user_group = UserGroup::Entity::find()
+                    .filter(UserGroup::Column::UserId.eq(user_id))
+                    .filter(UserGroup::Column::GroupId.eq(group.id))
+                    .one(txn)
+                    .await?
+                    .ok_or(AuthError::PermissionDenied)?;
+                if user_group.role == UserGroupRole::Read {
+                    return Err(AuthError::PermissionDenied.into());
                 }
                 let attachment = Attachment::Entity::find()
                     .filter(Attachment::Column::GroupId.eq(group.id))

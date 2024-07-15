@@ -117,6 +117,8 @@ pub enum ApiError {
     NotFound(String),
     #[error("Resource quota exceeded")]
     QuotaExceeded,
+    #[error(transparent)]
+    PresignS3Error(#[from] S3Error),
 }
 
 #[derive(Serialize, Debug, Deserialize)]
@@ -174,6 +176,7 @@ impl GetStatusCode for ApiError {
             ApiError::AlreadyExists(_) => StatusCode::CONFLICT,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::QuotaExceeded => StatusCode::FORBIDDEN,
+            ApiError::PresignS3Error(_) => StatusCode::BAD_REQUEST,
         }
     }
 }

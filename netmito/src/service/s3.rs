@@ -44,8 +44,8 @@ pub async fn get_presigned_upload_link<T: Into<String>>(
     if length <= 0 {
         return Err(S3Error::InvalidContentLength(length));
     }
-    // At least valid for 1 day and at most valid for 7 days
-    let expires = Duration::from_secs(604800.min(86400.max(length as u64 / 1000000)));
+    // Restrict the link to be valid for at most 15 minutes
+    let expires = Duration::from_secs(900);
     let resp = client
         .put_object()
         .bucket(bucket)
@@ -62,8 +62,8 @@ pub async fn get_presigned_download_link<T: Into<String>>(
     key: T,
     length: i64,
 ) -> Result<String, S3Error> {
-    // At least valid for 3 days and at most valid for 10 days
-    let expires = Duration::from_secs(864000.min(259200.max(length as u64 / 1000000)));
+    // At least valid for 3 days and at most valid for 7 days
+    let expires = Duration::from_secs(604800.min(259200.max(length as u64 / 1000000)));
     let resp = client
         .get_object()
         .bucket(bucket)
@@ -211,7 +211,7 @@ pub async fn user_upload_attachment(
     pool: &InfraPool,
     group_name: String,
     key: String,
-    content_length: i64,
+    content_length: u64,
 ) -> Result<String, crate::error::Error> {
     tracing::debug!(
         "Uploading attachment to group {} with key {} and size {}",
@@ -219,6 +219,7 @@ pub async fn user_upload_attachment(
         key,
         content_length
     );
+    let content_length = content_length as i64;
     let s3_client = pool.s3.clone();
     let now = TimeDateTimeWithTimeZone::now_utc();
     let uri = pool
@@ -238,21 +239,29 @@ pub async fn user_upload_attachment(
                     .filter(Attachment::Column::Key.eq(key.clone()))
                     .one(txn)
                     .await?;
+                let s3_object_key = format!("{}/{}", group_name, key);
+                let url: String;
                 match attachment {
                     Some(attachment) => {
+                        let recorded_content_length = content_length.max(attachment.size);
                         let new_storage_used =
-                            group.storage_used + content_length - attachment.size;
+                            group.storage_used + (recorded_content_length - attachment.size);
                         if new_storage_used > group.storage_quota {
                             return Err(ApiError::QuotaExceeded.into());
                         }
+                        url = get_presigned_upload_link(
+                            &s3_client,
+                            "mitosis-attachments",
+                            s3_object_key,
+                            content_length,
+                        )
+                        .await
+                        .map_err(ApiError::from)?;
                         let attachment = Attachment::ActiveModel {
                             id: Set(attachment.id),
-                            group_id: Set(group.id),
-                            key: Set(key.clone()),
-                            content_type: Set(AttachmentContentType::NoSet),
-                            size: Set(content_length),
-                            created_at: Set(now),
+                            size: Set(recorded_content_length),
                             updated_at: Set(now),
+                            ..Default::default()
                         };
                         attachment.update(txn).await?;
                         let group = Group::ActiveModel {
@@ -268,6 +277,14 @@ pub async fn user_upload_attachment(
                         if new_storage_used > group.storage_quota {
                             return Err(ApiError::QuotaExceeded.into());
                         }
+                        url = get_presigned_upload_link(
+                            &s3_client,
+                            "mitosis-attachments",
+                            s3_object_key,
+                            content_length,
+                        )
+                        .await
+                        .map_err(ApiError::from)?;
                         let attachment = Attachment::ActiveModel {
                             group_id: Set(group.id),
                             key: Set(key.clone()),
@@ -287,14 +304,7 @@ pub async fn user_upload_attachment(
                         group.update(txn).await?;
                     }
                 }
-                let key = format!("{}/{}", group_name, key);
-                Ok(get_presigned_upload_link(
-                    &s3_client,
-                    "mitosis-attachments",
-                    key,
-                    content_length,
-                )
-                .await?)
+                Ok(url)
             })
         })
         .await?;

@@ -366,7 +366,7 @@ impl MitoClient {
         let req = UploadAttachmentReq {
             group_name: args.group_name.unwrap_or(self.username.clone()),
             key,
-            content_length: content_length as i64,
+            content_length,
         };
         let resp = self
             .http_client

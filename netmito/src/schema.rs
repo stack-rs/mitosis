@@ -99,7 +99,7 @@ pub enum ReportTaskOp {
     Commit(TaskResultSpec),
     Upload {
         content_type: ArtifactContentType,
-        content_length: i64,
+        content_length: u64,
     },
 }
 
@@ -112,7 +112,7 @@ pub struct ReportTaskResp {
 pub struct UploadAttachmentReq {
     pub group_name: String,
     pub key: String,
-    pub content_length: i64,
+    pub content_length: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

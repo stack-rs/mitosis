@@ -953,7 +953,7 @@ async fn process_task_result(
     };
     report_task(task_executor, req).await?;
     // Compress possible output and upload
-    let (tx, mut rx) = mpsc::channel::<(ArtifactContentType, i64)>(3);
+    let (tx, mut rx) = mpsc::channel::<(ArtifactContentType, u64)>(3);
     // Spawn a task to archive the output
     let timeout_cancel_token = CancellationToken::new();
     let archive_timeout_cancel_token = timeout_cancel_token.clone();
@@ -997,7 +997,7 @@ async fn process_task_result(
                             let mut encoder = ar.into_inner().await?;
                             encoder.shutdown().await?;
                             let file = encoder.into_inner();
-                            let size = file.metadata().await?.len() as i64;
+                            let size = file.metadata().await?.len();
                             if let Err(e) = tx.send((ArtifactContentType::Result, size)).await {
                                 tracing::error!("Failed to send result size: {}", e);
                                 archive_cancel_token.cancel();
@@ -1053,7 +1053,7 @@ async fn process_task_result(
                             let mut encoder = ar.into_inner().await?;
                             encoder.shutdown().await?;
                             let file = encoder.into_inner();
-                            let size = file.metadata().await?.len() as i64;
+                            let size = file.metadata().await?.len();
                             if let Err(e) = tx.send((ArtifactContentType::ExecLog, size)).await {
                                 tracing::error!("Failed to compress exec log: {}", e);
                                 archive_cancel_token.cancel();
@@ -1112,7 +1112,7 @@ async fn process_task_result(
                             let mut encoder = ar.into_inner().await?;
                             encoder.shutdown().await?;
                             let file = encoder.into_inner();
-                            let size = file.metadata().await?.len() as i64;
+                            let size = file.metadata().await?.len();
                             if let Err(e) = tx.send((ArtifactContentType::StdLog, size)).await {
                                 tracing::error!("Failed to compress std log: {}", e);
                                 archive_cancel_token.cancel();

@@ -450,6 +450,7 @@ pub async fn report_task(
                 content_type,
                 content_length
             );
+            let content_length = content_length as i64;
             let updated_task = ActiveTask::ActiveModel {
                 id: Set(task_id),
                 updated_at: Set(now),
@@ -477,16 +478,27 @@ pub async fn report_task(
                             .filter(Artifact::Column::ContentType.eq(content_type))
                             .one(txn)
                             .await?;
+                        let s3_object_key = format!("{}/{}", task.uuid, content_type);
+                        let url: String;
                         match artifact {
                             Some(artifact) => {
+                                let recorded_content_length = content_length.max(artifact.size);
                                 let new_storage_used =
-                                    group.storage_used + content_length - artifact.size;
+                                    group.storage_used + (recorded_content_length - artifact.size);
                                 if new_storage_used > group.storage_quota {
                                     return Err(ApiError::QuotaExceeded.into());
                                 }
+                                url = get_presigned_upload_link(
+                                    &s3_client,
+                                    "mitosis-artifacts",
+                                    s3_object_key,
+                                    content_length,
+                                )
+                                .await
+                                .map_err(ApiError::from)?;
                                 let artifact = Artifact::ActiveModel {
                                     id: Set(artifact.id),
-                                    size: Set(content_length),
+                                    size: Set(recorded_content_length),
                                     updated_at: Set(now),
                                     ..Default::default()
                                 };
@@ -504,6 +516,14 @@ pub async fn report_task(
                                 if new_storage_used > group.storage_quota {
                                     return Err(ApiError::QuotaExceeded.into());
                                 }
+                                url = get_presigned_upload_link(
+                                    &s3_client,
+                                    "mitosis-artifacts",
+                                    s3_object_key,
+                                    content_length,
+                                )
+                                .await
+                                .map_err(ApiError::from)?;
                                 let artifact = Artifact::ActiveModel {
                                     task_id: Set(task.uuid),
                                     content_type: Set(content_type),
@@ -522,14 +542,7 @@ pub async fn report_task(
                                 group.update(txn).await?;
                             }
                         }
-                        let key = format!("{}/{}", task.uuid, content_type);
-                        Ok(get_presigned_upload_link(
-                            &s3_client,
-                            "mitosis-artifacts",
-                            key,
-                            content_length,
-                        )
-                        .await?)
+                        Ok(url)
                     })
                 })
                 .await?;

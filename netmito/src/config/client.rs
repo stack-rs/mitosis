@@ -74,11 +74,13 @@ pub struct ClientInteractiveShell {
 pub enum ClientCommand {
     /// Create a new user or group
     Create(CreateArgs),
-    /// Get the info of a user, group, worker or task (not implemented yet)
+    /// Get the info of a task, artifact, attachment, or a list of tasks subject to the filters
+    ///
+    /// Query for users or workers is not implemented yet
     Get(GetArgs),
     /// Submit a task
     Submit(SubmitTaskCmdArgs),
-    /// Download an attachment to a group
+    /// Upload an attachment to a group
     Upload(UploadAttachmentArgs),
     /// Quit the client's interactive mode
     Quit,

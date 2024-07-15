@@ -99,7 +99,7 @@ pub async fn get_artifact(
 #[derive(FromQueryResult)]
 struct GroupInfo {
     id: i64,
-    name: String,
+    group_name: String,
 }
 
 pub async fn get_attachment(
@@ -123,7 +123,7 @@ pub async fn get_attachment(
         .to_owned();
     let GroupInfo {
         id: group_id,
-        name: group_name,
+        group_name,
     } = match GroupInfo::find_by_statement(builder.build(&active_group_name_stmt))
         .one(&pool.db)
         .await?

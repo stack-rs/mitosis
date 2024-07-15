@@ -95,18 +95,20 @@ pub async fn query_task(
 }
 
 pub async fn query_tasks(
-    Extension(_): Extension<AuthUser>,
+    Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
     Json(req): Json<TasksQueryReq>,
 ) -> Result<Json<Vec<TaskQueryInfo>>, ApiError> {
-    let tasks = query_task_list(&pool, req).await.map_err(|e| match e {
-        crate::error::Error::AuthError(err) => ApiError::AuthError(err),
-        crate::error::Error::ApiError(e) => e,
-        _ => {
-            tracing::error!("{}", e);
-            ApiError::InternalServerError
-        }
-    })?;
+    let tasks = query_task_list(u.id, &pool, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
     Ok(Json(tasks))
 }
 

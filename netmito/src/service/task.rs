@@ -3,6 +3,7 @@ use sea_orm::sea_query::{Alias, Query};
 use sea_orm::{prelude::*, FromQueryResult, Set};
 use uuid::Uuid;
 
+use crate::entity::role::UserGroupRole;
 use crate::schema::{
     ArtifactQueryResp, ParsedTaskQueryInfo, SubmitTaskReq, SubmitTaskResp, TaskQueryInfo,
     TaskQueryResp, TasksQueryReq,
@@ -12,7 +13,8 @@ use crate::{config::InfraPool, schema::TaskSpec};
 use crate::{
     entity::{
         active_tasks as ActiveTask, archived_tasks as ArchivedTasks, artifacts as Artifact,
-        group_worker as GroupWorker, groups as Group, users as User, workers as Worker,
+        group_worker as GroupWorker, groups as Group, user_group as UserGroup, users as User,
+        workers as Worker,
     },
     error::Error,
 };
@@ -244,10 +246,82 @@ pub async fn get_task(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<Task
     Ok(TaskQueryResp { info, artifacts })
 }
 
-pub async fn query_task_list(
+#[derive(FromQueryResult)]
+struct UserGroupRoleQueryRes {
+    role: UserGroupRole,
+}
+
+async fn check_task_list_query(
+    user_id: i64,
     pool: &InfraPool,
-    query: TasksQueryReq,
+    query: &mut TasksQueryReq,
+) -> crate::error::Result<()> {
+    if let Some(ref tags) = query.tags {
+        if tags.is_empty() {
+            return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                "Tags cannot be empty if specified".to_string(),
+            )));
+        }
+    }
+    if let Some(ref labels) = query.labels {
+        if labels.is_empty() {
+            return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                "Labels cannot be empty if specified".to_string(),
+            )));
+        }
+    }
+    match query.group_name {
+        Some(ref group_name) => {
+            let builder = pool.db.get_database_backend();
+            let role_stmt = Query::select()
+                .column((UserGroup::Entity, UserGroup::Column::Role))
+                .from(UserGroup::Entity)
+                .join(
+                    sea_orm::JoinType::Join,
+                    Group::Entity,
+                    Expr::col((Group::Entity, Group::Column::Id))
+                        .eq(Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))),
+                )
+                .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+                .and_where(
+                    Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()),
+                )
+                .to_owned();
+            let role = UserGroupRoleQueryRes::find_by_statement(builder.build(&role_stmt))
+                .one(&pool.db)
+                .await?
+                .map(|r| r.role);
+            if role.is_none() {
+                return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                    format!(
+                        "Group with name {} not found or user is not in the group",
+                        group_name
+                    ),
+                )));
+            }
+        }
+        None => {
+            let username = User::Entity::find()
+                .filter(User::Column::Id.eq(user_id))
+                .one(&pool.db)
+                .await?
+                .ok_or(Error::ApiError(crate::error::ApiError::NotFound(
+                    "User".to_string(),
+                )))?
+                .username;
+            tracing::debug!("No group name specified, use username {} instead", username);
+            query.group_name = Some(username);
+        }
+    }
+    Ok(())
+}
+
+pub async fn query_task_list(
+    user_id: i64,
+    pool: &InfraPool,
+    mut query: TasksQueryReq,
 ) -> crate::error::Result<Vec<TaskQueryInfo>> {
+    check_task_list_query(user_id, pool, &mut query).await?;
     let mut active_stmt = Query::select();
     active_stmt
         .columns([

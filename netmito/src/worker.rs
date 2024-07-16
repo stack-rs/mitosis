@@ -640,9 +640,13 @@ async fn execute_task(
                 .json::<RemoteResourceDownloadResp>()
                 .await
                 .map_err(RequestError::from)?;
+            let local_path = task_executor
+                .task_cache_path
+                .join("resource")
+                .join(resource.local_path);
             tokio::select! {
                 biased;
-                res = download_file(&task_executor.task_client, &download_resp, resource.local_path) => {
+                res = download_file(&task_executor.task_client, &download_resp, local_path) => {
                     if let Err(e) = res {
                         tracing::error!("Failed to download resource: {}", e);
                         let req = ReportTaskReq {

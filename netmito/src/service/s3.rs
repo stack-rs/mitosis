@@ -11,7 +11,6 @@ use sea_orm::{
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-use crate::entity::{content::AttachmentContentType, state::GroupState};
 use crate::error::{map_reqwest_err, ApiError, RequestError};
 use crate::schema::RemoteResourceDownloadResp;
 use crate::{config::InfraPool, error::S3Error};
@@ -19,9 +18,14 @@ use crate::{
     entity::{
         active_tasks as ActiveTask, archived_tasks as ArchivedTask, artifacts as Artifact,
         attachments as Attachment, content::ArtifactContentType, groups as Group,
-        role::UserGroupRole, user_group as UserGroup,
+        role::UserGroupRole, user_group as UserGroup, users as User,
     },
     error::AuthError,
+};
+use crate::{
+    entity::{content::AttachmentContentType, state::GroupState},
+    error::Error,
+    schema::{AttachmentQueryInfo, AttachmentsQueryReq},
 };
 
 pub async fn create_bucket(client: &Client, bucket_name: &str) -> Result<(), S3Error> {
@@ -378,4 +382,102 @@ pub(crate) async fn get_xml_error_message(resp: Response) -> crate::error::Resul
         Some(msg) => Ok(msg.to_string()),
         None => Ok(body),
     }
+}
+
+#[derive(FromQueryResult)]
+struct UserGroupRoleQueryRes {
+    role: UserGroupRole,
+}
+
+async fn check_task_list_query(
+    user_id: i64,
+    pool: &InfraPool,
+    query: &mut AttachmentsQueryReq,
+) -> crate::error::Result<()> {
+    match query.group_name {
+        Some(ref group_name) => {
+            let builder = pool.db.get_database_backend();
+            let role_stmt = Query::select()
+                .column((UserGroup::Entity, UserGroup::Column::Role))
+                .from(UserGroup::Entity)
+                .join(
+                    sea_orm::JoinType::Join,
+                    Group::Entity,
+                    Expr::col((Group::Entity, Group::Column::Id))
+                        .eq(Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))),
+                )
+                .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+                .and_where(
+                    Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()),
+                )
+                .to_owned();
+            let role = UserGroupRoleQueryRes::find_by_statement(builder.build(&role_stmt))
+                .one(&pool.db)
+                .await?
+                .map(|r| r.role);
+            if role.is_none() {
+                return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                    format!(
+                        "Group with name {} not found or user is not in the group",
+                        group_name
+                    ),
+                )));
+            }
+        }
+        None => {
+            let username = User::Entity::find()
+                .filter(User::Column::Id.eq(user_id))
+                .one(&pool.db)
+                .await?
+                .ok_or(Error::ApiError(crate::error::ApiError::NotFound(
+                    "User".to_string(),
+                )))?
+                .username;
+            tracing::debug!("No group name specified, use username {} instead", username);
+            query.group_name = Some(username);
+        }
+    }
+    Ok(())
+}
+
+pub async fn query_attachment_list(
+    user_id: i64,
+    pool: &InfraPool,
+    mut query: AttachmentsQueryReq,
+) -> Result<Vec<AttachmentQueryInfo>, crate::error::Error> {
+    check_task_list_query(user_id, pool, &mut query).await?;
+    let key_prefix = query.key_prefix.take().unwrap_or_default();
+    let group_name = query.group_name.unwrap();
+    let mut attachment_stmt = Query::select();
+    attachment_stmt
+        .columns([
+            (Attachment::Entity, Attachment::Column::Key),
+            (Attachment::Entity, Attachment::Column::ContentType),
+            (Attachment::Entity, Attachment::Column::Size),
+            (Attachment::Entity, Attachment::Column::CreatedAt),
+            (Attachment::Entity, Attachment::Column::UpdatedAt),
+        ])
+        .from(Attachment::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((Group::Entity, Group::Column::Id))
+                .eq(Expr::col((Attachment::Entity, Attachment::Column::GroupId))),
+        )
+        .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name))
+        .and_where(
+            Expr::col((Attachment::Entity, Attachment::Column::Key))
+                .like(format!("{}%", key_prefix)),
+        );
+    if let Some(limit) = query.limit {
+        attachment_stmt.limit(limit);
+    }
+    if let Some(offset) = query.offset {
+        attachment_stmt.offset(offset);
+    }
+    let builder = pool.db.get_database_backend();
+    let attachments = AttachmentQueryInfo::find_by_statement(builder.build(&attachment_stmt))
+        .all(&pool.db)
+        .await?;
+    Ok(attachments)
 }

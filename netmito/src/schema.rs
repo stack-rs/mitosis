@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::entity::{
-    content::ArtifactContentType,
+    content::{ArtifactContentType, AttachmentContentType},
     state::{TaskExecState, TaskState, UserState},
 };
 
@@ -213,6 +213,23 @@ pub struct TasksQueryReq {
 pub struct TaskQueryResp {
     pub info: ParsedTaskQueryInfo,
     pub artifacts: Vec<ArtifactQueryResp>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AttachmentsQueryReq {
+    pub group_name: Option<String>,
+    pub key_prefix: Option<String>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromQueryResult)]
+pub struct AttachmentQueryInfo {
+    pub key: String,
+    pub content_type: AttachmentContentType,
+    pub size: i64,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -20,9 +20,10 @@ use crate::{
     entity::state::TaskExecState,
     error::{get_error_from_resp, map_reqwest_err, RequestError, S3Error},
     schema::{
-        CreateGroupReq, CreateUserReq, ParsedTaskQueryInfo, RedisConnectionInfo, RemoteResource,
-        RemoteResourceDownloadResp, ResourceDownloadInfo, SubmitTaskReq, SubmitTaskResp,
-        TaskQueryInfo, TaskQueryResp, TasksQueryReq, UploadAttachmentReq, UploadAttachmentResp,
+        AttachmentQueryInfo, AttachmentsQueryReq, CreateGroupReq, CreateUserReq,
+        ParsedTaskQueryInfo, RedisConnectionInfo, RemoteResource, RemoteResourceDownloadResp,
+        ResourceDownloadInfo, SubmitTaskReq, SubmitTaskResp, TaskQueryInfo, TaskQueryResp,
+        TasksQueryReq, UploadAttachmentReq, UploadAttachmentResp,
     },
     service::{
         auth::cred::get_user_credential,
@@ -322,6 +323,30 @@ impl MitoClient {
         }
     }
 
+    pub async fn get_attachments(
+        &mut self,
+        args: AttachmentsQueryReq,
+    ) -> crate::error::Result<Vec<AttachmentQueryInfo>> {
+        self.url.set_path("user/filters/attachments");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .json(&args)
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<Vec<AttachmentQueryInfo>>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn submit_task(
         &mut self,
         args: SubmitTaskArgs,
@@ -487,6 +512,22 @@ impl MitoClient {
                             info.size,
                             info.local_path.display()
                         );
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                GetCommands::Attachments(args) => match self.get_attachments(args.into()).await {
+                    Ok(attachments) => {
+                        for attachment in attachments {
+                            tracing::info!(
+                                "Attachment {} of size {}B, Created at {} and Updated at {}",
+                                attachment.key,
+                                attachment.size,
+                                attachment.created_at,
+                                attachment.updated_at
+                            );
+                        }
                     }
                     Err(e) => {
                         tracing::error!("{}", e);

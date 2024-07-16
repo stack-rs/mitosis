@@ -18,7 +18,7 @@ use crate::{
         content::ArtifactContentType,
         state::{TaskExecState, TaskState},
     },
-    schema::{RemoteResourceDownload, TaskSpec, TasksQueryReq},
+    schema::{AttachmentsQueryReq, RemoteResourceDownload, TaskSpec, TasksQueryReq},
 };
 
 use super::coordinator::DEFAULT_COORDINATOR_ADDR;
@@ -116,6 +116,7 @@ pub enum GetCommands {
     Attachment(GetAttachmentCmdArgs),
     /// Query a list of tasks subject to the filter
     Tasks(GetTasksArgs),
+    Attachments(GetAttachmentsArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -294,6 +295,21 @@ pub struct GetAttachmentArgs {
     pub output_path: PathBuf,
 }
 
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct GetAttachmentsArgs {
+    /// The name of the group the attachments belong to
+    #[arg(short, long)]
+    pub group: Option<String>,
+    /// The prefix of the key of the attachments
+    #[arg(short, long = "key")]
+    pub key_prefix: Option<String>,
+    /// The limit of the tasks to query
+    #[arg(long)]
+    pub limit: Option<u64>,
+    /// The offset of the tasks to query
+    #[arg(long)]
+    pub offset: Option<u64>,
+}
 #[derive(Serialize, Debug, Deserialize, Args)]
 pub struct UploadAttachmentArgs {
     /// The group of the attachment uploaded to
@@ -552,6 +568,37 @@ impl From<GetTasksArgs> for TasksQueryReq {
                 Some(args.labels.into_iter().collect())
             },
             state: args.state,
+            limit: args.limit,
+            offset: args.offset,
+        }
+    }
+}
+
+impl From<GetAttachmentsArgs> for GetCommands {
+    fn from(args: GetAttachmentsArgs) -> Self {
+        Self::Attachments(args)
+    }
+}
+
+impl From<GetAttachmentsArgs> for GetArgs {
+    fn from(args: GetAttachmentsArgs) -> Self {
+        Self {
+            command: GetCommands::Attachments(args),
+        }
+    }
+}
+
+impl From<GetAttachmentsArgs> for ClientCommand {
+    fn from(args: GetAttachmentsArgs) -> Self {
+        Self::Get(args.into())
+    }
+}
+
+impl From<GetAttachmentsArgs> for AttachmentsQueryReq {
+    fn from(args: GetAttachmentsArgs) -> Self {
+        Self {
+            group_name: args.group,
+            key_prefix: args.key_prefix,
             limit: args.limit,
             offset: args.offset,
         }

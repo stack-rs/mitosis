@@ -49,6 +49,8 @@ pub enum Error {
     ParseUuidError(#[from] uuid::Error),
     #[error("Redis error: {0}")]
     RedisError(#[from] redis::RedisError),
+    #[error("Parse xml error: {0}")]
+    ParseXmlError(#[from] roxmltree::Error),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -83,6 +85,8 @@ pub enum S3Error {
     PresigningConfigError(#[from] PresigningConfigError),
     #[error("Invalid content length {0}")]
     InvalidContentLength(i64),
+    #[error("{0}")]
+    Custom(String),
 }
 
 #[derive(thiserror::Error, Debug)]

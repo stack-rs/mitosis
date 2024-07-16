@@ -24,12 +24,12 @@ use crate::{
 pub fn user_router(st: InfraPool) -> Router<InfraPool> {
     Router::new()
         .route("/auth", get(auth_user))
-        .route("/task", post(submit_task))
-        .route("/task/:uuid", get(query_task))
-        .route("/tasks", post(query_tasks))
+        .route("/tasks", post(submit_task))
+        .route("/tasks/:uuid", get(query_task))
+        .route("/filters/tasks", post(query_tasks))
         .route("/artifacts/:uuid/:content_type", get(download_artifact))
         .route("/attachments/:group_name/*key", get(download_attachment))
-        .route("/attachment", post(upload_attachment))
+        .route("/attachments", post(upload_attachment))
         .route("/redis", get(query_redis_connection_info))
         .layer(middleware::from_fn_with_state(
             st.clone(),

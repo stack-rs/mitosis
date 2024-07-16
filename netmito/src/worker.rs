@@ -133,7 +133,7 @@ impl TaskExecutor {
                             }
                         }
                         self.task_url
-                            .set_path(format!("worker/task/{}", uuid).as_str());
+                            .set_path(format!("worker/tasks/{}", uuid).as_str());
                         let resp = self
                             .task_client
                             .get(self.task_url.as_str())
@@ -173,7 +173,7 @@ impl TaskExecutor {
                     }
                 }
                 self.task_url
-                    .set_path(format!("worker/task/{}", uuid).as_str());
+                    .set_path(format!("worker/tasks/{}", uuid).as_str());
                 let resp = self
                     .task_client
                     .get(self.task_url.as_str())
@@ -403,7 +403,7 @@ impl MitoWorker {
                 if task_executor.task_cancel_token.is_cancelled() {
                     break;
                 }
-                task_executor.task_url.set_path("worker/task");
+                task_executor.task_url.set_path("worker/tasks");
                 let resp = task_executor
                     .task_client
                     .get(task_executor.task_url.as_str())
@@ -1142,7 +1142,7 @@ async fn process_task_result(
                     content_length,
                 },
             };
-            task_executor.task_url.set_path("worker/task");
+            task_executor.task_url.set_path("worker/tasks");
             let resp = loop {
                 let resp = task_executor
                     .task_client
@@ -1337,7 +1337,7 @@ async fn report_task(
     task_executor: &mut TaskExecutor,
     req: ReportTaskReq,
 ) -> crate::error::Result<()> {
-    task_executor.task_url.set_path("worker/task");
+    task_executor.task_url.set_path("worker/tasks");
     loop {
         let resp = task_executor
             .task_client

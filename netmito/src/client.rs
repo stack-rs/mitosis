@@ -18,13 +18,16 @@ use crate::{
         ClientConfig, ClientConfigCli,
     },
     entity::state::TaskExecState,
-    error::{get_error_from_resp, map_reqwest_err, RequestError},
+    error::{get_error_from_resp, map_reqwest_err, RequestError, S3Error},
     schema::{
-        CreateGroupReq, CreateUserReq, ParsedTaskQueryInfo, RedisConnectionInfo,
+        CreateGroupReq, CreateUserReq, ParsedTaskQueryInfo, RedisConnectionInfo, RemoteResource,
         RemoteResourceDownloadResp, ResourceDownloadInfo, SubmitTaskReq, SubmitTaskResp,
         TaskQueryInfo, TaskQueryResp, TasksQueryReq, UploadAttachmentReq, UploadAttachmentResp,
     },
-    service::{auth::cred::get_user_credential, s3::download_file},
+    service::{
+        auth::cred::get_user_credential,
+        s3::{download_file, get_xml_error_message},
+    },
 };
 
 pub struct MitoClient {
@@ -214,7 +217,7 @@ impl MitoClient {
     }
 
     pub async fn get_task(&mut self, args: GetTaskArgs) -> crate::error::Result<TaskQueryResp> {
-        self.url.set_path(&format!("user/task/{}", args.uuid));
+        self.url.set_path(&format!("user/tasks/{}", args.uuid));
         let resp = self
             .http_client
             .get(self.url.as_str())
@@ -299,7 +302,7 @@ impl MitoClient {
         &mut self,
         args: TasksQueryReq,
     ) -> crate::error::Result<Vec<TaskQueryInfo>> {
-        self.url.set_path("user/tasks");
+        self.url.set_path("user/filters/tasks");
         let resp = self
             .http_client
             .post(self.url.as_str())
@@ -323,7 +326,7 @@ impl MitoClient {
         &mut self,
         args: SubmitTaskArgs,
     ) -> crate::error::Result<SubmitTaskResp> {
-        self.url.set_path("user/task");
+        self.url.set_path("user/tasks");
         let req = self.gen_submit_task_req(args);
         let resp = self
             .http_client
@@ -348,7 +351,7 @@ impl MitoClient {
         &mut self,
         args: UploadAttachmentArgs,
     ) -> crate::error::Result<()> {
-        self.url.set_path("user/attachment");
+        self.url.set_path("user/attachments");
         let key = match args.key {
             Some(k) => k,
             None => args
@@ -358,11 +361,17 @@ impl MitoClient {
                 .map(|s| s.to_string())
                 .ok_or(crate::error::Error::Custom("Key is required".to_string()))?,
         };
-        let content_length = args
+        let key = path_clean::clean(key).display().to_string();
+        let metadata = args
             .local_file
             .metadata()
-            .map_err(crate::error::Error::from)?
-            .len();
+            .map_err(crate::error::Error::from)?;
+        if metadata.is_dir() {
+            return Err(crate::error::Error::Custom(
+                "Currently we do not support uploading a directory".to_string(),
+            ));
+        }
+        let content_length = metadata.len();
         let req = UploadAttachmentReq {
             group_name: args.group_name.unwrap_or(self.username.clone()),
             key,
@@ -393,7 +402,8 @@ impl MitoClient {
             if upload_file.status().is_success() {
                 Ok(())
             } else {
-                Err(get_error_from_resp(upload_file).await.into())
+                let msg = get_xml_error_message(upload_file).await?;
+                Err(S3Error::Custom(msg).into())
             }
         } else {
             Err(get_error_from_resp(resp).await.into())
@@ -515,14 +525,22 @@ impl MitoClient {
     }
 
     fn gen_submit_task_req(&self, args: SubmitTaskArgs) -> SubmitTaskReq {
-        SubmitTaskReq {
+        let mut req = SubmitTaskReq {
             group_name: args.group_name.unwrap_or(self.username.clone()),
             tags: args.tags,
             labels: args.labels,
             timeout: args.timeout,
             priority: args.priority,
             task_spec: args.task_spec,
-        }
+        };
+        req.task_spec.resources.iter_mut().for_each(|r| {
+            if let RemoteResource::Attachment { ref key } = r.remote_file {
+                r.remote_file = RemoteResource::Attachment {
+                    key: path_clean::clean(key).display().to_string(),
+                };
+            }
+        });
+        req
     }
 }
 

@@ -2,6 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use aws_sdk_s3::{error::SdkError, presigning::PresigningConfig, Client};
+use reqwest::Response;
 use sea_orm::{
     prelude::*,
     sea_query::{Expr, Query},
@@ -11,7 +12,7 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::entity::{content::AttachmentContentType, state::GroupState};
-use crate::error::{get_error_from_resp, map_reqwest_err, ApiError, RequestError};
+use crate::error::{map_reqwest_err, ApiError, RequestError};
 use crate::schema::RemoteResourceDownloadResp;
 use crate::{config::InfraPool, error::S3Error};
 use crate::{
@@ -211,6 +212,10 @@ pub async fn user_get_attachment(
     })
 }
 
+fn check_attachment_key(key: &str) -> bool {
+    key.len() >= 1024 || key.contains("/./") || key.contains("/../") || key.contains("//")
+}
+
 pub async fn user_upload_attachment(
     user_id: i64,
     pool: &InfraPool,
@@ -224,6 +229,14 @@ pub async fn user_upload_attachment(
         key,
         content_length
     );
+    let s3_object_key = format!("{}/{}", group_name, key);
+    if check_attachment_key(&s3_object_key) {
+        return Err(ApiError::InvalidRequest(
+            "Invalid attachment key. Should be a relative path pointing to a single location without \"./\" or \"../\""
+                .to_string(),
+        )
+        .into());
+    }
     let content_length = content_length as i64;
     let s3_client = pool.s3.clone();
     let now = TimeDateTimeWithTimeZone::now_utc();
@@ -253,7 +266,6 @@ pub async fn user_upload_attachment(
                     .filter(Attachment::Column::Key.eq(key.clone()))
                     .one(txn)
                     .await?;
-                let s3_object_key = format!("{}/{}", group_name, key);
                 let url: String;
                 match attachment {
                     Some(attachment) => {
@@ -350,6 +362,20 @@ pub async fn download_file(
         }
         Ok(())
     } else {
-        Err(get_error_from_resp(resp).await.into())
+        let msg = get_xml_error_message(resp).await?;
+        Err(S3Error::Custom(msg).into())
+    }
+}
+
+pub(crate) async fn get_xml_error_message(resp: Response) -> crate::error::Result<String> {
+    let body = resp.text().await.map_err(RequestError::from)?;
+    let xml = roxmltree::Document::parse(&body)?;
+    match xml
+        .descendants()
+        .find(|n| n.has_tag_name("Message"))
+        .and_then(|node| node.text())
+    {
+        Some(msg) => Ok(msg.to_string()),
+        None => Ok(body),
     }
 }

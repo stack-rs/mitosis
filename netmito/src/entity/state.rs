@@ -2,6 +2,7 @@ use std::{convert::Infallible, fmt::Display, str::FromStr};
 
 use clap::ValueEnum;
 use matrix_match::matrix_match;
+use redis::FromRedisValue;
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -226,6 +227,18 @@ impl TaskExecState {
             TaskExecState::TaskCommitted            => false,   false,  false,  false,  false,  false,  false,  false,  false,  false,  false,  false,  false,  false,  false,  false,  false,  false,  false,  true,   false;
             TaskExecState::Unknown                  => false,   false,  false,  false,  false,  false,  false,  false,  false,  false,  false,  false, false,   false,  false,  false,  false,  false,  false,  false,  false;
         )
+    }
+}
+
+impl FromRedisValue for TaskExecState {
+    fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
+        let i = i32::from_redis_value(v)?;
+        Ok(i.into())
+    }
+
+    fn from_owned_redis_value(v: redis::Value) -> redis::RedisResult<Self> {
+        let i = i32::from_owned_redis_value(v)?;
+        Ok(i.into())
     }
 }
 

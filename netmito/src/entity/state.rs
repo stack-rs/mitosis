@@ -228,6 +228,13 @@ impl TaskExecState {
             TaskExecState::Unknown                  => false,   false,  false,  false,  false,  false,  false,  false,  false,  false,  false,  false, false,   false,  false,  false,  false,  false,  false,  false,  false;
         )
     }
+
+    pub fn is_end(&self) -> bool {
+        matches!(
+            self,
+            TaskExecState::FetchResourceError | TaskExecState::TaskCommitted
+        )
+    }
 }
 
 impl FromRedisValue for TaskExecState {

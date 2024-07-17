@@ -618,6 +618,13 @@ async fn execute_task(
                                         60,
                                     )
                                     .await;
+                                task_executor
+                                    .announce_task_state_ex(
+                                        &task.uuid,
+                                        TaskExecState::TaskCommitted as i32,
+                                        60,
+                                    )
+                                    .await;
                                 return Ok(());
                             }
                         }
@@ -665,7 +672,14 @@ async fn execute_task(
                         task_executor
                             .announce_task_state(
                                 &task.uuid,
-                                TaskExecState::FetchResource as i32,
+                                TaskExecState::FetchResourceForbidden as i32,
+                            )
+                            .await;
+                        task_executor
+                            .announce_task_state_ex(
+                                &task.uuid,
+                                TaskExecState::TaskCommitted as i32,
+                                60,
                             )
                             .await;
                         return Ok(());
@@ -694,6 +708,9 @@ async fn execute_task(
                             60,
                         )
                         .await;
+                    task_executor
+                        .announce_task_state_ex(&task.uuid, TaskExecState::TaskCommitted as i32, 60)
+                        .await;
                     return Ok(());
                 }
             }
@@ -714,6 +731,9 @@ async fn execute_task(
             report_task(task_executor, req).await?;
             task_executor
                 .announce_task_state_ex(&task.uuid, TaskExecState::FetchResourceNotFound as i32, 60)
+                .await;
+            task_executor
+                .announce_task_state_ex(&task.uuid, TaskExecState::TaskCommitted as i32, 60)
                 .await;
             return Ok(());
         } else if resp.status() == StatusCode::FORBIDDEN {
@@ -737,6 +757,9 @@ async fn execute_task(
                     TaskExecState::FetchResourceForbidden as i32,
                     60,
                 )
+                .await;
+            task_executor
+                .announce_task_state_ex(&task.uuid, TaskExecState::TaskCommitted as i32, 60)
                 .await;
             return Ok(());
         } else {
@@ -795,6 +818,10 @@ async fn execute_task(
                             60,
                         )
                         .await;
+                    task_executor
+                        .announce_task_state_ex(&task.uuid, TaskExecState::TaskCommitted as i32, 60)
+                        .await;
+                    return Ok(());
                 }
             }
         }
@@ -1294,6 +1321,9 @@ async fn process_task_result(
             report_task(task_executor, req).await?;
             task_executor
                 .announce_task_state_ex(&uuid, TaskExecState::UploadResultTimeout as i32, 60)
+                .await;
+            task_executor
+                .announce_task_state_ex(&uuid, TaskExecState::TaskCommitted as i32, 60)
                 .await;
             archive_hd.await??;
         }

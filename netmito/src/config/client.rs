@@ -25,10 +25,10 @@ use super::coordinator::DEFAULT_COORDINATOR_ADDR;
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct ClientConfig {
-    pub(crate) coordinator_addr: Url,
-    pub(crate) credential_path: Option<RelativePathBuf>,
-    pub(crate) user: Option<String>,
-    pub(crate) password: Option<String>,
+    pub coordinator_addr: Url,
+    pub credential_path: Option<RelativePathBuf>,
+    pub user: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Args, Debug, Serialize, Default)]

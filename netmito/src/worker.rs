@@ -119,7 +119,7 @@ impl TaskExecutor {
                         }
                     },
                     _ = tokio::time::sleep_until(wait_until) => {
-                        wait_until = Instant::now() + self.polling_interval;
+                        wait_until = Instant::now() + std::time::Duration::from_secs(30);
                         let cur_state = if let Some(ref mut conn) = self.task_redis_conn {
                             tracing::trace!("Get task state: {}", uuid);
                             let state: Result<i32, _> = conn.get(format!("task:{}", uuid)).await;
@@ -166,7 +166,7 @@ impl TaskExecutor {
         } else {
             loop {
                 tokio::time::sleep_until(wait_until).await;
-                wait_until = Instant::now() + self.polling_interval;
+                wait_until = Instant::now() + std::time::Duration::from_secs(30);
                 if let Some(cur_state) = self.get_task_state(uuid).await {
                     if cur_state.is_reach(&state) {
                         break;

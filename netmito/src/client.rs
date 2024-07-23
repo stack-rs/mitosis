@@ -1,4 +1,5 @@
 use clap_repl::ClapEditor;
+use ouroboros::self_referencing;
 use redis::{
     aio::{MultiplexedConnection, PubSub},
     AsyncCommands, Commands, Msg, PubSubCommands,
@@ -31,15 +32,77 @@ use crate::{
     },
 };
 
+#[self_referencing]
+pub struct MitoRedisPubSubClient {
+    pub client: redis::Client,
+    pub connection: redis::Connection,
+    pubsub_con: redis::Connection,
+    #[borrows(mut pubsub_con)]
+    #[not_covariant]
+    pubsub: redis::PubSub<'this>,
+}
+
 pub struct MitoRedisClient {
     pub client: redis::Client,
     pub connection: redis::Connection,
 }
 
+// There seems to be an internal bug for the async PubSub to lost messages occasionally
 pub struct MitoAsyncRedisClient {
     pub client: redis::Client,
     pub connection: MultiplexedConnection,
     pub pubsub: PubSub,
+}
+
+impl MitoRedisPubSubClient {
+    pub fn new_with_url(url: &str) -> crate::error::Result<Self> {
+        let client = redis::Client::open(url)?;
+        let connection = client.get_connection()?;
+        let pubsub_con = client.get_connection()?;
+        Ok(MitoRedisPubSubClientBuilder {
+            client,
+            connection,
+            pubsub_con,
+            pubsub_builder: |pubsub_con| pubsub_con.as_pubsub(),
+        }
+        .build())
+    }
+    pub fn get_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<TaskExecState> {
+        self.with_connection_mut(|con| {
+            let state: i32 = con.get(format!("task:{}", uuid))?;
+            Ok(TaskExecState::from(state))
+        })
+    }
+
+    pub fn subscribe_with<T, F, U>(&mut self, uuids: T, func: F) -> crate::error::Result<U>
+    where
+        F: FnMut(Msg) -> redis::ControlFlow<U>,
+        T: IntoIterator<Item = Uuid>,
+    {
+        let uuids = uuids
+            .into_iter()
+            .map(|uuid| format!("task:{}", uuid))
+            .collect::<Vec<_>>();
+        self.with_connection_mut(|con| Ok(con.subscribe(uuids, func)?))
+    }
+
+    pub fn get_connection(&self) -> crate::error::Result<redis::Connection> {
+        self.with_client(|client| Ok(client.get_connection()?))
+    }
+
+    pub fn subscribe_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<()> {
+        self.with_pubsub_mut(|pubsub| pubsub.subscribe(format!("task:{}", uuid)))?;
+        Ok(())
+    }
+
+    pub fn unsubscribe_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<()> {
+        self.with_pubsub_mut(|pubsub| pubsub.unsubscribe(format!("task:{}", uuid)))?;
+        Ok(())
+    }
+
+    pub fn get_task_exec_state_message(&mut self) -> crate::error::Result<Msg> {
+        self.with_pubsub_mut(|pubsub| Ok(pubsub.get_message()?))
+    }
 }
 
 impl MitoRedisClient {
@@ -48,7 +111,6 @@ impl MitoRedisClient {
         let connection = client.get_connection()?;
         Ok(MitoRedisClient { client, connection })
     }
-
     pub fn get_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<TaskExecState> {
         let state: i32 = self.connection.get(format!("task:{}", uuid))?;
         Ok(TaskExecState::from(state))
@@ -66,22 +128,8 @@ impl MitoRedisClient {
         Ok(self.connection.subscribe(uuids, func)?)
     }
 
-    pub fn subscribe_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<()> {
-        self.connection
-            .as_pubsub()
-            .subscribe(format!("task:{}", uuid))?;
-        Ok(())
-    }
-
-    pub fn unsubscribe_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<()> {
-        self.connection
-            .as_pubsub()
-            .unsubscribe(format!("task:{}", uuid))?;
-        Ok(())
-    }
-
-    pub fn get_task_exec_state_message(&mut self) -> crate::error::Result<Msg> {
-        Ok(self.connection.as_pubsub().get_message()?)
+    pub fn get_connection(&self) -> crate::error::Result<redis::Connection> {
+        Ok(self.client.get_connection()?)
     }
 }
 
@@ -128,6 +176,7 @@ pub struct MitoClient {
     credential: String,
     username: String,
     redis_client: Option<MitoRedisClient>,
+    redis_pubsub_client: Option<MitoRedisPubSubClient>,
     async_redis_client: Option<MitoAsyncRedisClient>,
 }
 
@@ -188,6 +237,7 @@ impl MitoClient {
             credential,
             username,
             redis_client: None,
+            redis_pubsub_client: None,
             async_redis_client: None,
         })
     }
@@ -223,6 +273,17 @@ impl MitoClient {
         Ok(())
     }
 
+    pub async fn setup_redis_pubsub_client(&mut self) -> crate::error::Result<()> {
+        let resp = self.get_redis_connection_info().await?;
+        if let Some(redis_url) = resp.url {
+            let client = MitoRedisPubSubClient::new_with_url(&redis_url)?;
+            self.redis_pubsub_client = Some(client);
+        } else {
+            tracing::warn!("No Redis connection info found from coordinator");
+        }
+        Ok(())
+    }
+
     pub async fn setup_async_redis_client(&mut self) -> crate::error::Result<()> {
         let resp = self.get_redis_connection_info().await?;
         if let Some(redis_url) = resp.url {
@@ -246,6 +307,18 @@ impl MitoClient {
         }
     }
 
+    pub async fn get_redis_pubsub_client(&mut self) -> crate::error::Result<MitoRedisPubSubClient> {
+        let resp = self.get_redis_connection_info().await?;
+        if let Some(redis_url) = resp.url {
+            let client = MitoRedisPubSubClient::new_with_url(&redis_url)?;
+            Ok(client)
+        } else {
+            Err(crate::error::Error::Custom(
+                "No Redis connection info found from coordinator".to_string(),
+            ))
+        }
+    }
+
     pub async fn get_async_redis_client(&mut self) -> crate::error::Result<MitoAsyncRedisClient> {
         let resp = self.get_redis_connection_info().await?;
         if let Some(redis_url) = resp.url {
@@ -260,6 +333,8 @@ impl MitoClient {
 
     pub fn get_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<TaskExecState> {
         if let Some(client) = self.redis_client.as_mut() {
+            client.get_task_exec_state(uuid)
+        } else if let Some(client) = self.redis_pubsub_client.as_mut() {
             client.get_task_exec_state(uuid)
         } else {
             Err(crate::error::Error::Custom(
@@ -296,7 +371,7 @@ impl MitoClient {
     }
 
     pub fn subscribe_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<()> {
-        if let Some(client) = self.redis_client.as_mut() {
+        if let Some(client) = self.redis_pubsub_client.as_mut() {
             client.subscribe_task_exec_state(uuid)
         } else {
             Err(crate::error::Error::Custom(
@@ -318,7 +393,17 @@ impl MitoClient {
         }
     }
 
-    pub async fn async_on_task_exec_state_message(
+    pub fn get_task_exec_state_message(&mut self) -> crate::error::Result<Msg> {
+        if let Some(client) = self.redis_pubsub_client.as_mut() {
+            client.get_task_exec_state_message()
+        } else {
+            Err(crate::error::Error::Custom(
+                "No Redis connection found".to_string(),
+            ))
+        }
+    }
+
+    pub async fn on_task_exec_state_message(
         &mut self,
     ) -> crate::error::Result<impl futures::stream::Stream<Item = Msg> + '_> {
         if let Some(client) = self.async_redis_client.as_mut() {
@@ -330,18 +415,8 @@ impl MitoClient {
         }
     }
 
-    pub fn get_task_exec_state_message(&mut self) -> crate::error::Result<Msg> {
-        if let Some(client) = self.redis_client.as_mut() {
-            client.get_task_exec_state_message()
-        } else {
-            Err(crate::error::Error::Custom(
-                "No Redis connection found".to_string(),
-            ))
-        }
-    }
-
     pub fn unsubscribe_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<()> {
-        if let Some(client) = self.redis_client.as_mut() {
+        if let Some(client) = self.redis_pubsub_client.as_mut() {
             client.unsubscribe_task_exec_state(uuid)
         } else {
             Err(crate::error::Error::Custom(

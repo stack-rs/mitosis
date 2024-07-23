@@ -3,7 +3,7 @@ use sea_orm_migration::prelude::*;
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
-const DEFAULT_STORAGE_QUOTA: i64 = 1024 * 1024 * 1024 * 16; // 16GB
+const DEFAULT_STORAGE_QUOTA: i64 = 1000 * 1000 * 1000 * 16; // 16GB
 const DEFAULT_GROUP_QUOTA: i32 = 8;
 
 #[async_trait::async_trait]

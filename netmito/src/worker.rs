@@ -848,6 +848,7 @@ async fn execute_task(
             "MITO_RESOURCE_DIR",
             task_executor.task_cache_path.join("resource"),
         )
+        .env("MITO_TASK_UUID", task.uuid.to_string())
         .stdin(std::process::Stdio::null());
     if task.spec.terminal_output {
         command

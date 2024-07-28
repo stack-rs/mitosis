@@ -1270,9 +1270,7 @@ async fn process_task_result(
             if let Some(url) = resp.url {
                 loop {
                     let file = tokio::fs::File::open(
-                        task_executor
-                            .task_cache_path
-                            .join(&content_type.to_string()),
+                        task_executor.task_cache_path.join(content_type.to_string()),
                     )
                     .await?;
                     let upload_file = task_executor

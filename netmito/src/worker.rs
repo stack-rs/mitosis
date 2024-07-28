@@ -560,7 +560,7 @@ async fn execute_task(
         .announce_task_state_ex(&task.uuid, TaskExecState::FetchResource as i32, 360)
         .await;
     // Allow downloading resources for 5 minutes
-    let timeout_until = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+    let timeout_until = tokio::time::Instant::now() + std::time::Duration::from_secs(1800);
     for resource in task.spec.resources {
         match resource.remote_file {
             RemoteResource::Artifact { uuid, content_type } => {
@@ -686,6 +686,33 @@ async fn execute_task(
                     }
                 }
                 _ = task_executor.task_cancel_token.cancelled() => return Ok(()),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(120)) => {
+                    tracing::debug!("Fetching resource timeout, commit this task as canceled");
+                    let req = ReportTaskReq {
+                        id: task.id,
+                        op: ReportTaskOp::Cancel,
+                    };
+                    report_task(task_executor, req).await?;
+                    let req = ReportTaskReq {
+                        id: task.id,
+                        op: ReportTaskOp::Commit(TaskResultSpec {
+                            exit_status: 0,
+                            msg: Some(TaskResultMessage::FetchResourceTimeout),
+                        }),
+                    };
+                    report_task(task_executor, req).await?;
+                    task_executor
+                        .announce_task_state_ex(
+                            &task.uuid,
+                            TaskExecState::FetchResourceTimeout as i32,
+                            60,
+                        )
+                        .await;
+                    task_executor
+                        .announce_task_state_ex(&task.uuid, TaskExecState::TaskCommitted as i32, 60)
+                        .await;
+                    return Ok(());
+                }
                 _ = tokio::time::sleep_until(timeout_until) => {
                     tracing::debug!("Fetching resource timeout, commit this task as canceled");
                     let req = ReportTaskReq {

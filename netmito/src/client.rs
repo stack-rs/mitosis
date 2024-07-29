@@ -2,9 +2,10 @@ use clap_repl::ClapEditor;
 use ouroboros::self_referencing;
 use redis::{
     aio::{MultiplexedConnection, PubSub},
-    AsyncCommands, Commands, Msg, PubSubCommands,
+    AsyncCommands, Commands, Msg, PubSubCommands, PushInfo,
 };
 use reqwest::{header::CONTENT_LENGTH, Client};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use url::Url;
 use uuid::Uuid;
@@ -133,10 +134,30 @@ impl MitoRedisClient {
     }
 }
 
+pub struct AsyncPubSub {
+    pub connection: MultiplexedConnection,
+    pub tx: UnboundedSender<PushInfo>,
+    pub rx: UnboundedReceiver<PushInfo>,
+}
+
+impl AsyncPubSub {
+    pub fn get_connection(&self) -> MultiplexedConnection {
+        self.connection.clone()
+    }
+
+    pub fn get_tx(&self) -> UnboundedSender<PushInfo> {
+        self.tx.clone()
+    }
+
+    pub fn get_mut_rx(&mut self) -> &mut UnboundedReceiver<PushInfo> {
+        &mut self.rx
+    }
+}
+
 impl MitoAsyncRedisClient {
     pub async fn new(url: &str) -> crate::error::Result<Self> {
         let client = redis::Client::open(url)?;
-        let connection = client.get_multiplexed_tokio_connection().await?;
+        let connection = client.get_multiplexed_async_connection().await?;
         let pubsub = client.get_async_pubsub().await?;
         Ok(MitoAsyncRedisClient {
             client,
@@ -167,6 +188,20 @@ impl MitoAsyncRedisClient {
     pub async fn unsubscribe_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<()> {
         self.pubsub.unsubscribe(format!("task:{}", uuid)).await?;
         Ok(())
+    }
+
+    pub async fn get_resp3_pubsub(&mut self) -> crate::error::Result<AsyncPubSub> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let config = redis::AsyncConnectionConfig::new().set_push_sender(tx.clone());
+        let con = self
+            .client
+            .get_multiplexed_async_connection_with_config(&config)
+            .await?;
+        Ok(AsyncPubSub {
+            connection: con,
+            tx,
+            rx,
+        })
     }
 }
 

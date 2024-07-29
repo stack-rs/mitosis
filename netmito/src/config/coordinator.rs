@@ -397,11 +397,17 @@ impl RedisConnectionInfo {
     }
 
     pub fn worker_url(&self) -> String {
-        format!("redis://mitosis_worker:{}@{}", self.worker_pass, self.addr)
+        format!(
+            "redis://mitosis_worker:{}@{}/?protocol=resp3",
+            self.worker_pass, self.addr
+        )
     }
 
     pub fn client_url(&self) -> String {
-        format!("redis://mitosis_client:{}@{}", self.client_pass, self.addr)
+        format!(
+            "redis://mitosis_client:{}@{}/?protocol=resp3",
+            self.client_pass, self.addr
+        )
     }
 }
 

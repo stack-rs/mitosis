@@ -283,6 +283,9 @@ pub struct GetAttachmentCmdArgs {
     /// Specify the path to download the artifact
     #[arg(short, long = "output")]
     pub output_path: Option<String>,
+    /// Only output the URL without downloading the attachment
+    #[arg(long)]
+    pub no_download: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize)]

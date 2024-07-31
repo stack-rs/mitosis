@@ -597,6 +597,32 @@ impl MitoClient {
         }
     }
 
+    pub async fn get_attachment_url(
+        &mut self,
+        args: GetAttachmentArgs,
+    ) -> crate::error::Result<String> {
+        self.url.set_path(&format!(
+            "user/attachments/{}/{}",
+            args.group_name, args.key
+        ));
+        let resp = self
+            .http_client
+            .get(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let download_resp = resp
+                .json::<RemoteResourceDownloadResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(download_resp.url)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn get_tasks(
         &mut self,
         args: TasksQueryReq,
@@ -803,18 +829,31 @@ impl MitoClient {
                         tracing::error!("{}", e);
                     }
                 },
-                GetCommands::Attachment(args) => match self.get_attachment(args.into()).await {
-                    Ok(info) => {
-                        tracing::info!(
-                            "Attachment of size {}B downloaded to {}",
-                            info.size,
-                            info.local_path.display()
-                        );
+                GetCommands::Attachment(args) => {
+                    if args.no_download {
+                        match self.get_attachment_url(args.into()).await {
+                            Ok(url) => {
+                                tracing::info!("Attachment URL: {}", url);
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        }
+                    } else {
+                        match self.get_attachment(args.into()).await {
+                            Ok(info) => {
+                                tracing::info!(
+                                    "Attachment of size {}B downloaded to {}",
+                                    info.size,
+                                    info.local_path.display()
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!("{}", e);
-                    }
-                },
+                }
                 GetCommands::Attachments(args) => match self.get_attachments(args.into()).await {
                     Ok(attachments) => {
                         for attachment in attachments {

@@ -249,10 +249,19 @@ impl FromRedisValue for TaskExecState {
     }
 }
 
-#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq)]
+#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum WorkerState {
     Normal = 0,
     /// Worker is being shutdown gracefully. It should only be shutdown when fetching new task
     GracefulShutdown = 1,
+}
+
+impl Display for WorkerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkerState::Normal => write!(f, "Normal"),
+            WorkerState::GracefulShutdown => write!(f, "GracefulShutdown"),
+        }
+    }
 }

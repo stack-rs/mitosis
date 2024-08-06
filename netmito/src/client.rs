@@ -14,18 +14,19 @@ use crate::{
     config::{
         client::{
             ClientCommand, ClientInteractiveShell, CreateCommands, CreateGroupArgs, CreateUserArgs,
-            GetArtifactArgs, GetAttachmentArgs, GetCommands, GetTaskArgs, SubmitTaskArgs,
-            UploadAttachmentArgs,
+            GetArtifactArgs, GetAttachmentArgs, GetCommands, GetTaskArgs, GetWorkerArgs,
+            SubmitTaskArgs, UploadAttachmentArgs,
         },
         ClientConfig, ClientConfigCli,
     },
-    entity::state::TaskExecState,
+    entity::{role::GroupWorkerRole, state::TaskExecState},
     error::{get_error_from_resp, map_reqwest_err, RequestError, S3Error},
     schema::{
         AttachmentQueryInfo, AttachmentsQueryReq, CreateGroupReq, CreateUserReq,
         ParsedTaskQueryInfo, RedisConnectionInfo, RemoteResource, RemoteResourceDownloadResp,
         ResourceDownloadInfo, SubmitTaskReq, SubmitTaskResp, TaskQueryInfo, TaskQueryResp,
-        TasksQueryReq, UploadAttachmentReq, UploadAttachmentResp,
+        TasksQueryReq, UploadAttachmentReq, UploadAttachmentResp, WorkerQueryInfo, WorkerQueryResp,
+        WorkersQueryReq, WorkersQueryResp,
     },
     service::{
         auth::cred::get_user_credential,
@@ -671,6 +672,53 @@ impl MitoClient {
         }
     }
 
+    pub async fn get_worker(
+        &mut self,
+        args: GetWorkerArgs,
+    ) -> crate::error::Result<WorkerQueryResp> {
+        self.url.set_path(&format!("user/workers/{}", args.uuid));
+        let resp = self
+            .http_client
+            .get(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<WorkerQueryResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn get_workers(
+        &mut self,
+        args: WorkersQueryReq,
+    ) -> crate::error::Result<WorkersQueryResp> {
+        self.url.set_path("user/filters/workers");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .json(&args)
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<WorkersQueryResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn submit_task(
         &mut self,
         args: SubmitTaskArgs,
@@ -819,16 +867,25 @@ impl MitoClient {
                         tracing::error!("{}", e);
                     }
                 },
-                GetCommands::Tasks(args) => match self.get_tasks(args.into()).await {
-                    Ok(tasks) => {
-                        for task in tasks {
-                            output_task_info(&task);
+                GetCommands::Tasks(args) => {
+                    let verbose = args.verbose;
+                    match self.get_tasks(args.into()).await {
+                        Ok(tasks) => {
+                            if verbose {
+                                for task in tasks {
+                                    output_task_info(&task);
+                                }
+                            } else {
+                                for task in tasks {
+                                    tracing::info!("{}", task.uuid);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
                         }
                     }
-                    Err(e) => {
-                        tracing::error!("{}", e);
-                    }
-                },
+                }
                 GetCommands::Attachment(args) => {
                     if args.no_download {
                         match self.get_attachment_url(args.into()).await {
@@ -870,6 +927,37 @@ impl MitoClient {
                         tracing::error!("{}", e);
                     }
                 },
+                GetCommands::Worker(args) => match self.get_worker(args).await {
+                    Ok(resp) => {
+                        output_worker_info(&resp.info, &resp.groups);
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                GetCommands::Workers(args) => {
+                    let verbose = args.verbose;
+                    match self.get_workers(args.into()).await {
+                        Ok(resp) => {
+                            let WorkersQueryResp {
+                                workers,
+                                group_name,
+                            } = resp;
+                            if verbose {
+                                for worker in workers {
+                                    output_worker_list_info(&worker, &group_name);
+                                }
+                            } else {
+                                for worker in workers {
+                                    tracing::info!("{}", worker.worker_id);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    }
+                }
             },
             ClientCommand::Submit(args) => {
                 let group_name = args.group_name.clone().unwrap_or(self.username.clone());
@@ -971,5 +1059,49 @@ fn output_task_info(info: &TaskQueryInfo) {
         tracing::info!("Task Result: {}", result);
     } else {
         tracing::info!("Task Result: None");
+    }
+}
+
+fn output_worker_list_info<T: std::fmt::Display>(info: &WorkerQueryInfo, group_name: &T) {
+    tracing::info!("Worker UUID: {}", info.worker_id);
+    tracing::info!("Tags: {:?}", info.tags);
+    tracing::info!("State: {}", info.state);
+    tracing::info!(
+        "Created by user {} for group {}",
+        info.creator_username,
+        group_name
+    );
+    tracing::info!(
+        "Created at {} and Updated at {}",
+        info.created_at,
+        info.updated_at
+    );
+    tracing::info!("Last Heartbeat: {}", info.last_heartbeat);
+    if let Some(task) = info.assigned_task_id {
+        tracing::info!("Assigned Task: {}", task);
+    } else {
+        tracing::info!("Assigned Task: None");
+    }
+}
+
+fn output_worker_info(
+    info: &WorkerQueryInfo,
+    groups: &std::collections::HashMap<String, GroupWorkerRole>,
+) {
+    tracing::info!("Worker UUID: {}", info.worker_id);
+    tracing::info!("Tags: {:?}", info.tags);
+    tracing::info!("State: {}", info.state);
+    tracing::info!("Accessible Groups: {:?}", groups);
+    tracing::info!("Created by user {} ", info.creator_username,);
+    tracing::info!(
+        "Created at {} and Updated at {}",
+        info.created_at,
+        info.updated_at
+    );
+    tracing::info!("Last Heartbeat: {}", info.last_heartbeat);
+    if let Some(task) = info.assigned_task_id {
+        tracing::info!("Assigned Task: {}", task);
+    } else {
+        tracing::info!("Assigned Task: None");
     }
 }

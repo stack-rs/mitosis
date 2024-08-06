@@ -1,12 +1,14 @@
 pub mod heartbeat;
 pub mod queue;
 
+use std::collections::HashMap;
+
 pub use heartbeat::{HeartbeatOp, HeartbeatQueue};
 pub use queue::{TaskDispatcher, TaskDispatcherOp};
 
 use sea_orm::{
     prelude::*,
-    sea_query::{extension::postgres::PgExpr, OnConflict, Query},
+    sea_query::{extension::postgres::PgExpr, Alias, Nullable, OnConflict, Query},
     FromQueryResult, QuerySelect, Set, TransactionTrait,
 };
 
@@ -17,10 +19,13 @@ use crate::{
         group_worker as GroupWorker, groups as Group,
         role::GroupWorkerRole,
         state::{GroupState, TaskState},
-        users as User, workers as Worker,
+        user_group as UserGroup, users as User, workers as Worker,
     },
     error::{ApiError, Error},
-    schema::{ReportTaskOp, TaskSpec, WorkerTaskResp},
+    schema::{
+        RawWorkerQueryInfo, ReportTaskOp, TaskSpec, WorkerQueryInfo, WorkerQueryResp,
+        WorkerTaskResp, WorkersQueryReq, WorkersQueryResp,
+    },
 };
 
 use super::s3::get_presigned_upload_link;
@@ -550,4 +555,203 @@ pub async fn report_task(
         }
     }
     Ok(None)
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct PartialGroupWorkerRole {
+    role: GroupWorkerRole,
+    group_name: String,
+}
+
+pub async fn get_worker(
+    pool: &InfraPool,
+    worker_id: Uuid,
+) -> crate::error::Result<WorkerQueryResp> {
+    let builder = pool.db.get_database_backend();
+    let stmt = Query::select()
+        .columns([
+            (Worker::Entity, Worker::Column::Id),
+            (Worker::Entity, Worker::Column::WorkerId),
+            (Worker::Entity, Worker::Column::Tags),
+            (Worker::Entity, Worker::Column::CreatedAt),
+            (Worker::Entity, Worker::Column::UpdatedAt),
+            (Worker::Entity, Worker::Column::State),
+            (Worker::Entity, Worker::Column::LastHeartbeat),
+        ])
+        .expr_as(
+            Expr::col((User::Entity, User::Column::Username)),
+            Alias::new("creator_username"),
+        )
+        .expr_as(
+            Expr::case(
+                Expr::col((Worker::Entity, Worker::Column::AssignedTaskId)).is_null(),
+                Uuid::null(),
+            )
+            .finally(Expr::col((ActiveTask::Entity, ActiveTask::Column::Uuid))),
+            Alias::new("assigned_task_id"),
+        )
+        .from(Worker::Entity)
+        .join(
+            sea_orm::JoinType::LeftJoin,
+            ActiveTask::Entity,
+            Expr::col((ActiveTask::Entity, ActiveTask::Column::Id))
+                .eq(Expr::col((Worker::Entity, Worker::Column::AssignedTaskId))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            User::Entity,
+            Expr::col((User::Entity, User::Column::Id))
+                .eq(Expr::col((Worker::Entity, Worker::Column::CreatorId))),
+        )
+        .and_where(Expr::col((Worker::Entity, Worker::Column::WorkerId)).eq(worker_id))
+        .limit(1)
+        .to_owned();
+    let worker = RawWorkerQueryInfo::find_by_statement(builder.build(&stmt))
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::NotFound(format!("Worker {}", worker_id)))?;
+    let id = worker.id;
+    let info = worker.into();
+    let group_stmt = Query::select()
+        .column((Group::Entity, Group::Column::GroupName))
+        .column((GroupWorker::Entity, GroupWorker::Column::Role))
+        .from(Group::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            GroupWorker::Entity,
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId)).eq(id))
+        .to_owned();
+    let groups: HashMap<String, GroupWorkerRole> =
+        PartialGroupWorkerRole::find_by_statement(builder.build(&group_stmt))
+            .all(&pool.db)
+            .await?
+            .into_iter()
+            .map(|g| (g.group_name, g.role))
+            .collect();
+    let resp = WorkerQueryResp { info, groups };
+    Ok(resp)
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct PartialUserGroupRole {
+    group_id: i64,
+    // role: UserGroupRole,
+    group_name: String,
+}
+
+pub async fn query_worker_list(
+    user_id: i64,
+    pool: &InfraPool,
+    query: WorkersQueryReq,
+) -> crate::error::Result<WorkersQueryResp> {
+    let builder = pool.db.get_database_backend();
+    let mut group_stmt = Query::select()
+        .columns([
+            (UserGroup::Entity, UserGroup::Column::GroupId),
+            // (UserGroup::Entity, UserGroup::Column::Role),
+        ])
+        .column((Group::Entity, Group::Column::GroupName))
+        .from(UserGroup::Entity)
+        .and_where(UserGroup::Column::UserId.eq(user_id))
+        .limit(1)
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((Group::Entity, Group::Column::Id))
+                .eq(Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))),
+        )
+        .to_owned();
+    match query.group_name {
+        Some(group_name) => {
+            group_stmt.and_where(
+                Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()),
+            );
+        }
+        None => {
+            group_stmt
+                .join(
+                    sea_orm::JoinType::Join,
+                    User::Entity,
+                    Expr::col((User::Entity, User::Column::Username))
+                        .eq(Expr::col((Group::Entity, Group::Column::GroupName))),
+                )
+                .and_where(Expr::col((User::Entity, User::Column::Id)).eq(user_id));
+        }
+    }
+    let user_group_role = PartialUserGroupRole::find_by_statement(builder.build(&group_stmt))
+        .one(&pool.db)
+        .await?
+        .ok_or(crate::error::AuthError::PermissionDenied)?;
+    let mut stmt = Query::select()
+        .columns([
+            (Worker::Entity, Worker::Column::WorkerId),
+            (Worker::Entity, Worker::Column::Tags),
+            (Worker::Entity, Worker::Column::CreatedAt),
+            (Worker::Entity, Worker::Column::UpdatedAt),
+            (Worker::Entity, Worker::Column::State),
+            (Worker::Entity, Worker::Column::LastHeartbeat),
+        ])
+        .expr_as(
+            Expr::col((User::Entity, User::Column::Username)),
+            Alias::new("creator_username"),
+        )
+        .expr_as(
+            Expr::case(
+                Expr::col((Worker::Entity, Worker::Column::AssignedTaskId)).is_null(),
+                Uuid::null(),
+            )
+            .finally(Expr::col((ActiveTask::Entity, ActiveTask::Column::Uuid))),
+            Alias::new("assigned_task_id"),
+        )
+        .from(Worker::Entity)
+        .join(
+            sea_orm::JoinType::LeftJoin,
+            ActiveTask::Entity,
+            Expr::col((ActiveTask::Entity, ActiveTask::Column::Id))
+                .eq(Expr::col((Worker::Entity, Worker::Column::AssignedTaskId))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            GroupWorker::Entity,
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId))
+                .eq(Expr::col((Worker::Entity, Worker::Column::Id))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            User::Entity,
+            Expr::col((User::Entity, User::Column::Id))
+                .eq(Expr::col((Worker::Entity, Worker::Column::CreatorId))),
+        )
+        .and_where(
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::GroupId))
+                .eq(user_group_role.group_id),
+        )
+        .to_owned();
+    if let Some(tags) = query.tags {
+        let tags: Vec<String> = tags.into_iter().collect();
+        stmt.and_where(Expr::col((Worker::Entity, Worker::Column::Tags)).contains(tags));
+    }
+    if let Some(creator_username) = query.creator_username {
+        stmt.and_where(
+            Expr::col((User::Entity, User::Column::Username)).eq(creator_username.clone()),
+        );
+    }
+    if let Some(role) = query.role {
+        let role: Vec<GroupWorkerRole> = role.into_iter().collect();
+        stmt.and_where(
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::Role))
+                .eq(sea_orm::sea_query::PgFunc::any(role)),
+        );
+    }
+    let workers = WorkerQueryInfo::find_by_statement(builder.build(&stmt))
+        .all(&pool.db)
+        .await?;
+    let resp = WorkersQueryResp {
+        workers,
+        group_name: user_group_role.group_name,
+    };
+    Ok(resp)
 }

@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 use crate::entity::{
     content::{ArtifactContentType, AttachmentContentType},
-    state::{TaskExecState, TaskState, UserState},
+    role::GroupWorkerRole,
+    state::{TaskExecState, TaskState, UserState, WorkerState},
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -233,6 +234,51 @@ pub struct AttachmentQueryInfo {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct WorkersQueryReq {
+    pub group_name: Option<String>,
+    pub role: Option<HashSet<GroupWorkerRole>>,
+    pub tags: Option<HashSet<String>>,
+    pub creator_username: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromQueryResult)]
+pub(crate) struct RawWorkerQueryInfo {
+    pub(crate) id: i64,
+    pub(crate) worker_id: Uuid,
+    pub(crate) creator_username: String,
+    pub(crate) tags: Vec<String>,
+    pub(crate) created_at: OffsetDateTime,
+    pub(crate) updated_at: OffsetDateTime,
+    pub(crate) state: WorkerState,
+    pub(crate) last_heartbeat: OffsetDateTime,
+    pub(crate) assigned_task_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromQueryResult)]
+pub struct WorkerQueryInfo {
+    pub worker_id: Uuid,
+    pub creator_username: String,
+    pub tags: Vec<String>,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    pub state: WorkerState,
+    pub last_heartbeat: OffsetDateTime,
+    pub assigned_task_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkerQueryResp {
+    pub info: WorkerQueryInfo,
+    pub groups: HashMap<String, GroupWorkerRole>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkersQueryResp {
+    pub workers: Vec<WorkerQueryInfo>,
+    pub group_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RedisConnectionInfo {
     pub url: Option<String>,
 }
@@ -301,6 +347,21 @@ impl From<crate::entity::artifacts::Model> for ArtifactQueryResp {
             size: model.size,
             created_at: model.created_at,
             updated_at: model.updated_at,
+        }
+    }
+}
+
+impl From<RawWorkerQueryInfo> for WorkerQueryInfo {
+    fn from(model: RawWorkerQueryInfo) -> Self {
+        Self {
+            worker_id: model.worker_id,
+            creator_username: model.creator_username,
+            tags: model.tags,
+            created_at: model.created_at,
+            updated_at: model.updated_at,
+            state: model.state,
+            last_heartbeat: model.last_heartbeat,
+            assigned_task_id: model.assigned_task_id,
         }
     }
 }

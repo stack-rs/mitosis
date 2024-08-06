@@ -18,6 +18,7 @@ use crate::{
         auth::{user_auth_middleware, user_login, AuthUser},
         s3::{get_artifact, query_attachment_list, user_get_attachment, user_upload_attachment},
         task::{get_task, query_task_list, user_submit_task},
+        worker::{get_worker, query_worker_list},
     },
 };
 
@@ -26,12 +27,14 @@ pub fn user_router(st: InfraPool) -> Router<InfraPool> {
         .route("/auth", get(auth_user))
         .route("/tasks", post(submit_task))
         .route("/tasks/:uuid", get(query_task))
-        .route("/filters/tasks", post(query_tasks))
         .route("/artifacts/:uuid/:content_type", get(download_artifact))
         .route("/attachments/:group_name/*key", get(download_attachment))
         .route("/attachments", post(upload_attachment))
-        .route("/filters/attachments", post(query_attachments))
+        .route("/workers/:uuid", get(query_worker))
         .route("/redis", get(query_redis_connection_info))
+        .route("/filters/tasks", post(query_tasks))
+        .route("/filters/attachments", post(query_attachments))
+        .route("/filters/workers", post(query_workers))
         .layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -190,4 +193,38 @@ pub async fn query_redis_connection_info(
 ) -> Result<Json<RedisConnectionInfo>, ApiError> {
     let url = REDIS_CONNECTION_INFO.get().map(|info| info.client_url());
     Ok(Json(RedisConnectionInfo { url }))
+}
+
+pub async fn query_worker(
+    Extension(_): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<WorkerQueryResp>, ApiError> {
+    let resp = get_worker(&pool, uuid).await.map_err(|e| match e {
+        crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+        crate::error::Error::ApiError(e) => e,
+        _ => {
+            tracing::error!("{}", e);
+            ApiError::InternalServerError
+        }
+    })?;
+    Ok(Json(resp))
+}
+
+pub async fn query_workers(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Json(req): Json<WorkersQueryReq>,
+) -> Result<Json<WorkersQueryResp>, ApiError> {
+    let resp = query_worker_list(u.id, &pool, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(resp))
 }

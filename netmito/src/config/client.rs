@@ -16,9 +16,12 @@ use uuid::Uuid;
 use crate::{
     entity::{
         content::ArtifactContentType,
+        role::GroupWorkerRole,
         state::{TaskExecState, TaskState},
     },
-    schema::{AttachmentsQueryReq, RemoteResourceDownload, TaskSpec, TasksQueryReq},
+    schema::{
+        AttachmentsQueryReq, RemoteResourceDownload, TaskSpec, TasksQueryReq, WorkersQueryReq,
+    },
 };
 
 use super::coordinator::DEFAULT_COORDINATOR_ADDR;
@@ -116,7 +119,12 @@ pub enum GetCommands {
     Attachment(GetAttachmentCmdArgs),
     /// Query a list of tasks subject to the filter
     Tasks(GetTasksArgs),
+    /// Query a list of attachments subject to the filter
     Attachments(GetAttachmentsArgs),
+    /// Get the info of a worker
+    Worker(GetWorkerArgs),
+    /// Query a list of workers subject to the filter
+    Workers(GetWorkersArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -262,6 +270,9 @@ pub struct GetTasksArgs {
     /// The offset of the tasks to query
     #[arg(long)]
     pub offset: Option<u64>,
+    /// Whether to output the verbose information of workers
+    #[arg(short, long)]
+    pub verbose: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize)]
@@ -313,6 +324,32 @@ pub struct GetAttachmentsArgs {
     #[arg(long)]
     pub offset: Option<u64>,
 }
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct GetWorkerArgs {
+    /// The UUID of the worker
+    pub uuid: Uuid,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct GetWorkersArgs {
+    /// The name of the group has access to the workers
+    #[arg(short, long)]
+    pub group: Option<String>,
+    /// The role of the group on the workers
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub role: Vec<GroupWorkerRole>,
+    /// The tags of the workers
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub tags: Vec<String>,
+    /// The username of the creator
+    #[arg(long)]
+    pub creator: Option<String>,
+    /// Whether to output the verbose information of workers
+    #[arg(short, long)]
+    pub verbose: bool,
+}
+
 #[derive(Serialize, Debug, Deserialize, Args)]
 pub struct UploadAttachmentArgs {
     /// The group of the attachment uploaded to
@@ -605,6 +642,65 @@ impl From<GetAttachmentsArgs> for AttachmentsQueryReq {
             limit: args.limit,
             offset: args.offset,
         }
+    }
+}
+
+impl From<GetWorkersArgs> for GetCommands {
+    fn from(args: GetWorkersArgs) -> Self {
+        Self::Workers(args)
+    }
+}
+
+impl From<GetWorkersArgs> for GetArgs {
+    fn from(args: GetWorkersArgs) -> Self {
+        Self {
+            command: GetCommands::Workers(args),
+        }
+    }
+}
+
+impl From<GetWorkersArgs> for ClientCommand {
+    fn from(args: GetWorkersArgs) -> Self {
+        Self::Get(args.into())
+    }
+}
+
+impl From<GetWorkersArgs> for WorkersQueryReq {
+    fn from(args: GetWorkersArgs) -> Self {
+        Self {
+            group_name: args.group,
+            role: if args.role.is_empty() {
+                None
+            } else {
+                Some(args.role.into_iter().collect())
+            },
+            tags: if args.tags.is_empty() {
+                None
+            } else {
+                Some(args.tags.into_iter().collect())
+            },
+            creator_username: args.creator,
+        }
+    }
+}
+
+impl From<GetWorkerArgs> for GetCommands {
+    fn from(args: GetWorkerArgs) -> Self {
+        Self::Worker(args)
+    }
+}
+
+impl From<GetWorkerArgs> for GetArgs {
+    fn from(args: GetWorkerArgs) -> Self {
+        Self {
+            command: GetCommands::Worker(args),
+        }
+    }
+}
+
+impl From<GetWorkerArgs> for ClientCommand {
+    fn from(args: GetWorkerArgs) -> Self {
+        Self::Get(args.into())
     }
 }
 

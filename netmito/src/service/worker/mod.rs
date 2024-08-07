@@ -505,7 +505,7 @@ pub async fn report_task(
                 assigned_task_id: Set(None),
                 ..Default::default()
             };
-            let worker_id = pool
+            let (worker_id, worker_state) = pool
                 .db
                 .transaction(|txn| {
                     Box::pin(async move {
@@ -513,6 +513,7 @@ pub async fn report_task(
                         ActiveTask::Entity::delete_by_id(task_id).exec(txn).await?;
                         let worker = worker.update(txn).await?;
                         let worker_id = worker.id;
+                        let worker_state = worker.state;
                         // Worker was requested to gracefully shutdown
                         if matches!(worker.state, WorkerState::GracefulShutdown) {
                             GroupWorker::Entity::delete_many()
@@ -521,19 +522,20 @@ pub async fn report_task(
                                 .await?;
                             Worker::Entity::delete_by_id(worker.id).exec(txn).await?;
                         }
-                        Ok(worker_id)
+                        Ok((worker_id, worker_state))
                     })
                 })
                 .await?;
             // Worker was requested to gracefully shutdown
-            if pool
-                .worker_task_queue_tx
-                .send(TaskDispatcherOp::UnregisterWorker(worker_id))
-                .is_err()
-                || pool
-                    .worker_heartbeat_queue_tx
-                    .send(HeartbeatOp::UnregisterWorker(worker_id))
+            if matches!(worker_state, WorkerState::GracefulShutdown)
+                && (pool
+                    .worker_task_queue_tx
+                    .send(TaskDispatcherOp::UnregisterWorker(worker_id))
                     .is_err()
+                    || pool
+                        .worker_heartbeat_queue_tx
+                        .send(HeartbeatOp::UnregisterWorker(worker_id))
+                        .is_err())
             {
                 return Err(Error::Custom("Worker was requested to gracefully shutdown but failed to send op through channels".to_string()));
             }

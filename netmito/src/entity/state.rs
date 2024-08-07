@@ -249,7 +249,7 @@ impl FromRedisValue for TaskExecState {
     }
 }
 
-#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum WorkerState {
     Normal = 0,

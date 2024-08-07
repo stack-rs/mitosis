@@ -17,14 +17,14 @@ use crate::{
     entity::{
         active_tasks as ActiveTask, archived_tasks as ArchivedTask, artifacts as Artifact,
         group_worker as GroupWorker, groups as Group,
-        role::GroupWorkerRole,
-        state::{GroupState, TaskState},
+        role::{GroupWorkerRole, UserGroupRole},
+        state::{GroupState, TaskState, WorkerState},
         user_group as UserGroup, users as User, workers as Worker,
     },
     error::{ApiError, Error},
     schema::{
         RawWorkerQueryInfo, ReportTaskOp, TaskSpec, WorkerQueryInfo, WorkerQueryResp,
-        WorkerTaskResp, WorkersQueryReq, WorkersQueryResp,
+        WorkerShutdownOp, WorkerTaskResp, WorkersQueryReq, WorkersQueryResp,
     },
 };
 
@@ -191,14 +191,7 @@ impl From<PartialActiveTask> for (i64, i32) {
     }
 }
 
-pub async fn unregister_worker(worker_id: i64, pool: &InfraPool) -> crate::error::Result<()> {
-    let worker = Worker::Entity::find_by_id(worker_id)
-        .one(&pool.db)
-        .await?
-        .ok_or(ApiError::NotFound(format!(
-            "Worker {} not found",
-            worker_id
-        )))?;
+async fn remove_worker(worker: Worker::Model, pool: &InfraPool) -> crate::error::Result<()> {
     // push back the assigned task (if have)
     if let Some(task_id) = worker.assigned_task_id {
         let task = ActiveTask::ActiveModel {
@@ -236,29 +229,46 @@ pub async fn unregister_worker(worker_id: i64, pool: &InfraPool) -> crate::error
             task.priority,
         );
         if pool.worker_task_queue_tx.send(op).is_err() {
-            return Err(Error::Custom("send batch add task failed".to_string()));
+            return Err(Error::Custom("send batch add task op failed".to_string()));
         }
     }
-    GroupWorker::Entity::delete_many()
-        .filter(GroupWorker::Column::WorkerId.eq(worker_id))
-        .exec(&pool.db)
+    pool.db
+        .transaction(|txn| {
+            Box::pin(async move {
+                GroupWorker::Entity::delete_many()
+                    .filter(GroupWorker::Column::WorkerId.eq(worker.id))
+                    .exec(txn)
+                    .await?;
+                Worker::Entity::delete_by_id(worker.id).exec(txn).await?;
+                Ok(())
+            })
+        })
         .await?;
-    Worker::Entity::delete_by_id(worker_id)
-        .exec(&pool.db)
-        .await?;
+
     if pool
         .worker_task_queue_tx
-        .send(TaskDispatcherOp::UnregisterWorker(worker_id))
+        .send(TaskDispatcherOp::UnregisterWorker(worker.id))
         .is_err()
         || pool
             .worker_heartbeat_queue_tx
-            .send(HeartbeatOp::UnregisterWorker(worker_id))
+            .send(HeartbeatOp::UnregisterWorker(worker.id))
             .is_err()
     {
-        Err(Error::Custom("send unregister worker failed".to_string()))
+        Err(Error::Custom("send remove worker op failed".to_string()))
     } else {
         Ok(())
     }
+}
+
+pub async fn unregister_worker(worker_id: i64, pool: &InfraPool) -> crate::error::Result<()> {
+    let worker = Worker::Entity::find_by_id(worker_id)
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::NotFound(format!(
+            "Worker {} not found",
+            worker_id
+        )))?;
+    remove_worker(worker, pool).await
 }
 
 pub async fn remove_worker_by_uuid(
@@ -267,15 +277,77 @@ pub async fn remove_worker_by_uuid(
 ) -> crate::error::Result<()> {
     match Worker::Entity::find()
         .filter(Worker::Column::WorkerId.eq(worker_uuid))
-        .select_only()
-        .column(Worker::Column::Id)
-        .into_tuple()
         .one(&pool.db)
         .await?
     {
-        Some(worker_id) => unregister_worker(worker_id, pool).await,
+        Some(worker) => remove_worker(worker, pool).await,
         None => Ok(()),
     }
+}
+
+pub async fn user_remove_worker_by_uuid(
+    user_id: i64,
+    worker_uuid: Uuid,
+    op: WorkerShutdownOp,
+    pool: &InfraPool,
+) -> crate::error::Result<()> {
+    let builder = pool.db.get_database_backend();
+    let worker = Worker::Entity::find()
+        .filter(Worker::Column::WorkerId.eq(worker_uuid))
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::NotFound(format!(
+            "Worker {} not found",
+            worker_uuid
+        )))?;
+    let stmt = Query::select()
+        .column((Group::Entity, Group::Column::GroupName))
+        .column((GroupWorker::Entity, GroupWorker::Column::Role))
+        .from(GroupWorker::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((Group::Entity, Group::Column::Id)).eq(Expr::col((
+                GroupWorker::Entity,
+                GroupWorker::Column::GroupId,
+            ))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            UserGroup::Entity,
+            Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId)).eq(worker.id))
+        .and_where(
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).eq(GroupWorkerRole::Admin),
+        )
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::Role)).eq(UserGroupRole::Admin))
+        .limit(1)
+        .to_owned();
+    let _group = PartialGroupWorkerRole::find_by_statement(builder.build(&stmt))
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::AuthError(
+            crate::error::AuthError::PermissionDenied,
+        ))?;
+    match op {
+        WorkerShutdownOp::Force => remove_worker(worker, pool).await?,
+        WorkerShutdownOp::Graceful => {
+            if worker.assigned_task_id.is_none() {
+                remove_worker(worker, pool).await?;
+            } else {
+                let worker = Worker::ActiveModel {
+                    id: Set(worker.id),
+                    state: Set(WorkerState::GracefulShutdown),
+                    ..Default::default()
+                };
+                worker.update(&pool.db).await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn heartbeat(worker_id: i64, pool: &InfraPool) -> crate::error::Result<()> {
@@ -433,16 +505,38 @@ pub async fn report_task(
                 assigned_task_id: Set(None),
                 ..Default::default()
             };
-            pool.db
+            let worker_id = pool
+                .db
                 .transaction(|txn| {
                     Box::pin(async move {
                         archived_task.insert(txn).await?;
                         ActiveTask::Entity::delete_by_id(task_id).exec(txn).await?;
-                        worker.update(txn).await?;
-                        Ok(())
+                        let worker = worker.update(txn).await?;
+                        let worker_id = worker.id;
+                        // Worker was requested to gracefully shutdown
+                        if matches!(worker.state, WorkerState::GracefulShutdown) {
+                            GroupWorker::Entity::delete_many()
+                                .filter(GroupWorker::Column::WorkerId.eq(worker.id))
+                                .exec(txn)
+                                .await?;
+                            Worker::Entity::delete_by_id(worker.id).exec(txn).await?;
+                        }
+                        Ok(worker_id)
                     })
                 })
                 .await?;
+            // Worker was requested to gracefully shutdown
+            if pool
+                .worker_task_queue_tx
+                .send(TaskDispatcherOp::UnregisterWorker(worker_id))
+                .is_err()
+                || pool
+                    .worker_heartbeat_queue_tx
+                    .send(HeartbeatOp::UnregisterWorker(worker_id))
+                    .is_err()
+            {
+                return Err(Error::Custom("Worker was requested to gracefully shutdown but failed to send op through channels".to_string()));
+            }
         }
         ReportTaskOp::Upload {
             content_type,

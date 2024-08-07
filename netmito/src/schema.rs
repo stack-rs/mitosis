@@ -314,6 +314,25 @@ pub struct RemoteResourceDownload {
     pub local_path: PathBuf,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkerShutdown {
+    pub op: Option<WorkerShutdownOp>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum WorkerShutdownOp {
+    #[serde(alias = "graceful")]
+    Graceful,
+    #[serde(alias = "force")]
+    Force,
+}
+
+impl Default for WorkerShutdownOp {
+    fn default() -> Self {
+        Self::Graceful
+    }
+}
+
 impl TaskSpec {
     pub fn new<T, I, P, Q, V, U>(
         args: I,

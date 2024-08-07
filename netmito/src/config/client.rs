@@ -85,6 +85,8 @@ pub enum ClientCommand {
     Submit(SubmitTaskCmdArgs),
     /// Upload an attachment to a group
     Upload(UploadAttachmentArgs),
+    /// Cancel a worker or a task
+    Cancel(CancelArgs),
     /// Quit the client's interactive mode
     Quit,
 }
@@ -99,6 +101,12 @@ pub struct CreateArgs {
 pub struct GetArgs {
     #[command(subcommand)]
     pub command: GetCommands,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct CancelArgs {
+    #[command(subcommand)]
+    pub command: CancelCommands,
 }
 
 #[derive(Subcommand, Serialize, Debug, Deserialize)]
@@ -125,6 +133,12 @@ pub enum GetCommands {
     Worker(GetWorkerArgs),
     /// Query a list of workers subject to the filter
     Workers(GetWorkersArgs),
+}
+
+#[derive(Subcommand, Serialize, Debug, Deserialize)]
+pub enum CancelCommands {
+    /// Cancel a worker
+    Worker(CancelWorkerArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -359,6 +373,16 @@ pub struct UploadAttachmentArgs {
     pub local_file: PathBuf,
     /// The key of the attachment uploaded to. If not specified, the filename will be used.
     pub key: Option<String>,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct CancelWorkerArgs {
+    /// The UUID of the worker
+    pub uuid: Uuid,
+    /// Whether to force the worker to shutdown.
+    /// If not specified, the worker will be try to shutdown gracefully
+    #[arg(short, long)]
+    pub force: bool,
 }
 
 impl Default for ClientConfig {
@@ -707,5 +731,25 @@ impl From<GetWorkerArgs> for ClientCommand {
 impl From<UploadAttachmentArgs> for ClientCommand {
     fn from(args: UploadAttachmentArgs) -> Self {
         Self::Upload(args)
+    }
+}
+
+impl From<CancelWorkerArgs> for CancelCommands {
+    fn from(args: CancelWorkerArgs) -> Self {
+        Self::Worker(args)
+    }
+}
+
+impl From<CancelWorkerArgs> for CancelArgs {
+    fn from(args: CancelWorkerArgs) -> Self {
+        Self {
+            command: CancelCommands::Worker(args),
+        }
+    }
+}
+
+impl From<CancelWorkerArgs> for ClientCommand {
+    fn from(args: CancelWorkerArgs) -> Self {
+        Self::Cancel(args.into())
     }
 }

@@ -13,9 +13,9 @@ use uuid::Uuid;
 use crate::{
     config::{
         client::{
-            ClientCommand, ClientInteractiveShell, CreateCommands, CreateGroupArgs, CreateUserArgs,
-            GetArtifactArgs, GetAttachmentArgs, GetCommands, GetTaskArgs, GetWorkerArgs,
-            SubmitTaskArgs, UploadAttachmentArgs,
+            CancelCommands, CancelWorkerArgs, ClientCommand, ClientInteractiveShell,
+            CreateCommands, CreateGroupArgs, CreateUserArgs, GetArtifactArgs, GetAttachmentArgs,
+            GetCommands, GetTaskArgs, GetWorkerArgs, SubmitTaskArgs, UploadAttachmentArgs,
         },
         ClientConfig, ClientConfigCli,
     },
@@ -676,7 +676,7 @@ impl MitoClient {
         &mut self,
         args: GetWorkerArgs,
     ) -> crate::error::Result<WorkerQueryResp> {
-        self.url.set_path(&format!("user/workers/{}", args.uuid));
+        self.url.set_path(&format!("user/workers/{}/", args.uuid));
         let resp = self
             .http_client
             .get(self.url.as_str())
@@ -802,6 +802,27 @@ impl MitoClient {
                 let msg = get_xml_error_message(upload_file).await?;
                 Err(S3Error::Custom(msg).into())
             }
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn cancel_worker(&mut self, args: CancelWorkerArgs) -> crate::error::Result<()> {
+        if args.force {
+            self.url.set_path(&format!("user/workers/{}/", args.uuid));
+            self.url.set_query(Some("op=force"));
+        } else {
+            self.url.set_path(&format!("user/workers/{}/", args.uuid));
+        }
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
         } else {
             Err(get_error_from_resp(resp).await.into())
         }
@@ -982,6 +1003,16 @@ impl MitoClient {
                 Err(e) => {
                     tracing::error!("{}", e);
                 }
+            },
+            ClientCommand::Cancel(args) => match args.command {
+                CancelCommands::Worker(args) => match self.cancel_worker(args).await {
+                    Ok(_) => {
+                        tracing::info!("Worker cancelled successfully");
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
             },
             ClientCommand::Quit => {
                 return false;

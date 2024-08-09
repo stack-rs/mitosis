@@ -207,9 +207,14 @@ pub(crate) fn map_reqwest_err(e: reqwest::Error) -> RequestError {
 
 pub(crate) async fn get_error_from_resp(resp: reqwest::Response) -> RequestError {
     let status_code = resp.status();
-    let resp: ErrorMsg = resp
-        .json()
-        .await
-        .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
-    ClientError::Inner(status_code, resp).into()
+    let text = resp.text().await;
+    match text {
+        Ok(text) => {
+            tracing::trace!("Raw error response: {}", text);
+            let resp: ErrorMsg =
+                serde_json::from_str(&text).unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
+            ClientError::Inner(status_code, resp).into()
+        }
+        Err(e) => RequestError::Custom(e),
+    }
 }

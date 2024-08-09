@@ -20,8 +20,9 @@ use crate::{
         state::{TaskExecState, TaskState},
     },
     schema::{
-        AttachmentsQueryReq, RemoteResourceDownload, RemoveGroupWorkerRoleReq,
-        ReplaceWorkerTagsReq, TaskSpec, TasksQueryReq, UpdateGroupWorkerRoleReq, WorkersQueryReq,
+        AttachmentsQueryReq, ChangeTaskReq, RemoteResourceDownload, RemoveGroupWorkerRoleReq,
+        ReplaceWorkerTagsReq, TaskSpec, TasksQueryReq, UpdateGroupWorkerRoleReq,
+        UpdateTaskLabelsReq, WorkersQueryReq,
     },
 };
 
@@ -140,6 +141,8 @@ pub enum GetCommands {
 pub enum ManageCommands {
     /// Manage a worker
     Worker(ManageWorkerArgs),
+    /// Manage a task
+    Task(ManageTaskArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -425,6 +428,59 @@ pub struct RemoveWorkerGroupArgs {
     pub groups: Vec<String>,
 }
 
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct ManageTaskArgs {
+    /// The UUID of the task
+    pub uuid: Uuid,
+    #[command(subcommand)]
+    pub command: ManageTaskCommands,
+}
+
+#[derive(Subcommand, Serialize, Debug, Deserialize)]
+pub enum ManageTaskCommands {
+    /// Cancel a task
+    Cancel,
+    /// Replace labels of a task
+    UpdateLabels(UpdateTaskLabelsArgs),
+    /// Update the spec of a task
+    Change(ChangeTaskArgs),
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct UpdateTaskLabelsArgs {
+    /// The labels to replace
+    #[arg(num_args = 0..)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct ChangeTaskArgs {
+    /// The tags of the task, used to filter workers to execute the task
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub tags: Vec<String>,
+    /// The timeout of the task.
+    #[arg(long, value_parser = humantime_serde::re::humantime::parse_duration)]
+    pub timeout: Option<std::time::Duration>,
+    /// The priority of the task.
+    #[arg(short, long)]
+    pub priority: Option<i32>,
+    /// The environment variables to set
+    #[arg(short, long, num_args = 0.., value_delimiter = ',', value_parser = parse_key_val::<String, String>)]
+    pub envs: Vec<(String, String)>,
+    /// Whether to collect the terminal standard output and error of the executed task.
+    #[arg(long = "terminal")]
+    pub terminal_output: bool,
+    /// The command to run
+    #[arg(last = true)]
+    pub command: Vec<String>,
+    #[arg(skip)]
+    pub resources: Vec<RemoteResourceDownload>,
+    /// The UUID and the state of the task to watch before triggering this task.
+    /// Should specify it as `UUID,STATE`, e.g. `123e4567-e89b-12d3-a456-426614174000,ExecSpawned`.
+    #[arg(long, value_parser = parse_watch_task::<Uuid, TaskExecState>)]
+    pub watch: Option<(Uuid, TaskExecState)>,
+}
+
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
@@ -656,6 +712,32 @@ impl From<SubmitTaskCmdArgs> for SubmitTaskArgs {
     }
 }
 
+impl From<ChangeTaskArgs> for ChangeTaskReq {
+    fn from(args: ChangeTaskArgs) -> Self {
+        let task_spec = if args.command.is_empty() {
+            None
+        } else {
+            Some(TaskSpec::new(
+                args.command,
+                args.envs,
+                args.resources,
+                args.terminal_output,
+                args.watch,
+            ))
+        };
+        Self {
+            tags: if args.tags.is_empty() {
+                None
+            } else {
+                Some(args.tags.into_iter().collect())
+            },
+            timeout: args.timeout,
+            priority: args.priority,
+            task_spec,
+        }
+    }
+}
+
 impl From<GetTasksArgs> for TasksQueryReq {
     fn from(args: GetTasksArgs) -> Self {
         Self {
@@ -771,6 +853,12 @@ impl From<GetWorkerArgs> for ClientCommand {
 impl From<UploadAttachmentArgs> for ClientCommand {
     fn from(args: UploadAttachmentArgs) -> Self {
         Self::Upload(args)
+    }
+}
+
+impl From<ManageWorkerArgs> for ManageCommands {
+    fn from(args: ManageWorkerArgs) -> Self {
+        Self::Worker(args)
     }
 }
 
@@ -935,5 +1023,89 @@ impl From<RemoveWorkerGroupArgs> for RemoveGroupWorkerRoleReq {
         Self {
             groups: args.groups.into_iter().collect(),
         }
+    }
+}
+
+impl From<ManageTaskArgs> for ManageCommands {
+    fn from(args: ManageTaskArgs) -> Self {
+        Self::Task(args)
+    }
+}
+
+impl From<UpdateTaskLabelsArgs> for ManageTaskCommands {
+    fn from(args: UpdateTaskLabelsArgs) -> Self {
+        Self::UpdateLabels(args)
+    }
+}
+
+impl From<(Uuid, UpdateTaskLabelsArgs)> for ManageTaskArgs {
+    fn from(args: (Uuid, UpdateTaskLabelsArgs)) -> Self {
+        Self {
+            uuid: args.0,
+            command: ManageTaskCommands::UpdateLabels(args.1),
+        }
+    }
+}
+
+impl From<(Uuid, UpdateTaskLabelsArgs)> for ManageCommands {
+    fn from(args: (Uuid, UpdateTaskLabelsArgs)) -> Self {
+        Self::Task(args.into())
+    }
+}
+
+impl From<(Uuid, UpdateTaskLabelsArgs)> for ManageArgs {
+    fn from(args: (Uuid, UpdateTaskLabelsArgs)) -> Self {
+        Self {
+            command: ManageCommands::Task(args.into()),
+        }
+    }
+}
+
+impl From<(Uuid, UpdateTaskLabelsArgs)> for ClientCommand {
+    fn from(args: (Uuid, UpdateTaskLabelsArgs)) -> Self {
+        Self::Manage(args.into())
+    }
+}
+
+impl From<UpdateTaskLabelsArgs> for UpdateTaskLabelsReq {
+    fn from(args: UpdateTaskLabelsArgs) -> Self {
+        Self {
+            labels: args.tags.into_iter().collect(),
+        }
+    }
+}
+
+impl From<ChangeTaskArgs> for ManageTaskCommands {
+    fn from(args: ChangeTaskArgs) -> Self {
+        Self::Change(args)
+    }
+}
+
+impl From<(Uuid, ChangeTaskArgs)> for ManageTaskArgs {
+    fn from(args: (Uuid, ChangeTaskArgs)) -> Self {
+        Self {
+            uuid: args.0,
+            command: ManageTaskCommands::Change(args.1),
+        }
+    }
+}
+
+impl From<(Uuid, ChangeTaskArgs)> for ManageCommands {
+    fn from(args: (Uuid, ChangeTaskArgs)) -> Self {
+        Self::Task(args.into())
+    }
+}
+
+impl From<(Uuid, ChangeTaskArgs)> for ManageArgs {
+    fn from(args: (Uuid, ChangeTaskArgs)) -> Self {
+        Self {
+            command: ManageCommands::Task(args.into()),
+        }
+    }
+}
+
+impl From<(Uuid, ChangeTaskArgs)> for ClientCommand {
+    fn from(args: (Uuid, ChangeTaskArgs)) -> Self {
+        Self::Manage(args.into())
     }
 }

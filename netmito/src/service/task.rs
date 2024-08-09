@@ -1,12 +1,13 @@
 use sea_orm::sea_query::extension::postgres::PgExpr;
-use sea_orm::sea_query::{Alias, Query};
-use sea_orm::{prelude::*, FromQueryResult, Set};
+use sea_orm::sea_query::{Alias, PgFunc, Query};
+use sea_orm::{prelude::*, FromQueryResult, Set, TransactionTrait};
 use uuid::Uuid;
 
-use crate::entity::role::UserGroupRole;
+use crate::entity::role::{GroupWorkerRole, UserGroupRole};
+use crate::entity::state::TaskState;
 use crate::schema::{
-    ArtifactQueryResp, ParsedTaskQueryInfo, SubmitTaskReq, SubmitTaskResp, TaskQueryInfo,
-    TaskQueryResp, TasksQueryReq,
+    ArtifactQueryResp, ChangeTaskReq, ParsedTaskQueryInfo, SubmitTaskReq, SubmitTaskResp,
+    TaskQueryInfo, TaskQueryResp, TaskResultSpec, TasksQueryReq, UpdateTaskLabelsReq,
 };
 use crate::{config::InfraPool, schema::TaskSpec};
 
@@ -19,7 +20,7 @@ use crate::{
     error::Error,
 };
 
-use super::worker::TaskDispatcherOp;
+use super::worker::{remove_task, TaskDispatcherOp};
 
 fn check_task_spec(spec: &TaskSpec) -> crate::error::Result<()> {
     if spec.resources.iter().any(|r| {
@@ -102,7 +103,12 @@ pub async fn user_submit_task(
                 .eq(Expr::col((Worker::Entity, Worker::Column::Id))),
         )
         .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::GroupId)).eq(task.group_id))
-        .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).gt(0))
+        .and_where(
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).eq(PgFunc::any(vec![
+                GroupWorkerRole::Write,
+                GroupWorkerRole::Admin,
+            ])),
+        )
         .and_where(Expr::col((Worker::Entity, Worker::Column::Tags)).contains(task.tags))
         .to_owned();
     let workers: Vec<PartialWorkerId> =
@@ -122,6 +128,251 @@ pub async fn user_submit_task(
             uuid: task.uuid,
         })
     }
+}
+
+pub async fn user_change_task(
+    pool: &InfraPool,
+    user_id: i64,
+    uuid: Uuid,
+    ChangeTaskReq {
+        tags,
+        timeout,
+        priority,
+        task_spec,
+    }: ChangeTaskReq,
+) -> crate::error::Result<()> {
+    if tags.is_none() && timeout.is_none() && priority.is_none() && task_spec.is_none() {
+        return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+            "No change specified".to_string(),
+        )));
+    }
+    let task = pool
+        .db
+        .transaction::<_, ActiveTask::Model, crate::error::Error>(|txn| {
+            Box::pin(async move {
+                let task = ActiveTask::Entity::find()
+                    .filter(ActiveTask::Column::Uuid.eq(uuid))
+                    .filter(ActiveTask::Column::State.eq(TaskState::Ready))
+                    .one(txn)
+                    .await?
+                    .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
+                        "Task with uuid {}",
+                        uuid
+                    ))))?;
+                let user_group_role = UserGroup::Entity::find()
+                    .filter(UserGroup::Column::UserId.eq(user_id))
+                    .filter(UserGroup::Column::GroupId.eq(task.group_id))
+                    .one(txn)
+                    .await?
+                    .ok_or(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                        "User is not in the group".to_string(),
+                    )))?;
+                match user_group_role.role {
+                    UserGroupRole::Admin | UserGroupRole::Write => {}
+                    _ => {
+                        return Err(Error::AuthError(crate::error::AuthError::PermissionDenied));
+                    }
+                }
+                let mut task: ActiveTask::ActiveModel = task.into();
+                let now = TimeDateTimeWithTimeZone::now_utc();
+                task.updated_at = Set(now);
+                if let Some(tags) = tags {
+                    task.tags = Set(Vec::from_iter(tags));
+                }
+                if let Some(task_spec) = task_spec {
+                    check_task_spec(&task_spec)?;
+                    let spec = serde_json::to_value(task_spec)?;
+                    task.spec = Set(spec);
+                }
+                if let Some(timeout) = timeout {
+                    task.timeout = Set(timeout.as_secs() as i64);
+                }
+                if let Some(priority) = priority {
+                    task.priority = Set(priority);
+                }
+                let task = task.update(txn).await?;
+
+                Ok(task)
+            })
+        })
+        .await?;
+    let builder = pool.db.get_database_backend();
+    let tasks_stmt = Query::select()
+        .column((Worker::Entity, ActiveTask::Column::Id))
+        .from(Worker::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            GroupWorker::Entity,
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId))
+                .eq(Expr::col((Worker::Entity, Worker::Column::Id))),
+        )
+        .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::GroupId)).eq(task.group_id))
+        .and_where(
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).eq(PgFunc::any(vec![
+                GroupWorkerRole::Write,
+                GroupWorkerRole::Admin,
+            ])),
+        )
+        .and_where(Expr::col((Worker::Entity, Worker::Column::Tags)).contains(task.tags))
+        .to_owned();
+    let workers: Vec<PartialWorkerId> =
+        PartialWorkerId::find_by_statement(builder.build(&tasks_stmt))
+            .all(&pool.db)
+            .await?;
+    let op = TaskDispatcherOp::RemoveTask(task.id);
+    if pool.worker_task_queue_tx.send(op).is_err() {
+        return Err(Error::Custom("send remove task op failed".to_string()));
+    }
+    let op = TaskDispatcherOp::BatchAddTask(
+        workers.into_iter().map(i64::from).collect(),
+        task.id,
+        task.priority,
+    );
+    if pool.worker_task_queue_tx.send(op).is_err() {
+        Err(Error::Custom("send batch add task op failed".to_string()))
+    } else {
+        Ok(())
+    }
+}
+
+pub async fn user_change_task_labels(
+    pool: &InfraPool,
+    user_id: i64,
+    uuid: Uuid,
+    req: UpdateTaskLabelsReq,
+) -> crate::error::Result<()> {
+    let labels = req.labels.into_iter().collect::<Vec<_>>();
+    pool.db
+        .transaction::<_, (), crate::error::Error>(|txn| {
+            Box::pin(async move {
+                let task = ActiveTask::Entity::find()
+                    .filter(ActiveTask::Column::Uuid.eq(uuid))
+                    .one(txn)
+                    .await?;
+                if let Some(task) = task {
+                    let user_group_role = UserGroup::Entity::find()
+                        .filter(UserGroup::Column::UserId.eq(user_id))
+                        .filter(UserGroup::Column::GroupId.eq(task.group_id))
+                        .one(txn)
+                        .await?
+                        .ok_or(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                            "User is not in the group".to_string(),
+                        )))?;
+                    match user_group_role.role {
+                        UserGroupRole::Admin | UserGroupRole::Write => {}
+                        _ => {
+                            return Err(Error::AuthError(
+                                crate::error::AuthError::PermissionDenied,
+                            ));
+                        }
+                    }
+                    let mut task: ActiveTask::ActiveModel = task.into();
+                    let now = TimeDateTimeWithTimeZone::now_utc();
+                    task.updated_at = Set(now);
+                    task.labels = Set(labels);
+                    task.update(txn).await?;
+                } else {
+                    let task = ArchivedTasks::Entity::find()
+                        .filter(ArchivedTasks::Column::Uuid.eq(uuid))
+                        .one(txn)
+                        .await?
+                        .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
+                            "Task with uuid {}",
+                            uuid
+                        ))))?;
+                    let user_group_role = UserGroup::Entity::find()
+                        .filter(UserGroup::Column::UserId.eq(user_id))
+                        .filter(UserGroup::Column::GroupId.eq(task.group_id))
+                        .one(txn)
+                        .await?
+                        .ok_or(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                            "User is not in the group".to_string(),
+                        )))?;
+                    match user_group_role.role {
+                        UserGroupRole::Admin | UserGroupRole::Write => {}
+                        _ => {
+                            return Err(Error::AuthError(
+                                crate::error::AuthError::PermissionDenied,
+                            ));
+                        }
+                    }
+                    let mut task: ArchivedTasks::ActiveModel = task.into();
+                    let now = TimeDateTimeWithTimeZone::now_utc();
+                    task.updated_at = Set(now);
+                    task.labels = Set(labels);
+                    task.update(txn).await?;
+                }
+                Ok(())
+            })
+        })
+        .await?;
+    Ok(())
+}
+
+pub async fn user_cancel_task(
+    pool: &InfraPool,
+    user_id: i64,
+    uuid: Uuid,
+) -> crate::error::Result<()> {
+    let task_id = pool
+        .db
+        .transaction::<_, i64, crate::error::Error>(|txn| {
+            Box::pin(async move {
+                let task = ActiveTask::Entity::find()
+                    .filter(ActiveTask::Column::Uuid.eq(uuid))
+                    .filter(ActiveTask::Column::State.eq(TaskState::Ready))
+                    .one(txn)
+                    .await?
+                    .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
+                        "Task with uuid {}",
+                        uuid
+                    ))))?;
+                let user_group_role = UserGroup::Entity::find()
+                    .filter(UserGroup::Column::UserId.eq(user_id))
+                    .filter(UserGroup::Column::GroupId.eq(task.group_id))
+                    .one(txn)
+                    .await?
+                    .ok_or(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                        "User is not in the group".to_string(),
+                    )))?;
+                match user_group_role.role {
+                    UserGroupRole::Admin | UserGroupRole::Write => {}
+                    _ => {
+                        return Err(Error::AuthError(crate::error::AuthError::PermissionDenied));
+                    }
+                }
+                let now = TimeDateTimeWithTimeZone::now_utc();
+                let res = TaskResultSpec {
+                    exit_status: 0,
+                    msg: Some(crate::schema::TaskResultMessage::UserCancellation),
+                };
+                let result = serde_json::to_value(res).inspect_err(|e| tracing::error!("{}", e))?;
+                let archived_task = ArchivedTasks::ActiveModel {
+                    id: Set(task.id),
+                    creator_id: Set(task.creator_id),
+                    group_id: Set(task.group_id),
+                    task_id: Set(task.task_id),
+                    uuid: Set(task.uuid),
+                    tags: Set(task.tags),
+                    labels: Set(task.labels),
+                    created_at: Set(task.created_at),
+                    updated_at: Set(now),
+                    state: Set(TaskState::Cancelled),
+                    assigned_worker: Set(task.assigned_worker),
+                    timeout: Set(task.timeout),
+                    priority: Set(task.priority),
+                    spec: Set(task.spec),
+                    result: Set(Some(result)),
+                };
+                archived_task.insert(txn).await?;
+                ActiveTask::Entity::delete_by_id(task.id).exec(txn).await?;
+                Ok(task.id)
+            })
+        })
+        .await?;
+    let _ = remove_task(task_id, pool)
+        .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
+    Ok(())
 }
 
 pub async fn get_task(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<TaskQueryResp> {

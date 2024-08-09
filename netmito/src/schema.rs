@@ -139,6 +139,20 @@ pub struct SubmitTaskResp {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct ChangeTaskReq {
+    pub tags: Option<HashSet<String>>,
+    #[serde(with = "humantime_serde")]
+    pub timeout: Option<std::time::Duration>,
+    pub priority: Option<i32>,
+    pub task_spec: Option<TaskSpec>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateTaskLabelsReq {
+    pub labels: HashSet<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TaskResultSpec {
     pub exit_status: i32,
     pub msg: Option<TaskResultMessage>,
@@ -152,6 +166,8 @@ pub enum TaskResultMessage {
     ResourceNotFound,
     ResourceForbidden,
     WatchTimeout,
+    // May record the user name who cancels the task.
+    UserCancellation,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

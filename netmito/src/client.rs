@@ -15,20 +15,20 @@ use crate::{
         client::{
             CancelWorkerArgs, ClientCommand, ClientInteractiveShell, CreateCommands,
             CreateGroupArgs, CreateUserArgs, GetArtifactArgs, GetAttachmentArgs, GetCommands,
-            GetTaskArgs, GetWorkerArgs, ManageCommands, ManageWorkerCommands, SubmitTaskArgs,
-            UploadAttachmentArgs,
+            GetTaskArgs, GetWorkerArgs, ManageCommands, ManageTaskCommands, ManageWorkerCommands,
+            SubmitTaskArgs, UploadAttachmentArgs,
         },
         ClientConfig, ClientConfigCli,
     },
     entity::{role::GroupWorkerRole, state::TaskExecState},
     error::{get_error_from_resp, map_reqwest_err, RequestError, S3Error},
     schema::{
-        AttachmentQueryInfo, AttachmentsQueryReq, CreateGroupReq, CreateUserReq,
+        AttachmentQueryInfo, AttachmentsQueryReq, ChangeTaskReq, CreateGroupReq, CreateUserReq,
         ParsedTaskQueryInfo, RedisConnectionInfo, RemoteResource, RemoteResourceDownloadResp,
         RemoveGroupWorkerRoleReq, ReplaceWorkerTagsReq, ResourceDownloadInfo, SubmitTaskReq,
         SubmitTaskResp, TaskQueryInfo, TaskQueryResp, TasksQueryReq, UpdateGroupWorkerRoleReq,
-        UploadAttachmentReq, UploadAttachmentResp, WorkerQueryInfo, WorkerQueryResp,
-        WorkersQueryReq, WorkersQueryResp,
+        UpdateTaskLabelsReq, UploadAttachmentReq, UploadAttachmentResp, WorkerQueryInfo,
+        WorkerQueryResp, WorkersQueryReq, WorkersQueryResp,
     },
     service::{
         auth::cred::get_user_credential,
@@ -897,6 +897,64 @@ impl MitoClient {
         }
     }
 
+    pub async fn cancel_task(&mut self, uuid: Uuid) -> crate::error::Result<()> {
+        self.url.set_path(&format!("user/tasks/{}", uuid));
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn update_task_labels(
+        &mut self,
+        uuid: Uuid,
+        args: UpdateTaskLabelsReq,
+    ) -> crate::error::Result<()> {
+        self.url.set_path(&format!("user/tasks/{}/labels", uuid));
+        let resp = self
+            .http_client
+            .put(self.url.as_str())
+            .json(&args)
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn change_task(
+        &mut self,
+        uuid: Uuid,
+        args: ChangeTaskReq,
+    ) -> crate::error::Result<()> {
+        self.url.set_path(&format!("user/tasks/{}", uuid));
+        let resp = self
+            .http_client
+            .put(self.url.as_str())
+            .json(&args)
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn quit(self) {}
 
     pub async fn handle_command<T>(&mut self, cmd: T) -> bool
@@ -1111,6 +1169,39 @@ impl MitoClient {
                             match self.remove_group_worker_roles(uuid, args.into()).await {
                                 Ok(_) => {
                                     tracing::info!("Group worker roles removed successfully");
+                                }
+                                Err(e) => {
+                                    tracing::error!("{}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+                ManageCommands::Task(args) => {
+                    let uuid = args.uuid;
+                    match args.command {
+                        ManageTaskCommands::Cancel => match self.cancel_task(uuid).await {
+                            Ok(_) => {
+                                tracing::info!("Task cancelled successfully");
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        },
+                        ManageTaskCommands::UpdateLabels(args) => {
+                            match self.update_task_labels(uuid, args.into()).await {
+                                Ok(_) => {
+                                    tracing::info!("Task labels updated successfully");
+                                }
+                                Err(e) => {
+                                    tracing::error!("{}", e);
+                                }
+                            }
+                        }
+                        ManageTaskCommands::Change(args) => {
+                            match self.change_task(uuid, args.into()).await {
+                                Ok(_) => {
+                                    tracing::info!("Task changed successfully");
                                 }
                                 Err(e) => {
                                     tracing::error!("{}", e);

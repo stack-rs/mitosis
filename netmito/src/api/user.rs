@@ -17,7 +17,10 @@ use crate::{
     service::{
         auth::{user_auth_middleware, user_login, AuthUser},
         s3::{get_artifact, query_attachment_list, user_get_attachment, user_upload_attachment},
-        task::{get_task, query_task_list, user_submit_task},
+        task::{
+            get_task, query_task_list, user_cancel_task, user_change_task, user_change_task_labels,
+            user_submit_task,
+        },
         worker::{
             get_worker, query_worker_list, user_remove_worker_by_uuid, user_remove_worker_groups,
             user_replace_worker_tags, user_update_worker_groups,
@@ -29,7 +32,11 @@ pub fn user_router(st: InfraPool) -> Router<InfraPool> {
     Router::new()
         .route("/auth", get(auth_user))
         .route("/tasks", post(submit_task))
-        .route("/tasks/:uuid", get(query_task))
+        .route(
+            "/tasks/:uuid",
+            get(query_task).put(change_task).delete(cancel_task),
+        )
+        .route("/tasks/:uuid/labels", put(change_task_labels))
         .route("/artifacts/:uuid/:content_type", get(download_artifact))
         .route("/attachments/:group_name/*key", get(download_attachment))
         .route("/attachments", post(upload_attachment))
@@ -88,6 +95,62 @@ pub async fn submit_task(
             }
         })?;
     Ok(Json(resp))
+}
+
+pub async fn change_task(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<ChangeTaskReq>,
+) -> Result<(), ApiError> {
+    user_change_task(&pool, u.id, uuid, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
+}
+
+pub async fn change_task_labels(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<UpdateTaskLabelsReq>,
+) -> Result<(), ApiError> {
+    user_change_task_labels(&pool, u.id, uuid, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
+}
+
+pub async fn cancel_task(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+) -> Result<(), ApiError> {
+    user_cancel_task(&pool, u.id, uuid)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
 }
 
 pub async fn query_task(

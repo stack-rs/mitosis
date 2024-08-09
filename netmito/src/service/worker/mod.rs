@@ -543,6 +543,8 @@ pub async fn report_task(
                     })
                 })
                 .await?;
+            let _ = remove_task(task_id, pool)
+                .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
             // Worker was requested to gracefully shutdown
             if matches!(worker_state, WorkerState::GracefulShutdown)
                 && (pool

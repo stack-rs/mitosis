@@ -16,13 +16,13 @@ use uuid::Uuid;
 use crate::{
     entity::{
         content::ArtifactContentType,
-        role::GroupWorkerRole,
+        role::{GroupWorkerRole, UserGroupRole},
         state::{TaskExecState, TaskState},
     },
     schema::{
         AttachmentsQueryReq, ChangeTaskReq, RemoteResourceDownload, RemoveGroupWorkerRoleReq,
-        ReplaceWorkerTagsReq, TaskSpec, TasksQueryReq, UpdateGroupWorkerRoleReq,
-        UpdateTaskLabelsReq, WorkersQueryReq,
+        RemoveUserGroupRoleReq, ReplaceWorkerTagsReq, TaskSpec, TasksQueryReq,
+        UpdateGroupWorkerRoleReq, UpdateTaskLabelsReq, UpdateUserGroupRoleReq, WorkersQueryReq,
     },
 };
 
@@ -143,6 +143,8 @@ pub enum ManageCommands {
     Worker(ManageWorkerArgs),
     /// Manage a task
     Task(ManageTaskArgs),
+    /// Manage a group
+    Group(ManageGroupArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -161,7 +163,6 @@ pub struct CreateUserArgs {
 #[derive(Serialize, Debug, Deserialize, Args)]
 pub struct CreateGroupArgs {
     /// The name of the group
-    #[arg(short = 'n', long)]
     pub name: String,
 }
 
@@ -416,7 +417,7 @@ pub struct ReplaceWorkerTagsArgs {
 
 #[derive(Serialize, Debug, Deserialize, Args)]
 pub struct UpdateWorkerGroupArgs {
-    /// The name of the group to update
+    /// The name and role of the group on the worker to update
     #[arg(num_args = 0.., value_parser = parse_key_val::<String, GroupWorkerRole>)]
     pub roles: Vec<(String, GroupWorkerRole)>,
 }
@@ -479,6 +480,36 @@ pub struct ChangeTaskArgs {
     /// Should specify it as `UUID,STATE`, e.g. `123e4567-e89b-12d3-a456-426614174000,ExecSpawned`.
     #[arg(long, value_parser = parse_watch_task::<Uuid, TaskExecState>)]
     pub watch: Option<(Uuid, TaskExecState)>,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct ManageGroupArgs {
+    /// The name of the group
+    pub group: String,
+    #[command(subcommand)]
+    pub command: ManageGroupCommands,
+}
+
+#[derive(Subcommand, Serialize, Debug, Deserialize)]
+pub enum ManageGroupCommands {
+    /// Update the roles of users to a group
+    Update(UpdateUserGroupArgs),
+    /// Remove the accessibility of users from a group
+    Remove(RemoveUserGroupArgs),
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct UpdateUserGroupArgs {
+    /// The username and role of the user to the group
+    #[arg(num_args = 0.., value_parser = parse_key_val::<String, UserGroupRole>)]
+    pub roles: Vec<(String, UserGroupRole)>,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct RemoveUserGroupArgs {
+    /// The username of the user
+    #[arg(num_args = 0..)]
+    pub users: Vec<String>,
 }
 
 impl Default for ClientConfig {
@@ -1107,5 +1138,91 @@ impl From<(Uuid, ChangeTaskArgs)> for ManageArgs {
 impl From<(Uuid, ChangeTaskArgs)> for ClientCommand {
     fn from(args: (Uuid, ChangeTaskArgs)) -> Self {
         Self::Manage(args.into())
+    }
+}
+
+impl From<UpdateUserGroupArgs> for ManageGroupCommands {
+    fn from(args: UpdateUserGroupArgs) -> Self {
+        Self::Update(args)
+    }
+}
+
+impl From<(String, UpdateUserGroupArgs)> for ManageGroupArgs {
+    fn from(args: (String, UpdateUserGroupArgs)) -> Self {
+        Self {
+            group: args.0,
+            command: ManageGroupCommands::Update(args.1),
+        }
+    }
+}
+
+impl From<(String, UpdateUserGroupArgs)> for ManageCommands {
+    fn from(args: (String, UpdateUserGroupArgs)) -> Self {
+        Self::Group(args.into())
+    }
+}
+
+impl From<(String, UpdateUserGroupArgs)> for ManageArgs {
+    fn from(args: (String, UpdateUserGroupArgs)) -> Self {
+        Self {
+            command: ManageCommands::Group(args.into()),
+        }
+    }
+}
+
+impl From<(String, UpdateUserGroupArgs)> for ClientCommand {
+    fn from(args: (String, UpdateUserGroupArgs)) -> Self {
+        Self::Manage(args.into())
+    }
+}
+
+impl From<UpdateUserGroupArgs> for UpdateUserGroupRoleReq {
+    fn from(args: UpdateUserGroupArgs) -> Self {
+        Self {
+            relations: args.roles.into_iter().collect(),
+        }
+    }
+}
+
+impl From<RemoveUserGroupArgs> for ManageGroupCommands {
+    fn from(args: RemoveUserGroupArgs) -> Self {
+        Self::Remove(args)
+    }
+}
+
+impl From<(String, RemoveUserGroupArgs)> for ManageGroupArgs {
+    fn from(args: (String, RemoveUserGroupArgs)) -> Self {
+        Self {
+            group: args.0,
+            command: ManageGroupCommands::Remove(args.1),
+        }
+    }
+}
+
+impl From<(String, RemoveUserGroupArgs)> for ManageCommands {
+    fn from(args: (String, RemoveUserGroupArgs)) -> Self {
+        Self::Group(args.into())
+    }
+}
+
+impl From<(String, RemoveUserGroupArgs)> for ManageArgs {
+    fn from(args: (String, RemoveUserGroupArgs)) -> Self {
+        Self {
+            command: ManageCommands::Group(args.into()),
+        }
+    }
+}
+
+impl From<(String, RemoveUserGroupArgs)> for ClientCommand {
+    fn from(args: (String, RemoveUserGroupArgs)) -> Self {
+        Self::Manage(args.into())
+    }
+}
+
+impl From<RemoveUserGroupArgs> for RemoveUserGroupRoleReq {
+    fn from(args: RemoveUserGroupArgs) -> Self {
+        Self {
+            users: args.users.into_iter().collect(),
+        }
     }
 }

@@ -1,12 +1,15 @@
-use sea_orm::{prelude::*, Set, TransactionTrait};
+use std::collections::{HashMap, HashSet};
+
+use sea_orm::{prelude::*, QuerySelect, Set, TransactionTrait};
 use sea_orm_migration::prelude::*;
 
 use crate::{
+    config::InfraPool,
     entity::{
         groups as Group, role::UserGroupRole, state::GroupState, user_group as UserGroup,
         users as User,
     },
-    error::{ApiError, Error},
+    error::{ApiError, AuthError, Error},
 };
 
 pub async fn create_group<C>(
@@ -17,6 +20,9 @@ pub async fn create_group<C>(
 where
     C: TransactionTrait,
 {
+    if !super::name_validator(&group_name) {
+        return Err(ApiError::InvalidRequest("Invalid group name".to_string()).into());
+    }
     let group = db
         .transaction::<_, Group::Model, Error>(|txn| {
             Box::pin(async move {
@@ -118,4 +124,105 @@ where
             })
         })
         .await?)
+}
+
+pub async fn update_user_group_role(
+    user_id: i64,
+    group_name: String,
+    mut relations: HashMap<String, UserGroupRole>,
+    pool: &InfraPool,
+) -> crate::error::Result<()> {
+    if relations.is_empty() {
+        return Err(ApiError::InvalidRequest("Empty group relations".to_string()).into());
+    }
+    let group = Group::Entity::find()
+        .filter(Group::Column::GroupName.eq(&group_name))
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::NotFound(format!("Group {}", group_name)))?;
+    let user_group = UserGroup::Entity::find()
+        .filter(UserGroup::Column::UserId.eq(user_id))
+        .filter(UserGroup::Column::GroupId.eq(group.id))
+        .one(&pool.db)
+        .await?
+        .ok_or(AuthError::PermissionDenied)?;
+    if user_group.role != UserGroupRole::Admin {
+        return Err(AuthError::PermissionDenied.into());
+    }
+    let user_names = relations.keys().cloned().collect::<Vec<_>>();
+    let user_count = user_names.len();
+    let users: Vec<(i64, String)> = User::Entity::find()
+        .filter(Expr::col(User::Column::Username).eq(PgFunc::any(user_names)))
+        .select_only()
+        .column(User::Column::Id)
+        .column(User::Column::Username)
+        .into_tuple()
+        .all(&pool.db)
+        .await?;
+    if users.len() != user_count {
+        return Err(ApiError::InvalidRequest("Some users do not exist".to_string()).into());
+    }
+    let user_group_relations = users.into_iter().filter_map(|(user_id, username)| {
+        relations
+            .remove(&username)
+            .map(|role| UserGroup::ActiveModel {
+                user_id: Set(user_id),
+                group_id: Set(group.id),
+                role: Set(role),
+                ..Default::default()
+            })
+    });
+    UserGroup::Entity::insert_many(user_group_relations)
+        .on_conflict(
+            OnConflict::columns([UserGroup::Column::UserId, UserGroup::Column::GroupId])
+                .update_column(UserGroup::Column::Role)
+                .to_owned(),
+        )
+        .exec(&pool.db)
+        .await?;
+    Ok(())
+}
+
+pub async fn remove_user_group_role(
+    user_id: i64,
+    group_name: String,
+    usernames: HashSet<String>,
+    pool: &InfraPool,
+) -> crate::error::Result<()> {
+    if usernames.is_empty() {
+        return Err(ApiError::InvalidRequest("Empty group relations".to_string()).into());
+    }
+    let group = Group::Entity::find()
+        .filter(Group::Column::GroupName.eq(&group_name))
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::NotFound(format!("Group {}", group_name)))?;
+    let user_group = UserGroup::Entity::find()
+        .filter(UserGroup::Column::UserId.eq(user_id))
+        .filter(UserGroup::Column::GroupId.eq(group.id))
+        .one(&pool.db)
+        .await?
+        .ok_or(AuthError::PermissionDenied)?;
+    if user_group.role != UserGroupRole::Admin {
+        return Err(AuthError::PermissionDenied.into());
+    }
+    let user_names = usernames.into_iter().collect::<Vec<_>>();
+    let user_count = user_names.len();
+    let users: Vec<i64> = User::Entity::find()
+        .filter(Expr::col(User::Column::Username).eq(PgFunc::any(user_names)))
+        .select_only()
+        .column(User::Column::Id)
+        .column(User::Column::Username)
+        .into_tuple()
+        .all(&pool.db)
+        .await?;
+    if users.len() != user_count {
+        return Err(ApiError::InvalidRequest("Some users do not exist".to_string()).into());
+    }
+    UserGroup::Entity::delete_many()
+        .filter(Expr::col(UserGroup::Column::UserId).eq(PgFunc::any(users)))
+        .filter(Expr::col(UserGroup::Column::GroupId).eq(group.id))
+        .exec(&pool.db)
+        .await?;
+    Ok(())
 }

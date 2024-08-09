@@ -1,33 +1,86 @@
-use axum::{extract::State, Extension, Json};
-use sea_orm::DbErr;
+use axum::{
+    extract::{Path, State},
+    middleware,
+    routing::{post, put},
+    Extension, Json, Router,
+};
 
 use crate::{
     config::InfraPool,
     error::{ApiError, ApiResult},
     schema::*,
-    service::{self, auth::AuthUser, name_validator},
+    service::{
+        self,
+        auth::{user_auth_middleware, AuthUser},
+    },
 };
+
+pub fn group_router(st: InfraPool) -> Router<InfraPool> {
+    Router::new()
+        .route("/", post(create_group))
+        .route(
+            "/:group/users",
+            put(update_user_group).delete(remove_user_group),
+        )
+        .layer(middleware::from_fn_with_state(
+            st.clone(),
+            user_auth_middleware,
+        ))
+        .with_state(st)
+}
 
 pub async fn create_group(
     Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
     Json(req): Json<CreateGroupReq>,
 ) -> ApiResult<()> {
-    if !name_validator(&req.group_name) {
-        Err(ApiError::InvalidRequest("Invalid group name".to_string()))
-    } else {
-        match service::group::create_group(&pool.db, u.id, req.group_name.clone()).await {
-            Ok(_) => Ok(()),
-            Err(e) => match e {
-                crate::error::Error::ApiError(e) => Err(e),
-                crate::error::Error::DbError(DbErr::RecordNotInserted) => {
-                    Err(ApiError::AlreadyExists(req.group_name))
-                }
-                _ => {
-                    tracing::error!("{}", e);
-                    Err(ApiError::InternalServerError)
-                }
-            },
-        }
-    }
+    service::group::create_group(&pool.db, u.id, req.group_name.clone())
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
+}
+
+pub async fn update_user_group(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(group): Path<String>,
+    Json(req): Json<UpdateUserGroupRoleReq>,
+) -> ApiResult<()> {
+    service::group::update_user_group_role(u.id, group, req.relations, &pool)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
+}
+
+pub async fn remove_user_group(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(group): Path<String>,
+    Json(req): Json<RemoveUserGroupRoleReq>,
+) -> ApiResult<()> {
+    service::group::remove_user_group_role(u.id, group, req.users, &pool)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
 }

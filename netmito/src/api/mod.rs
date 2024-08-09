@@ -36,13 +36,14 @@ pub fn router(st: InfraPool) -> Router {
             .route("/login", post(user::login_user))
             .nest("/user", user::user_router(st.clone()))
             .nest("/admin", admin::admin_router(st.clone()))
-            .route(
-                "/group",
-                post(group::create_group).layer(middleware::from_fn_with_state(
-                    st.clone(),
-                    user_auth_middleware,
-                )),
-            )
+            .nest("/groups", group::group_router(st.clone()))
+            // .route(
+            //     "/group",
+            //     post(group::create_group).layer(middleware::from_fn_with_state(
+            //         st.clone(),
+            //         user_auth_middleware,
+            //     )),
+            // )
             .route(
                 "/worker",
                 post(worker::register).layer(middleware::from_fn_with_state(
@@ -63,13 +64,14 @@ pub fn router(st: InfraPool) -> Router {
             .route("/login", post(user::login_user))
             .nest("/user", user::user_router(st.clone()))
             .nest("/admin", admin::admin_router(st.clone()))
-            .route(
-                "/group",
-                post(group::create_group).layer(middleware::from_fn_with_state(
-                    st.clone(),
-                    user_auth_middleware,
-                )),
-            )
+            .nest("/groups", group::group_router(st.clone()))
+            // .route(
+            //     "/group",
+            //     post(group::create_group).layer(middleware::from_fn_with_state(
+            //         st.clone(),
+            //         user_auth_middleware,
+            //     )),
+            // )
             .route(
                 "/worker",
                 post(worker::register).layer(middleware::from_fn_with_state(

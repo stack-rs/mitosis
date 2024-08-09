@@ -15,8 +15,8 @@ use crate::{
         client::{
             CancelWorkerArgs, ClientCommand, ClientInteractiveShell, CreateCommands,
             CreateGroupArgs, CreateUserArgs, GetArtifactArgs, GetAttachmentArgs, GetCommands,
-            GetTaskArgs, GetWorkerArgs, ManageCommands, ManageTaskCommands, ManageWorkerCommands,
-            SubmitTaskArgs, UploadAttachmentArgs,
+            GetTaskArgs, GetWorkerArgs, ManageCommands, ManageGroupCommands, ManageTaskCommands,
+            ManageWorkerCommands, SubmitTaskArgs, UploadAttachmentArgs,
         },
         ClientConfig, ClientConfigCli,
     },
@@ -25,10 +25,11 @@ use crate::{
     schema::{
         AttachmentQueryInfo, AttachmentsQueryReq, ChangeTaskReq, CreateGroupReq, CreateUserReq,
         ParsedTaskQueryInfo, RedisConnectionInfo, RemoteResource, RemoteResourceDownloadResp,
-        RemoveGroupWorkerRoleReq, ReplaceWorkerTagsReq, ResourceDownloadInfo, SubmitTaskReq,
-        SubmitTaskResp, TaskQueryInfo, TaskQueryResp, TasksQueryReq, UpdateGroupWorkerRoleReq,
-        UpdateTaskLabelsReq, UploadAttachmentReq, UploadAttachmentResp, WorkerQueryInfo,
-        WorkerQueryResp, WorkersQueryReq, WorkersQueryResp,
+        RemoveGroupWorkerRoleReq, RemoveUserGroupRoleReq, ReplaceWorkerTagsReq,
+        ResourceDownloadInfo, SubmitTaskReq, SubmitTaskResp, TaskQueryInfo, TaskQueryResp,
+        TasksQueryReq, UpdateGroupWorkerRoleReq, UpdateTaskLabelsReq, UpdateUserGroupRoleReq,
+        UploadAttachmentReq, UploadAttachmentResp, WorkerQueryInfo, WorkerQueryResp,
+        WorkersQueryReq, WorkersQueryResp,
     },
     service::{
         auth::cred::get_user_credential,
@@ -499,7 +500,7 @@ impl MitoClient {
     }
 
     pub async fn create_group(&mut self, args: CreateGroupArgs) -> crate::error::Result<()> {
-        self.url.set_path("group");
+        self.url.set_path("groups");
         let req = CreateGroupReq {
             group_name: args.name,
         };
@@ -955,6 +956,48 @@ impl MitoClient {
         }
     }
 
+    pub async fn update_user_group_roles(
+        &mut self,
+        group: String,
+        args: UpdateUserGroupRoleReq,
+    ) -> crate::error::Result<()> {
+        self.url.set_path(&format!("groups/{}/users", group));
+        let resp = self
+            .http_client
+            .put(self.url.as_str())
+            .json(&args)
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn remove_user_group_roles(
+        &mut self,
+        group: String,
+        args: RemoveUserGroupRoleReq,
+    ) -> crate::error::Result<()> {
+        self.url.set_path(&format!("groups/{}/users", group));
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .json(&args)
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn quit(self) {}
 
     pub async fn handle_command<T>(&mut self, cmd: T) -> bool
@@ -1202,6 +1245,31 @@ impl MitoClient {
                             match self.change_task(uuid, args.into()).await {
                                 Ok(_) => {
                                     tracing::info!("Task changed successfully");
+                                }
+                                Err(e) => {
+                                    tracing::error!("{}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+                ManageCommands::Group(args) => {
+                    let group = args.group;
+                    match args.command {
+                        ManageGroupCommands::Update(args) => {
+                            match self.update_user_group_roles(group, args.into()).await {
+                                Ok(_) => {
+                                    tracing::info!("User group roles updated successfully");
+                                }
+                                Err(e) => {
+                                    tracing::error!("{}", e);
+                                }
+                            }
+                        }
+                        ManageGroupCommands::Remove(args) => {
+                            match self.remove_user_group_roles(group, args.into()).await {
+                                Ok(_) => {
+                                    tracing::info!("User group roles removed successfully");
                                 }
                                 Err(e) => {
                                     tracing::error!("{}", e);

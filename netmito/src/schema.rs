@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::entity::{
     content::{ArtifactContentType, AttachmentContentType},
-    role::GroupWorkerRole,
+    role::{GroupWorkerRole, UserGroupRole},
     state::{TaskExecState, TaskState, UserState, WorkerState},
 };
 
@@ -343,6 +343,16 @@ pub struct UpdateGroupWorkerRoleReq {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RemoveGroupWorkerRoleReq {
     pub groups: HashSet<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateUserGroupRoleReq {
+    pub relations: HashMap<String, UserGroupRole>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RemoveUserGroupRoleReq {
+    pub users: HashSet<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{fmt::Display, str::FromStr};
 
 use clap::ValueEnum;
 use sea_orm::entity::prelude::*;
@@ -23,11 +23,30 @@ pub enum UserGroupRole {
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum GroupWorkerRole {
     /// Reserved for future use.
+    #[serde(alias = "read")]
     Read = 0,
     /// The group can submit tasks to the worker's queue.
+    #[serde(alias = "write")]
     Write = 1,
     /// The group can manage the worker's ACL and settings.
+    #[serde(alias = "admin")]
     Admin = 2,
+}
+
+impl FromStr for GroupWorkerRole {
+    type Err = crate::error::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "read" | "Read" | "READ" => Ok(Self::Read),
+            "write" | "Write" | "WRITE" => Ok(Self::Write),
+            "admin" | "Admin" | "ADMIN" => Ok(Self::Admin),
+            _ => Err(crate::error::Error::Custom(format!(
+                "Invalid GroupWorkerRole: {}",
+                s
+            ))),
+        }
+    }
 }
 
 impl Display for GroupWorkerRole {

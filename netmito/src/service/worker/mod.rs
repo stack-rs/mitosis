@@ -1,14 +1,14 @@
 pub mod heartbeat;
 pub mod queue;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub use heartbeat::{HeartbeatOp, HeartbeatQueue};
 pub use queue::{TaskDispatcher, TaskDispatcherOp};
 
 use sea_orm::{
     prelude::*,
-    sea_query::{extension::postgres::PgExpr, Alias, Nullable, OnConflict, Query},
+    sea_query::{extension::postgres::PgExpr, Alias, Nullable, OnConflict, PgFunc, Query},
     FromQueryResult, QuerySelect, Set, TransactionTrait,
 };
 
@@ -56,15 +56,15 @@ pub async fn register_worker(
             .into_tuple()
             .all(&pool.db)
             .await?;
-        let write_group_relations = write_groups
-            .into_iter()
-            .map(|group_id| GroupWorker::ActiveModel {
-                group_id: Set(group_id),
-                worker_id: Set(worker.id),
-                role: Set(GroupWorkerRole::Write),
-                ..Default::default()
-            })
-            .collect::<Vec<_>>();
+        let write_group_relations =
+            write_groups
+                .into_iter()
+                .map(|group_id| GroupWorker::ActiveModel {
+                    group_id: Set(group_id),
+                    worker_id: Set(worker.id),
+                    role: Set(GroupWorkerRole::Write),
+                    ..Default::default()
+                });
         GroupWorker::Entity::insert_many(write_group_relations)
             .exec(&pool.db)
             .await?;
@@ -273,16 +273,33 @@ pub async fn unregister_worker(worker_id: i64, pool: &InfraPool) -> crate::error
 
 pub async fn remove_worker_by_uuid(
     worker_uuid: Uuid,
+    op: WorkerShutdownOp,
     pool: &InfraPool,
 ) -> crate::error::Result<()> {
-    match Worker::Entity::find()
+    let worker = Worker::Entity::find()
         .filter(Worker::Column::WorkerId.eq(worker_uuid))
         .one(&pool.db)
         .await?
-    {
-        Some(worker) => remove_worker(worker, pool).await,
-        None => Ok(()),
+        .ok_or(ApiError::NotFound(format!(
+            "Worker {} not found",
+            worker_uuid
+        )))?;
+    match op {
+        WorkerShutdownOp::Force => remove_worker(worker, pool).await?,
+        WorkerShutdownOp::Graceful => {
+            if worker.assigned_task_id.is_none() {
+                remove_worker(worker, pool).await?;
+            } else {
+                let worker = Worker::ActiveModel {
+                    id: Set(worker.id),
+                    state: Set(WorkerState::GracefulShutdown),
+                    ..Default::default()
+                };
+                worker.update(&pool.db).await?;
+            }
+        }
     }
+    Ok(())
 }
 
 pub async fn user_remove_worker_by_uuid(
@@ -850,4 +867,224 @@ pub async fn query_worker_list(
         group_name: user_group_role.group_name,
     };
     Ok(resp)
+}
+
+pub async fn user_replace_worker_tags(
+    user_id: i64,
+    worker_uuid: Uuid,
+    tags: HashSet<String>,
+    pool: &InfraPool,
+) -> crate::error::Result<()> {
+    if tags.is_empty() {
+        return Err(ApiError::InvalidRequest("Empty tags".to_string()).into());
+    }
+    let tags = tags.into_iter().collect::<Vec<_>>();
+    let builder = pool.db.get_database_backend();
+    let worker = Worker::Entity::find()
+        .filter(Worker::Column::WorkerId.eq(worker_uuid))
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::NotFound(format!(
+            "Worker {} not found",
+            worker_uuid
+        )))?;
+    let stmt = Query::select()
+        .column((Group::Entity, Group::Column::GroupName))
+        .column((GroupWorker::Entity, GroupWorker::Column::Role))
+        .from(GroupWorker::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((Group::Entity, Group::Column::Id)).eq(Expr::col((
+                GroupWorker::Entity,
+                GroupWorker::Column::GroupId,
+            ))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            UserGroup::Entity,
+            Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId)).eq(worker.id))
+        .and_where(
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).eq(PgFunc::any(vec![
+                GroupWorkerRole::Write,
+                GroupWorkerRole::Admin,
+            ])),
+        )
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+        .and_where(
+            Expr::col((UserGroup::Entity, UserGroup::Column::Role)).eq(PgFunc::any(vec![
+                UserGroupRole::Write,
+                UserGroupRole::Admin,
+            ])),
+        )
+        .limit(1)
+        .to_owned();
+    let _group = PartialGroupWorkerRole::find_by_statement(builder.build(&stmt))
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::AuthError(
+            crate::error::AuthError::PermissionDenied,
+        ))?;
+    let mut worker: Worker::ActiveModel = worker.into();
+    worker.tags = Set(tags);
+    worker.updated_at = Set(TimeDateTimeWithTimeZone::now_utc());
+    worker.update(&pool.db).await?;
+    Ok(())
+}
+
+pub async fn user_update_worker_groups(
+    user_id: i64,
+    worker_uuid: Uuid,
+    mut relations: HashMap<String, GroupWorkerRole>,
+    pool: &InfraPool,
+) -> crate::error::Result<()> {
+    if relations.is_empty() {
+        return Err(ApiError::InvalidRequest("Empty group relations".to_string()).into());
+    }
+    let builder = pool.db.get_database_backend();
+    let worker = Worker::Entity::find()
+        .filter(Worker::Column::WorkerId.eq(worker_uuid))
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::NotFound(format!(
+            "Worker {} not found",
+            worker_uuid
+        )))?;
+    let stmt = Query::select()
+        .column((Group::Entity, Group::Column::GroupName))
+        .column((GroupWorker::Entity, GroupWorker::Column::Role))
+        .from(GroupWorker::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((Group::Entity, Group::Column::Id)).eq(Expr::col((
+                GroupWorker::Entity,
+                GroupWorker::Column::GroupId,
+            ))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            UserGroup::Entity,
+            Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId)).eq(worker.id))
+        .and_where(
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).eq(GroupWorkerRole::Admin),
+        )
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::Role)).eq(UserGroupRole::Admin))
+        .limit(1)
+        .to_owned();
+    let _group = PartialGroupWorkerRole::find_by_statement(builder.build(&stmt))
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::AuthError(
+            crate::error::AuthError::PermissionDenied,
+        ))?;
+    let group_names = relations.keys().cloned().collect::<Vec<_>>();
+    let group_count = group_names.len();
+    let groups: Vec<(i64, String)> = Group::Entity::find()
+        .filter(Expr::col(Group::Column::GroupName).eq(PgFunc::any(group_names)))
+        .select_only()
+        .column(Group::Column::Id)
+        .column(Group::Column::GroupName)
+        .into_tuple()
+        .all(&pool.db)
+        .await?;
+    if groups.len() != group_count {
+        return Err(ApiError::InvalidRequest("Some groups do not exist".to_string()).into());
+    }
+    let group_worker_relations = groups.into_iter().filter_map(|(group_id, group_name)| {
+        relations
+            .remove(&group_name)
+            .map(|role| GroupWorker::ActiveModel {
+                group_id: Set(group_id),
+                worker_id: Set(worker.id),
+                role: Set(role),
+                ..Default::default()
+            })
+    });
+    GroupWorker::Entity::insert_many(group_worker_relations)
+        .on_conflict(
+            OnConflict::columns([GroupWorker::Column::GroupId, GroupWorker::Column::WorkerId])
+                .update_column(GroupWorker::Column::Role)
+                .to_owned(),
+        )
+        .exec(&pool.db)
+        .await?;
+    Ok(())
+}
+
+pub async fn user_remove_worker_groups(
+    user_id: i64,
+    worker_uuid: Uuid,
+    groups: HashSet<String>,
+    pool: &InfraPool,
+) -> crate::error::Result<()> {
+    if groups.is_empty() {
+        return Err(ApiError::InvalidRequest("Empty group names".to_string()).into());
+    }
+    let builder = pool.db.get_database_backend();
+    let worker = Worker::Entity::find()
+        .filter(Worker::Column::WorkerId.eq(worker_uuid))
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::NotFound(format!(
+            "Worker {} not found",
+            worker_uuid
+        )))?;
+    let stmt = Query::select()
+        .column((Group::Entity, Group::Column::GroupName))
+        .column((GroupWorker::Entity, GroupWorker::Column::Role))
+        .from(GroupWorker::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((Group::Entity, Group::Column::Id)).eq(Expr::col((
+                GroupWorker::Entity,
+                GroupWorker::Column::GroupId,
+            ))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            UserGroup::Entity,
+            Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId)).eq(worker.id))
+        .and_where(
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).eq(GroupWorkerRole::Admin),
+        )
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::Role)).eq(UserGroupRole::Admin))
+        .limit(1)
+        .to_owned();
+    let _group = PartialGroupWorkerRole::find_by_statement(builder.build(&stmt))
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::AuthError(
+            crate::error::AuthError::PermissionDenied,
+        ))?;
+    let group_names = groups.into_iter().collect::<Vec<_>>();
+    let group_count = group_names.len();
+    let groups: Vec<i64> = Group::Entity::find()
+        .filter(Expr::col(Group::Column::GroupName).eq(PgFunc::any(group_names)))
+        .select_only()
+        .column(Group::Column::Id)
+        .into_tuple()
+        .all(&pool.db)
+        .await?;
+    if groups.len() != group_count {
+        return Err(ApiError::InvalidRequest("Some groups do not exist".to_string()).into());
+    }
+    GroupWorker::Entity::delete_many()
+        .filter(Expr::col(GroupWorker::Column::GroupId).eq(PgFunc::any(groups)))
+        .filter(Expr::col(GroupWorker::Column::WorkerId).eq(worker.id))
+        .exec(&pool.db)
+        .await?;
+    Ok(())
 }

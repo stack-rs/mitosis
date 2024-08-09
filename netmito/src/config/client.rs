@@ -20,7 +20,8 @@ use crate::{
         state::{TaskExecState, TaskState},
     },
     schema::{
-        AttachmentsQueryReq, RemoteResourceDownload, TaskSpec, TasksQueryReq, WorkersQueryReq,
+        AttachmentsQueryReq, RemoteResourceDownload, RemoveGroupWorkerRoleReq,
+        ReplaceWorkerTagsReq, TaskSpec, TasksQueryReq, UpdateGroupWorkerRoleReq, WorkersQueryReq,
     },
 };
 
@@ -85,8 +86,8 @@ pub enum ClientCommand {
     Submit(SubmitTaskCmdArgs),
     /// Upload an attachment to a group
     Upload(UploadAttachmentArgs),
-    /// Cancel a worker or a task
-    Cancel(CancelArgs),
+    /// Manage a worker or a task
+    Manage(ManageArgs),
     /// Quit the client's interactive mode
     Quit,
 }
@@ -104,9 +105,9 @@ pub struct GetArgs {
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
-pub struct CancelArgs {
+pub struct ManageArgs {
     #[command(subcommand)]
-    pub command: CancelCommands,
+    pub command: ManageCommands,
 }
 
 #[derive(Subcommand, Serialize, Debug, Deserialize)]
@@ -136,9 +137,9 @@ pub enum GetCommands {
 }
 
 #[derive(Subcommand, Serialize, Debug, Deserialize)]
-pub enum CancelCommands {
-    /// Cancel a worker
-    Worker(CancelWorkerArgs),
+pub enum ManageCommands {
+    /// Manage a worker
+    Worker(ManageWorkerArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -376,13 +377,52 @@ pub struct UploadAttachmentArgs {
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
-pub struct CancelWorkerArgs {
+pub struct ManageWorkerArgs {
     /// The UUID of the worker
     pub uuid: Uuid,
+    #[command(subcommand)]
+    pub command: ManageWorkerCommands,
+}
+
+#[derive(Subcommand, Serialize, Debug, Deserialize)]
+pub enum ManageWorkerCommands {
+    /// Cancel a worker
+    Cancel(CancelWorkerArgs),
+    /// Replace tags of a worker
+    UpdateTags(ReplaceWorkerTagsArgs),
+    /// Update the roles of groups to a worker
+    UpdateRoles(UpdateWorkerGroupArgs),
+    /// Remove the accessibility of groups from a worker
+    RemoveRoles(RemoveWorkerGroupArgs),
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct CancelWorkerArgs {
     /// Whether to force the worker to shutdown.
     /// If not specified, the worker will be try to shutdown gracefully
     #[arg(short, long)]
     pub force: bool,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct ReplaceWorkerTagsArgs {
+    /// The tags to replace
+    #[arg(num_args = 0..)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct UpdateWorkerGroupArgs {
+    /// The name of the group to update
+    #[arg(num_args = 0.., value_parser = parse_key_val::<String, GroupWorkerRole>)]
+    pub roles: Vec<(String, GroupWorkerRole)>,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct RemoveWorkerGroupArgs {
+    /// The name of the group to update
+    #[arg(num_args = 0..)]
+    pub groups: Vec<String>,
 }
 
 impl Default for ClientConfig {
@@ -734,22 +774,166 @@ impl From<UploadAttachmentArgs> for ClientCommand {
     }
 }
 
-impl From<CancelWorkerArgs> for CancelCommands {
+impl From<CancelWorkerArgs> for ManageWorkerCommands {
     fn from(args: CancelWorkerArgs) -> Self {
-        Self::Worker(args)
+        Self::Cancel(args)
     }
 }
 
-impl From<CancelWorkerArgs> for CancelArgs {
-    fn from(args: CancelWorkerArgs) -> Self {
+impl From<(Uuid, CancelWorkerArgs)> for ManageWorkerArgs {
+    fn from(args: (Uuid, CancelWorkerArgs)) -> Self {
         Self {
-            command: CancelCommands::Worker(args),
+            uuid: args.0,
+            command: ManageWorkerCommands::Cancel(args.1),
         }
     }
 }
 
-impl From<CancelWorkerArgs> for ClientCommand {
-    fn from(args: CancelWorkerArgs) -> Self {
-        Self::Cancel(args.into())
+impl From<(Uuid, CancelWorkerArgs)> for ManageCommands {
+    fn from(args: (Uuid, CancelWorkerArgs)) -> Self {
+        Self::Worker(args.into())
+    }
+}
+
+impl From<(Uuid, CancelWorkerArgs)> for ManageArgs {
+    fn from(args: (Uuid, CancelWorkerArgs)) -> Self {
+        Self {
+            command: ManageCommands::Worker(args.into()),
+        }
+    }
+}
+
+impl From<(Uuid, CancelWorkerArgs)> for ClientCommand {
+    fn from(args: (Uuid, CancelWorkerArgs)) -> Self {
+        Self::Manage(args.into())
+    }
+}
+
+impl From<ReplaceWorkerTagsArgs> for ManageWorkerCommands {
+    fn from(args: ReplaceWorkerTagsArgs) -> Self {
+        Self::UpdateTags(args)
+    }
+}
+
+impl From<(Uuid, ReplaceWorkerTagsArgs)> for ManageWorkerArgs {
+    fn from(args: (Uuid, ReplaceWorkerTagsArgs)) -> Self {
+        Self {
+            uuid: args.0,
+            command: ManageWorkerCommands::UpdateTags(args.1),
+        }
+    }
+}
+
+impl From<(Uuid, ReplaceWorkerTagsArgs)> for ManageCommands {
+    fn from(args: (Uuid, ReplaceWorkerTagsArgs)) -> Self {
+        Self::Worker(args.into())
+    }
+}
+
+impl From<(Uuid, ReplaceWorkerTagsArgs)> for ManageArgs {
+    fn from(args: (Uuid, ReplaceWorkerTagsArgs)) -> Self {
+        Self {
+            command: ManageCommands::Worker(args.into()),
+        }
+    }
+}
+
+impl From<(Uuid, ReplaceWorkerTagsArgs)> for ClientCommand {
+    fn from(args: (Uuid, ReplaceWorkerTagsArgs)) -> Self {
+        Self::Manage(args.into())
+    }
+}
+
+impl From<ReplaceWorkerTagsArgs> for ReplaceWorkerTagsReq {
+    fn from(args: ReplaceWorkerTagsArgs) -> Self {
+        Self {
+            tags: args.tags.into_iter().collect(),
+        }
+    }
+}
+
+impl From<UpdateWorkerGroupArgs> for ManageWorkerCommands {
+    fn from(args: UpdateWorkerGroupArgs) -> Self {
+        Self::UpdateRoles(args)
+    }
+}
+
+impl From<(Uuid, UpdateWorkerGroupArgs)> for ManageWorkerArgs {
+    fn from(args: (Uuid, UpdateWorkerGroupArgs)) -> Self {
+        Self {
+            uuid: args.0,
+            command: ManageWorkerCommands::UpdateRoles(args.1),
+        }
+    }
+}
+
+impl From<(Uuid, UpdateWorkerGroupArgs)> for ManageCommands {
+    fn from(args: (Uuid, UpdateWorkerGroupArgs)) -> Self {
+        Self::Worker(args.into())
+    }
+}
+
+impl From<(Uuid, UpdateWorkerGroupArgs)> for ManageArgs {
+    fn from(args: (Uuid, UpdateWorkerGroupArgs)) -> Self {
+        Self {
+            command: ManageCommands::Worker(args.into()),
+        }
+    }
+}
+
+impl From<(Uuid, UpdateWorkerGroupArgs)> for ClientCommand {
+    fn from(args: (Uuid, UpdateWorkerGroupArgs)) -> Self {
+        Self::Manage(args.into())
+    }
+}
+
+impl From<UpdateWorkerGroupArgs> for UpdateGroupWorkerRoleReq {
+    fn from(args: UpdateWorkerGroupArgs) -> Self {
+        Self {
+            relations: args.roles.into_iter().collect(),
+        }
+    }
+}
+
+impl From<RemoveWorkerGroupArgs> for ManageWorkerCommands {
+    fn from(args: RemoveWorkerGroupArgs) -> Self {
+        Self::RemoveRoles(args)
+    }
+}
+
+impl From<(Uuid, RemoveWorkerGroupArgs)> for ManageWorkerArgs {
+    fn from(args: (Uuid, RemoveWorkerGroupArgs)) -> Self {
+        Self {
+            uuid: args.0,
+            command: ManageWorkerCommands::RemoveRoles(args.1),
+        }
+    }
+}
+
+impl From<(Uuid, RemoveWorkerGroupArgs)> for ManageCommands {
+    fn from(args: (Uuid, RemoveWorkerGroupArgs)) -> Self {
+        Self::Worker(args.into())
+    }
+}
+
+impl From<(Uuid, RemoveWorkerGroupArgs)> for ManageArgs {
+    fn from(args: (Uuid, RemoveWorkerGroupArgs)) -> Self {
+        Self {
+            command: ManageCommands::Worker(args.into()),
+        }
+    }
+}
+
+impl From<(Uuid, RemoveWorkerGroupArgs)> for ClientCommand {
+    fn from(args: (Uuid, RemoveWorkerGroupArgs)) -> Self {
+        Self::Manage(args.into())
+    }
+}
+
+impl From<RemoveWorkerGroupArgs> for RemoveGroupWorkerRoleReq {
+    fn from(args: RemoveWorkerGroupArgs) -> Self {
+        Self {
+            groups: args.groups.into_iter().collect(),
+        }
     }
 }

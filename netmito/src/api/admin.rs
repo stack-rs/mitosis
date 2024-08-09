@@ -1,5 +1,11 @@
-use axum::{extract::State, middleware, routing::post, Extension, Json, Router};
+use axum::{
+    extract::{Path, Query, State},
+    middleware,
+    routing::{delete, post},
+    Extension, Json, Router,
+};
 use sea_orm::DbErr;
+use uuid::Uuid;
 
 use crate::{
     config::InfraPool,
@@ -10,6 +16,7 @@ use crate::{
         self,
         auth::{admin_auth_middleware, AuthAdminUser},
         name_validator,
+        worker::remove_worker_by_uuid,
     },
 };
 
@@ -17,6 +24,7 @@ pub fn admin_router(st: InfraPool) -> Router<InfraPool> {
     Router::new()
         .route("/user", post(create_user).delete(delete_user))
         .route("/user/state", post(change_user_state))
+        .route("/workers/:uuid/", delete(shutdown_worker))
         .layer(middleware::from_fn_with_state(
             st.clone(),
             admin_auth_middleware,
@@ -90,4 +98,26 @@ pub async fn change_user_state(
             Err(ApiError::InternalServerError)
         }
     }
+}
+
+pub async fn shutdown_worker(
+    Extension(_): Extension<AuthAdminUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Query(op): Query<WorkerShutdown>,
+) -> Result<(), ApiError> {
+    let op = op.op.unwrap_or_default();
+    tracing::debug!("Shutdown worker {} with op {:?}", uuid, op);
+    remove_worker_by_uuid(uuid, op, &pool)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+
+    Ok(())
 }

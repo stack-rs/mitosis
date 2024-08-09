@@ -13,9 +13,10 @@ use uuid::Uuid;
 use crate::{
     config::{
         client::{
-            CancelCommands, CancelWorkerArgs, ClientCommand, ClientInteractiveShell,
-            CreateCommands, CreateGroupArgs, CreateUserArgs, GetArtifactArgs, GetAttachmentArgs,
-            GetCommands, GetTaskArgs, GetWorkerArgs, SubmitTaskArgs, UploadAttachmentArgs,
+            CancelWorkerArgs, ClientCommand, ClientInteractiveShell, CreateCommands,
+            CreateGroupArgs, CreateUserArgs, GetArtifactArgs, GetAttachmentArgs, GetCommands,
+            GetTaskArgs, GetWorkerArgs, ManageCommands, ManageWorkerCommands, SubmitTaskArgs,
+            UploadAttachmentArgs,
         },
         ClientConfig, ClientConfigCli,
     },
@@ -24,8 +25,9 @@ use crate::{
     schema::{
         AttachmentQueryInfo, AttachmentsQueryReq, CreateGroupReq, CreateUserReq,
         ParsedTaskQueryInfo, RedisConnectionInfo, RemoteResource, RemoteResourceDownloadResp,
-        ResourceDownloadInfo, SubmitTaskReq, SubmitTaskResp, TaskQueryInfo, TaskQueryResp,
-        TasksQueryReq, UploadAttachmentReq, UploadAttachmentResp, WorkerQueryInfo, WorkerQueryResp,
+        RemoveGroupWorkerRoleReq, ReplaceWorkerTagsReq, ResourceDownloadInfo, SubmitTaskReq,
+        SubmitTaskResp, TaskQueryInfo, TaskQueryResp, TasksQueryReq, UpdateGroupWorkerRoleReq,
+        UploadAttachmentReq, UploadAttachmentResp, WorkerQueryInfo, WorkerQueryResp,
         WorkersQueryReq, WorkersQueryResp,
     },
     service::{
@@ -807,16 +809,83 @@ impl MitoClient {
         }
     }
 
-    pub async fn cancel_worker(&mut self, args: CancelWorkerArgs) -> crate::error::Result<()> {
+    pub async fn cancel_worker(
+        &mut self,
+        uuid: Uuid,
+        args: CancelWorkerArgs,
+    ) -> crate::error::Result<()> {
         if args.force {
-            self.url.set_path(&format!("user/workers/{}/", args.uuid));
+            self.url.set_path(&format!("user/workers/{}/", uuid));
             self.url.set_query(Some("op=force"));
         } else {
-            self.url.set_path(&format!("user/workers/{}/", args.uuid));
+            self.url.set_path(&format!("user/workers/{}/", uuid));
         }
         let resp = self
             .http_client
             .delete(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn replace_worker_tags(
+        &mut self,
+        uuid: Uuid,
+        args: ReplaceWorkerTagsReq,
+    ) -> crate::error::Result<()> {
+        self.url.set_path(&format!("user/workers/{}/tags", uuid));
+        let resp = self
+            .http_client
+            .put(self.url.as_str())
+            .json(&args)
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn update_group_worker_roles(
+        &mut self,
+        uuid: Uuid,
+        args: UpdateGroupWorkerRoleReq,
+    ) -> crate::error::Result<()> {
+        self.url.set_path(&format!("user/workers/{}/groups", uuid));
+        let resp = self
+            .http_client
+            .put(self.url.as_str())
+            .json(&args)
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn remove_group_worker_roles(
+        &mut self,
+        uuid: Uuid,
+        args: RemoveGroupWorkerRoleReq,
+    ) -> crate::error::Result<()> {
+        self.url.set_path(&format!("user/workers/{}/groups", uuid));
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .json(&args)
             .bearer_auth(&self.credential)
             .send()
             .await
@@ -1004,15 +1073,52 @@ impl MitoClient {
                     tracing::error!("{}", e);
                 }
             },
-            ClientCommand::Cancel(args) => match args.command {
-                CancelCommands::Worker(args) => match self.cancel_worker(args).await {
-                    Ok(_) => {
-                        tracing::info!("Worker cancelled successfully");
+            ClientCommand::Manage(args) => match args.command {
+                ManageCommands::Worker(args) => {
+                    let uuid = args.uuid;
+                    match args.command {
+                        ManageWorkerCommands::Cancel(args) => {
+                            match self.cancel_worker(uuid, args).await {
+                                Ok(_) => {
+                                    tracing::info!("Worker cancelled successfully");
+                                }
+                                Err(e) => {
+                                    tracing::error!("{}", e);
+                                }
+                            }
+                        }
+                        ManageWorkerCommands::UpdateTags(args) => {
+                            match self.replace_worker_tags(uuid, args.into()).await {
+                                Ok(_) => {
+                                    tracing::info!("Worker tags updated successfully");
+                                }
+                                Err(e) => {
+                                    tracing::error!("{}", e);
+                                }
+                            }
+                        }
+                        ManageWorkerCommands::UpdateRoles(args) => {
+                            match self.update_group_worker_roles(uuid, args.into()).await {
+                                Ok(_) => {
+                                    tracing::info!("Group worker roles updated successfully");
+                                }
+                                Err(e) => {
+                                    tracing::error!("{}", e);
+                                }
+                            }
+                        }
+                        ManageWorkerCommands::RemoveRoles(args) => {
+                            match self.remove_group_worker_roles(uuid, args.into()).await {
+                                Ok(_) => {
+                                    tracing::info!("Group worker roles removed successfully");
+                                }
+                                Err(e) => {
+                                    tracing::error!("{}", e);
+                                }
+                            }
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!("{}", e);
-                    }
-                },
+                }
             },
             ClientCommand::Quit => {
                 return false;

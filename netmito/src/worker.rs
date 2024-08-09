@@ -1,6 +1,8 @@
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::ExitStatus;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use async_compression::tokio::write::GzipEncoder;
 use futures::StreamExt;
@@ -39,6 +41,7 @@ pub struct MitoWorker {
     http_client: Client,
     credential: String,
     cancel_token: CancellationToken,
+    coordinator_force_exit: Arc<AtomicBool>,
     cache_path: PathBuf,
     redis_client: Option<redis::Client>,
 }
@@ -48,6 +51,7 @@ pub struct TaskExecutor {
     pub(crate) task_credential: String,
     pub(crate) task_url: Url,
     pub(crate) task_cancel_token: CancellationToken,
+    pub(crate) coordinator_force_exit: Arc<AtomicBool>,
     pub(crate) polling_interval: std::time::Duration,
     pub(crate) task_cache_path: PathBuf,
     pub(crate) task_redis_conn: Option<MultiplexedConnection>,
@@ -300,6 +304,7 @@ impl MitoWorker {
                     http_client,
                     credential: resp.token,
                     cancel_token: CancellationToken::new(),
+                    coordinator_force_exit: Arc::new(AtomicBool::new(false)),
                     cache_path,
                     redis_client,
                 },
@@ -336,6 +341,7 @@ impl MitoWorker {
             task_credential: self.credential.clone(),
             task_url: self.config.coordinator_addr.clone(),
             task_cancel_token: self.cancel_token.clone(),
+            coordinator_force_exit: self.coordinator_force_exit.clone(),
             polling_interval: self.config.polling_interval,
             task_cache_path: self.cache_path.clone(),
             task_redis_conn,
@@ -350,6 +356,7 @@ impl MitoWorker {
         let heartbeat_client = self.http_client.clone();
         let heartbeat_credential = self.credential.clone();
         let heartbeat_cancel_token = self.cancel_token.clone();
+        let heartbeat_coordinator_force_exit = self.coordinator_force_exit.clone();
         let heartbeat_interval = self.config.heartbeat_interval;
         let heartbeat_hd = tokio::spawn(async move {
             loop {
@@ -370,6 +377,7 @@ impl MitoWorker {
                                     tracing::debug!("Heartbeat success");
                                 } else if resp.status() == StatusCode::UNAUTHORIZED {
                                     tracing::info!("Heartbeat failed with coordinator force exit");
+                                    heartbeat_coordinator_force_exit.store(true, std::sync::atomic::Ordering::Release);
                                     heartbeat_cancel_token.cancel();
                                     break;
                                 } else {
@@ -444,6 +452,9 @@ impl MitoWorker {
                             }
                         } else if resp.status() == StatusCode::UNAUTHORIZED {
                             tracing::info!("Task fetch failed with coordinator force exit");
+                            task_executor
+                                .coordinator_force_exit
+                                .store(true, std::sync::atomic::Ordering::Release);
                             task_executor.task_cancel_token.cancel();
                             break;
                         } else {
@@ -487,7 +498,11 @@ impl MitoWorker {
                 task_hd.await?;
             },
             _ = self.cancel_token.cancelled() => {
-                tracing::info!("Worker exits due to internal execution error. Wait for resource cleanup");
+                if self.coordinator_force_exit.load(std::sync::atomic::Ordering::Acquire) {
+                    tracing::info!("Worker exits due to coordinator force exit. Wait for resource cleanup");
+                } else {
+                    tracing::info!("Worker exits due to internal execution error. Wait for resource cleanup");
+                }
                 heartbeat_hd.await?;
                 task_hd.await?;
             },
@@ -1220,6 +1235,9 @@ async fn process_task_result(
                             break resp;
                         } else if resp.status() == StatusCode::UNAUTHORIZED {
                             tracing::info!("Request upload url failed with coordinator force exit");
+                            task_executor
+                                .coordinator_force_exit
+                                .store(true, std::sync::atomic::Ordering::Release);
                             task_executor.task_cancel_token.cancel();
                             return Ok(());
                         } else if resp.status() == StatusCode::NOT_FOUND {
@@ -1412,6 +1430,9 @@ async fn report_task(
                     break;
                 } else if resp.status() == StatusCode::UNAUTHORIZED {
                     tracing::info!("Report task failed with coordinator force exit");
+                    task_executor
+                        .coordinator_force_exit
+                        .store(true, std::sync::atomic::Ordering::Release);
                     task_executor.task_cancel_token.cancel();
                     return Ok(());
                 } else if resp.status() == StatusCode::NOT_FOUND {

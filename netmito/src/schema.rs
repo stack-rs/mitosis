@@ -315,6 +315,21 @@ pub struct RemoteResourceDownload {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct ReplaceWorkerTagsReq {
+    pub tags: HashSet<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateGroupWorkerRoleReq {
+    pub relations: HashMap<String, GroupWorkerRole>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RemoveGroupWorkerRoleReq {
+    pub groups: HashSet<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WorkerShutdown {
     pub op: Option<WorkerShutdownOp>,
 }

@@ -4,7 +4,7 @@ use axum::{
     extract::{ConnectInfo, Path, Query, State},
     http::StatusCode,
     middleware,
-    routing::{get, post},
+    routing::{get, post, put},
     Extension, Json, Router,
 };
 use uuid::Uuid;
@@ -18,7 +18,10 @@ use crate::{
         auth::{user_auth_middleware, user_login, AuthUser},
         s3::{get_artifact, query_attachment_list, user_get_attachment, user_upload_attachment},
         task::{get_task, query_task_list, user_submit_task},
-        worker::{get_worker, query_worker_list, user_remove_worker_by_uuid},
+        worker::{
+            get_worker, query_worker_list, user_remove_worker_by_uuid, user_remove_worker_groups,
+            user_replace_worker_tags, user_update_worker_groups,
+        },
     },
 };
 
@@ -31,6 +34,11 @@ pub fn user_router(st: InfraPool) -> Router<InfraPool> {
         .route("/attachments/:group_name/*key", get(download_attachment))
         .route("/attachments", post(upload_attachment))
         .route("/workers/:uuid/", get(query_worker).delete(shutdown_worker))
+        .route("/workers/:uuid/tags", put(replace_worker_tags))
+        .route(
+            "/workers/:uuid/groups",
+            put(update_worker_groups).delete(remove_worker_groups),
+        )
         .route("/redis", get(query_redis_connection_info))
         .route("/filters/tasks", post(query_tasks))
         .route("/filters/attachments", post(query_attachments))
@@ -248,5 +256,62 @@ pub async fn shutdown_worker(
             }
         })?;
 
+    Ok(())
+}
+
+pub async fn replace_worker_tags(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<ReplaceWorkerTagsReq>,
+) -> Result<(), ApiError> {
+    user_replace_worker_tags(u.id, uuid, req.tags, &pool)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
+}
+
+pub async fn update_worker_groups(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<UpdateGroupWorkerRoleReq>,
+) -> Result<(), ApiError> {
+    user_update_worker_groups(u.id, uuid, req.relations, &pool)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
+}
+
+pub async fn remove_worker_groups(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<RemoveGroupWorkerRoleReq>,
+) -> Result<(), ApiError> {
+    user_remove_worker_groups(u.id, uuid, req.groups, &pool)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
     Ok(())
 }

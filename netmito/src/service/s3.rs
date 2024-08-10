@@ -186,6 +186,7 @@ pub async fn get_attachment(
 
 pub async fn user_get_attachment(
     pool: &InfraPool,
+    user_id: i64,
     group_name: String,
     key: String,
 ) -> Result<RemoteResourceDownloadResp, crate::error::Error> {
@@ -198,6 +199,12 @@ pub async fn user_get_attachment(
             group_name, key
         )))?
         .id;
+    UserGroup::Entity::find()
+        .filter(UserGroup::Column::UserId.eq(user_id))
+        .filter(UserGroup::Column::GroupId.eq(group_id))
+        .one(&pool.db)
+        .await?
+        .ok_or(AuthError::PermissionDenied)?;
     let attachment = Attachment::Entity::find()
         .filter(Attachment::Column::GroupId.eq(group_id))
         .filter(Attachment::Column::Key.eq(key.clone()))

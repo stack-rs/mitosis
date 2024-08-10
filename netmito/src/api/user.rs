@@ -226,11 +226,11 @@ pub async fn upload_attachment(
 }
 
 pub async fn download_attachment(
-    Extension(_): Extension<AuthUser>,
+    Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
     Path((group_name, key)): Path<(String, String)>,
 ) -> Result<Json<RemoteResourceDownloadResp>, ApiError> {
-    let attachment = user_get_attachment(&pool, group_name, key)
+    let attachment = user_get_attachment(&pool, u.id, group_name, key)
         .await
         .map_err(|e| match e {
             crate::error::Error::AuthError(err) => ApiError::AuthError(err),

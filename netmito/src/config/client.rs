@@ -135,6 +135,8 @@ pub enum GetCommands {
     Worker(GetWorkerArgs),
     /// Query a list of workers subject to the filter
     Workers(GetWorkersArgs),
+    /// Get the information of a group
+    Group(GetGroupArgs),
     /// Get all groups the user has access to
     Groups,
 }
@@ -369,6 +371,12 @@ pub struct GetWorkersArgs {
     /// Whether to output the verbose information of workers
     #[arg(short, long)]
     pub verbose: bool,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct GetGroupArgs {
+    /// The name of the group
+    pub group: String,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -860,6 +868,26 @@ impl From<GetWorkersArgs> for WorkersQueryReq {
             },
             creator_username: args.creator,
         }
+    }
+}
+
+impl From<GetGroupArgs> for GetCommands {
+    fn from(args: GetGroupArgs) -> Self {
+        Self::Group(args)
+    }
+}
+
+impl From<GetGroupArgs> for GetArgs {
+    fn from(args: GetGroupArgs) -> Self {
+        Self {
+            command: GetCommands::Group(args),
+        }
+    }
+}
+
+impl From<GetGroupArgs> for ClientCommand {
+    fn from(args: GetGroupArgs) -> Self {
+        Self::Get(args.into())
     }
 }
 

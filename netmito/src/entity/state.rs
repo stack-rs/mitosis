@@ -16,12 +16,32 @@ pub enum UserState {
     Deleted = 2,
 }
 
-#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq)]
+impl Display for UserState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UserState::Active => write!(f, "Active"),
+            UserState::Locked => write!(f, "Locked"),
+            UserState::Deleted => write!(f, "Deleted"),
+        }
+    }
+}
+
+#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum GroupState {
     Active = 0,
     Locked = 1,
     Deleted = 2,
+}
+
+impl Display for GroupState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GroupState::Active => write!(f, "Active"),
+            GroupState::Locked => write!(f, "Locked"),
+            GroupState::Deleted => write!(f, "Deleted"),
+        }
+    }
 }
 
 #[derive(

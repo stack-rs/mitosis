@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::entity::{
     content::{ArtifactContentType, AttachmentContentType},
     role::{GroupWorkerRole, UserGroupRole},
-    state::{TaskExecState, TaskState, UserState, WorkerState},
+    state::{GroupState, TaskExecState, TaskState, UserState, WorkerState},
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -51,6 +51,19 @@ pub struct UserStateResp {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateGroupReq {
     pub group_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GroupQueryInfo {
+    pub group_name: String,
+    pub creator_username: String,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    pub state: GroupState,
+    pub task_count: i64,
+    pub storage_quota: i64,
+    pub storage_used: i64,
+    pub users_in_group: Option<HashMap<String, UserGroupRole>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

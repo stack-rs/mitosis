@@ -127,7 +127,6 @@ pub async fn get_user_credential(
 ) -> crate::error::Result<(String, String)> {
     // Try to load credential from file
     let cred_path = cred_path
-        .as_ref()
         .map(|p| p.relative())
         .or_else(|| {
             dirs::config_dir().map(|mut p| {

@@ -10,6 +10,7 @@ use crate::{
         users as User,
     },
     error::{ApiError, AuthError, Error},
+    schema::GroupQueryInfo,
 };
 
 use super::worker::PartialUserGroupRole;
@@ -94,6 +95,74 @@ where
         })
         .await?;
     Ok(group)
+}
+
+#[derive(FromQueryResult)]
+struct UserInGroup {
+    username: String,
+    role: UserGroupRole,
+}
+
+pub async fn get_group(
+    user_id: i64,
+    group_name: String,
+    pool: &InfraPool,
+) -> crate::error::Result<GroupQueryInfo> {
+    let group = Group::Entity::find()
+        .filter(Group::Column::GroupName.eq(&group_name))
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::NotFound(format!("Group {}", group_name)))?;
+    let user_group = UserGroup::Entity::find()
+        .filter(UserGroup::Column::UserId.eq(user_id))
+        .filter(UserGroup::Column::GroupId.eq(group.id))
+        .one(&pool.db)
+        .await?
+        .ok_or(AuthError::PermissionDenied)?;
+    let creator_username: Option<String> = User::Entity::find()
+        .filter(User::Column::Id.eq(group.creator_id))
+        .select_only()
+        .column(User::Column::Username)
+        .into_tuple()
+        .one(&pool.db)
+        .await?;
+    let creator_username = creator_username.unwrap_or_default();
+    let users_in_group = if user_group.role == UserGroupRole::Admin {
+        let builder = pool.db.get_database_backend();
+        let stmt = Query::select()
+            .column((UserGroup::Entity, UserGroup::Column::Role))
+            .column((User::Entity, User::Column::Username))
+            .from(UserGroup::Entity)
+            .join(
+                sea_orm::JoinType::Join,
+                User::Entity,
+                Expr::col((UserGroup::Entity, UserGroup::Column::UserId))
+                    .eq(Expr::col((User::Entity, User::Column::Id))),
+            )
+            .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::GroupId)).eq(group.id))
+            .to_owned();
+        let user_group_role = UserInGroup::find_by_statement(builder.build(&stmt))
+            .all(&pool.db)
+            .await?;
+        let users_in_group = user_group_role
+            .into_iter()
+            .map(|r| (r.username, r.role))
+            .collect();
+        Some(users_in_group)
+    } else {
+        None
+    };
+    Ok(GroupQueryInfo {
+        group_name: group.group_name,
+        creator_username,
+        created_at: group.created_at,
+        updated_at: group.updated_at,
+        state: group.state,
+        task_count: group.task_count,
+        storage_quota: group.storage_quota,
+        storage_used: group.storage_used,
+        users_in_group,
+    })
 }
 
 pub async fn change_group_state<C>(

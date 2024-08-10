@@ -1,4 +1,5 @@
 use clap_repl::ClapEditor;
+use humansize::{format_size, DECIMAL};
 use ouroboros::self_referencing;
 use redis::{
     aio::{MultiplexedConnection, PubSub},
@@ -11,26 +12,10 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    config::{
-        client::{
-            CancelWorkerArgs, ClientCommand, ClientInteractiveShell, CreateCommands,
-            CreateGroupArgs, CreateUserArgs, GetArtifactArgs, GetAttachmentArgs, GetCommands,
-            GetTaskArgs, GetWorkerArgs, ManageCommands, ManageGroupCommands, ManageTaskCommands,
-            ManageWorkerCommands, SubmitTaskArgs, UploadAttachmentArgs,
-        },
-        ClientConfig, ClientConfigCli,
-    },
+    config::{client::*, ClientConfig, ClientConfigCli},
     entity::{role::GroupWorkerRole, state::TaskExecState},
     error::{get_error_from_resp, map_reqwest_err, RequestError, S3Error},
-    schema::{
-        AttachmentQueryInfo, AttachmentsQueryReq, ChangeTaskReq, CreateGroupReq, CreateUserReq,
-        GroupsQueryResp, ParsedTaskQueryInfo, RedisConnectionInfo, RemoteResource,
-        RemoteResourceDownloadResp, RemoveGroupWorkerRoleReq, RemoveUserGroupRoleReq,
-        ReplaceWorkerTagsReq, ResourceDownloadInfo, SubmitTaskReq, SubmitTaskResp, TaskQueryInfo,
-        TaskQueryResp, TasksQueryReq, UpdateGroupWorkerRoleReq, UpdateTaskLabelsReq,
-        UpdateUserGroupRoleReq, UploadAttachmentReq, UploadAttachmentResp, WorkerQueryInfo,
-        WorkerQueryResp, WorkersQueryReq, WorkersQueryResp,
-    },
+    schema::*,
     service::{
         auth::cred::get_user_credential,
         s3::{download_file, get_xml_error_message},
@@ -722,6 +707,26 @@ impl MitoClient {
         }
     }
 
+    pub async fn get_group(&mut self, args: GetGroupArgs) -> crate::error::Result<GroupQueryInfo> {
+        self.url.set_path(&format!("groups/{}", args.group));
+        let resp = self
+            .http_client
+            .get(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<GroupQueryInfo>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn get_groups(&mut self) -> crate::error::Result<GroupsQueryResp> {
         self.url.set_path("user/groups");
         let resp = self
@@ -1169,6 +1174,14 @@ impl MitoClient {
                         }
                     }
                 }
+                GetCommands::Group(args) => match self.get_group(args).await {
+                    Ok(resp) => {
+                        output_group_info(&resp);
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
                 GetCommands::Groups => match self.get_groups().await {
                     Ok(resp) => {
                         for (group, role) in resp.groups {
@@ -1429,5 +1442,28 @@ fn output_worker_info(
         tracing::info!("Assigned Task: {}", task);
     } else {
         tracing::info!("Assigned Task: None");
+    }
+}
+
+fn output_group_info(info: &GroupQueryInfo) {
+    tracing::info!("Group Name: {}", info.group_name);
+    tracing::info!("Created by user {}", info.creator_username);
+    tracing::info!(
+        "Created at {} and Updated at {}",
+        info.created_at,
+        info.updated_at
+    );
+    tracing::info!("State: {}", info.state);
+    tracing::info!("Contains {} tasks", info.task_count);
+    tracing::info!(
+        "Storage(used/total): {} / {}",
+        format_size((info.storage_used).max(0) as u64, DECIMAL),
+        format_size((info.storage_quota).max(0) as u64, DECIMAL)
+    );
+    if let Some(ref users) = info.users_in_group {
+        tracing::info!("Users in the group:");
+        for (user, role) in users {
+            tracing::info!(" > {} = {}", user, role);
+        }
     }
 }

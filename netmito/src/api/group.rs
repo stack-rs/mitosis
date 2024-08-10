@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, State},
     middleware,
-    routing::{post, put},
+    routing::{get, post, put},
     Extension, Json, Router,
 };
 
@@ -18,6 +18,7 @@ use crate::{
 pub fn group_router(st: InfraPool) -> Router<InfraPool> {
     Router::new()
         .route("/", post(create_group))
+        .route("/:group", get(get_group))
         .route(
             "/:group/users",
             put(update_user_group).delete(remove_user_group),
@@ -45,6 +46,24 @@ pub async fn create_group(
             }
         })?;
     Ok(())
+}
+
+pub async fn get_group(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(group): Path<String>,
+) -> ApiResult<Json<GroupQueryInfo>> {
+    let info = service::group::get_group(u.id, group, &pool)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(info))
 }
 
 pub async fn update_user_group(

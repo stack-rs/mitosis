@@ -331,6 +331,11 @@ pub struct RemoteResourceDownload {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct GroupsQueryResp {
+    pub groups: HashMap<String, UserGroupRole>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ReplaceWorkerTagsReq {
     pub tags: HashSet<String>,
 }

@@ -751,10 +751,10 @@ pub async fn get_worker(
 }
 
 #[derive(Debug, Clone, FromQueryResult)]
-struct PartialUserGroupRole {
-    group_id: i64,
-    // role: UserGroupRole,
-    group_name: String,
+pub(crate) struct PartialUserGroupRole {
+    pub(crate) group_id: i64,
+    pub(crate) role: UserGroupRole,
+    pub(crate) group_name: String,
 }
 
 pub async fn query_worker_list(
@@ -766,7 +766,7 @@ pub async fn query_worker_list(
     let mut group_stmt = Query::select()
         .columns([
             (UserGroup::Entity, UserGroup::Column::GroupId),
-            // (UserGroup::Entity, UserGroup::Column::Role),
+            (UserGroup::Entity, UserGroup::Column::Role),
         ])
         .column((Group::Entity, Group::Column::GroupName))
         .from(UserGroup::Entity)

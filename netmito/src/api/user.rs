@@ -16,6 +16,7 @@ use crate::{
     schema::*,
     service::{
         auth::{user_auth_middleware, user_login, AuthUser},
+        group::query_user_groups,
         s3::{get_artifact, query_attachment_list, user_get_attachment, user_upload_attachment},
         task::{
             get_task, query_task_list, user_cancel_task, user_change_task, user_change_task_labels,
@@ -50,6 +51,7 @@ pub fn user_router(st: InfraPool) -> Router<InfraPool> {
         .route("/filters/tasks", post(query_tasks))
         .route("/filters/attachments", post(query_attachments))
         .route("/filters/workers", post(query_workers))
+        .route("/groups", get(query_groups))
         .layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -377,4 +379,19 @@ pub async fn remove_worker_groups(
             }
         })?;
     Ok(())
+}
+
+pub async fn query_groups(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+) -> Result<Json<GroupsQueryResp>, ApiError> {
+    let groups = query_user_groups(u.id, &pool).await.map_err(|e| match e {
+        crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+        crate::error::Error::ApiError(e) => e,
+        _ => {
+            tracing::error!("{}", e);
+            ApiError::InternalServerError
+        }
+    })?;
+    Ok(Json(GroupsQueryResp { groups }))
 }

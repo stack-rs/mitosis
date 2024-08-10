@@ -24,12 +24,12 @@ use crate::{
     error::{get_error_from_resp, map_reqwest_err, RequestError, S3Error},
     schema::{
         AttachmentQueryInfo, AttachmentsQueryReq, ChangeTaskReq, CreateGroupReq, CreateUserReq,
-        ParsedTaskQueryInfo, RedisConnectionInfo, RemoteResource, RemoteResourceDownloadResp,
-        RemoveGroupWorkerRoleReq, RemoveUserGroupRoleReq, ReplaceWorkerTagsReq,
-        ResourceDownloadInfo, SubmitTaskReq, SubmitTaskResp, TaskQueryInfo, TaskQueryResp,
-        TasksQueryReq, UpdateGroupWorkerRoleReq, UpdateTaskLabelsReq, UpdateUserGroupRoleReq,
-        UploadAttachmentReq, UploadAttachmentResp, WorkerQueryInfo, WorkerQueryResp,
-        WorkersQueryReq, WorkersQueryResp,
+        GroupsQueryResp, ParsedTaskQueryInfo, RedisConnectionInfo, RemoteResource,
+        RemoteResourceDownloadResp, RemoveGroupWorkerRoleReq, RemoveUserGroupRoleReq,
+        ReplaceWorkerTagsReq, ResourceDownloadInfo, SubmitTaskReq, SubmitTaskResp, TaskQueryInfo,
+        TaskQueryResp, TasksQueryReq, UpdateGroupWorkerRoleReq, UpdateTaskLabelsReq,
+        UpdateUserGroupRoleReq, UploadAttachmentReq, UploadAttachmentResp, WorkerQueryInfo,
+        WorkerQueryResp, WorkersQueryReq, WorkersQueryResp,
     },
     service::{
         auth::cred::get_user_credential,
@@ -722,6 +722,26 @@ impl MitoClient {
         }
     }
 
+    pub async fn get_groups(&mut self) -> crate::error::Result<GroupsQueryResp> {
+        self.url.set_path("user/groups");
+        let resp = self
+            .http_client
+            .get(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<GroupsQueryResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn submit_task(
         &mut self,
         args: SubmitTaskArgs,
@@ -1149,6 +1169,16 @@ impl MitoClient {
                         }
                     }
                 }
+                GetCommands::Groups => match self.get_groups().await {
+                    Ok(resp) => {
+                        for (group, role) in resp.groups {
+                            tracing::info!("{} = {}", group, role);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
             },
             ClientCommand::Submit(args) => {
                 let group_name = args.group_name.clone().unwrap_or(self.username.clone());

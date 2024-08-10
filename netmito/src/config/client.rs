@@ -135,6 +135,8 @@ pub enum GetCommands {
     Worker(GetWorkerArgs),
     /// Query a list of workers subject to the filter
     Workers(GetWorkersArgs),
+    /// Get all groups the user has access to
+    Groups,
 }
 
 #[derive(Subcommand, Serialize, Debug, Deserialize)]

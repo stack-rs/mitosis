@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use sea_orm::{prelude::*, QuerySelect, Set, TransactionTrait};
+use sea_orm::{prelude::*, FromQueryResult, QuerySelect, Set, TransactionTrait};
 use sea_orm_migration::prelude::*;
 
 use crate::{
@@ -11,6 +11,8 @@ use crate::{
     },
     error::{ApiError, AuthError, Error},
 };
+
+use super::worker::PartialUserGroupRole;
 
 pub async fn create_group<C>(
     db: &C,
@@ -225,4 +227,34 @@ pub async fn remove_user_group_role(
         .exec(&pool.db)
         .await?;
     Ok(())
+}
+
+pub async fn query_user_groups(
+    user_id: i64,
+    pool: &InfraPool,
+) -> crate::error::Result<HashMap<String, UserGroupRole>> {
+    let builder = pool.db.get_database_backend();
+    let stmt = Query::select()
+        .columns([
+            (UserGroup::Entity, UserGroup::Column::GroupId),
+            (UserGroup::Entity, UserGroup::Column::Role),
+        ])
+        .column((Group::Entity, Group::Column::GroupName))
+        .from(UserGroup::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+        .to_owned();
+    let user_group_role = PartialUserGroupRole::find_by_statement(builder.build(&stmt))
+        .all(&pool.db)
+        .await?;
+    let group_relations = user_group_role
+        .into_iter()
+        .map(|r| (r.group_name, r.role))
+        .collect();
+    Ok(group_relations)
 }

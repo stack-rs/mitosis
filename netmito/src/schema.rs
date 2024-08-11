@@ -63,6 +63,7 @@ pub struct GroupQueryInfo {
     pub task_count: i64,
     pub storage_quota: i64,
     pub storage_used: i64,
+    pub worker_count: i64,
     pub users_in_group: Option<HashMap<String, UserGroupRole>>,
 }
 

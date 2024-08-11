@@ -1460,6 +1460,7 @@ fn output_group_info(info: &GroupQueryInfo) {
         format_size((info.storage_used).max(0) as u64, DECIMAL),
         format_size((info.storage_quota).max(0) as u64, DECIMAL)
     );
+    tracing::info!("Can access {} workers", info.worker_count);
     if let Some(ref users) = info.users_in_group {
         tracing::info!("Users in the group:");
         for (user, role) in users {

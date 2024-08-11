@@ -6,8 +6,8 @@ use sea_orm_migration::prelude::*;
 use crate::{
     config::InfraPool,
     entity::{
-        groups as Group, role::UserGroupRole, state::GroupState, user_group as UserGroup,
-        users as User,
+        group_worker as GroupWorker, groups as Group, role::UserGroupRole, state::GroupState,
+        user_group as UserGroup, users as User,
     },
     error::{ApiError, AuthError, Error},
     schema::GroupQueryInfo,
@@ -152,6 +152,14 @@ pub async fn get_group(
     } else {
         None
     };
+    let worker_count: Option<i64> = GroupWorker::Entity::find()
+        .filter(GroupWorker::Column::GroupId.eq(group.id))
+        .select_only()
+        .column_as(GroupWorker::Column::WorkerId.count(), "count")
+        .into_tuple()
+        .one(&pool.db)
+        .await?;
+    let worker_count = worker_count.unwrap_or_default();
     Ok(GroupQueryInfo {
         group_name: group.group_name,
         creator_username,
@@ -161,6 +169,7 @@ pub async fn get_group(
         task_count: group.task_count,
         storage_quota: group.storage_quota,
         storage_used: group.storage_used,
+        worker_count,
         users_in_group,
     })
 }

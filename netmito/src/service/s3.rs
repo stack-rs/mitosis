@@ -371,6 +371,7 @@ pub async fn download_file(
         while let Some(chunk) = resp.chunk().await.map_err(RequestError::from)? {
             file.write_all(&chunk).await?;
         }
+        file.flush().await?;
         Ok(())
     } else {
         let msg = get_xml_error_message(resp).await?;

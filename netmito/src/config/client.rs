@@ -22,7 +22,8 @@ use crate::{
     schema::{
         AttachmentsQueryReq, ChangeTaskReq, RemoteResourceDownload, RemoveGroupWorkerRoleReq,
         RemoveUserGroupRoleReq, ReplaceWorkerTagsReq, TaskSpec, TasksQueryReq,
-        UpdateGroupWorkerRoleReq, UpdateTaskLabelsReq, UpdateUserGroupRoleReq, WorkersQueryReq,
+        UpdateGroupWorkerRoleReq, UpdateTaskLabelsReq, UpdateUserGroupRoleReq, UserLoginReq,
+        WorkersQueryReq,
     },
 };
 
@@ -77,6 +78,8 @@ pub struct ClientInteractiveShell {
 
 #[derive(Subcommand, Serialize, Debug, Deserialize)]
 pub enum ClientCommand {
+    /// Authenticate the user
+    Auth(AuthArgs),
     /// Create a new user or group
     Create(CreateArgs),
     /// Get the info of a task, artifact, attachment, or a list of tasks subject to the filters
@@ -91,6 +94,14 @@ pub enum ClientCommand {
     Manage(ManageArgs),
     /// Quit the client's interactive mode
     Quit,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct AuthArgs {
+    /// The username of the user
+    pub username: String,
+    /// The password of the user
+    pub password: String,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -542,6 +553,21 @@ impl ClientConfig {
             .merge(Serialized::from(cli, "client"))
             .select("client")
             .extract()?)
+    }
+}
+
+impl From<AuthArgs> for ClientCommand {
+    fn from(args: AuthArgs) -> Self {
+        Self::Auth(args)
+    }
+}
+
+impl From<AuthArgs> for UserLoginReq {
+    fn from(args: AuthArgs) -> Self {
+        Self {
+            username: args.username,
+            md5_password: md5::compute(args.password.as_bytes()).0,
+        }
     }
 }
 

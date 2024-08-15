@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::{io::Write, path::PathBuf};
 
 use figment::value::magic::RelativePathBuf;
 use reqwest::Client;
@@ -19,6 +19,28 @@ macro_rules! expect_two {
             _ => None,
         }
     }};
+}
+
+pub trait GetPathBuf {
+    fn get_path_buf(&self) -> PathBuf;
+}
+
+impl GetPathBuf for RelativePathBuf {
+    fn get_path_buf(&self) -> PathBuf {
+        self.relative()
+    }
+}
+
+impl GetPathBuf for PathBuf {
+    fn get_path_buf(&self) -> PathBuf {
+        self.into()
+    }
+}
+
+impl GetPathBuf for std::path::Path {
+    fn get_path_buf(&self) -> PathBuf {
+        self.to_path_buf()
+    }
 }
 
 // pub fn validate_cred(token: &str, username: Option<&String>) -> bool {
@@ -215,6 +237,51 @@ pub async fn get_user_credential(
         }
         modify_or_append_credential(&cred_path, &username, &token).await?;
         Ok((username, token))
+    } else {
+        let resp = resp.json::<ErrorMsg>().await.map_err(RequestError::from)?;
+        Err(Error::Custom(resp.msg))
+    }
+}
+
+pub async fn refresh_user_credential<T>(
+    cred_path: Option<&T>,
+    client: &Client,
+    url: &mut Url,
+    user_login: &UserLoginReq,
+) -> crate::error::Result<String>
+where
+    T: GetPathBuf,
+{
+    url.set_path("login");
+    let resp = client
+        .post(url.as_str())
+        .json(&user_login)
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_request() && e.is_connect() {
+                url.set_path("");
+                RequestError::ConnectionError(url.to_string())
+            } else {
+                e.into()
+            }
+        })?;
+    if resp.status().is_success() {
+        let resp = resp
+            .json::<crate::schema::UserLoginResp>()
+            .await
+            .map_err(RequestError::from)?;
+        let token = resp.token;
+        if let Some(cred_path) = cred_path {
+            let cred_path = cred_path.get_path_buf();
+            if cred_path.exists() {
+                if let Some(parent) = cred_path.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                modify_or_append_credential(&cred_path, &user_login.username, &token).await?;
+            }
+        }
+        Ok(token)
     } else {
         let resp = resp.json::<ErrorMsg>().await.map_err(RequestError::from)?;
         Err(Error::Custom(resp.msg))

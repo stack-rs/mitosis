@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap_repl::ClapEditor;
 use humansize::{format_size, DECIMAL};
 use ouroboros::self_referencing;
@@ -17,7 +19,7 @@ use crate::{
     error::{get_error_from_resp, map_reqwest_err, RequestError, S3Error},
     schema::*,
     service::{
-        auth::cred::get_user_credential,
+        auth::cred::{get_user_credential, refresh_user_credential},
         s3::{download_file, get_xml_error_message},
     },
 };
@@ -198,6 +200,7 @@ pub struct MitoClient {
     http_client: Client,
     url: Url,
     credential: String,
+    credential_path: PathBuf,
     username: String,
     redis_client: Option<MitoRedisClient>,
     redis_pubsub_client: Option<MitoRedisPubSubClient>,
@@ -246,6 +249,20 @@ impl MitoClient {
     pub async fn setup(config: &ClientConfig) -> crate::error::Result<Self> {
         tracing::debug!("Client is setting up");
         let http_client = Client::new();
+        let credential_path = config
+            .credential_path
+            .as_ref()
+            .map(|p| p.relative())
+            .or_else(|| {
+                dirs::config_dir().map(|mut p| {
+                    p.push("mitosis");
+                    p.push("credentials");
+                    p
+                })
+            })
+            .ok_or(crate::error::Error::ConfigError(figment::Error::from(
+                "credential path not found",
+            )))?;
         let (username, credential) = get_user_credential(
             config.credential_path.as_ref(),
             &http_client,
@@ -259,6 +276,7 @@ impl MitoClient {
             http_client,
             url,
             credential,
+            credential_path,
             username,
             redis_client: None,
             redis_pubsub_client: None,
@@ -460,6 +478,18 @@ impl MitoClient {
                 "No Redis connection found".to_string(),
             ))
         }
+    }
+
+    pub async fn auth_user(&mut self, args: UserLoginReq) -> crate::error::Result<()> {
+        let token = refresh_user_credential(
+            Some(&self.credential_path),
+            &self.http_client,
+            &mut self.url,
+            &args,
+        )
+        .await?;
+        self.credential = token;
+        Ok(())
     }
 
     pub async fn create_user(&mut self, args: CreateUserArgs) -> crate::error::Result<()> {
@@ -1031,6 +1061,14 @@ impl MitoClient {
     {
         let cmd = cmd.into();
         match cmd {
+            ClientCommand::Auth(args) => match self.auth_user(args.into()).await {
+                Ok(_) => {
+                    tracing::info!("Successfully authenticated");
+                }
+                Err(e) => {
+                    tracing::error!("{}", e);
+                }
+            },
             ClientCommand::Create(create_args) => match create_args.command {
                 CreateCommands::User(args) => match self.create_user(args).await {
                     Ok(_) => {

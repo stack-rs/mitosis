@@ -27,6 +27,8 @@ pub struct WorkerConfig {
     pub(crate) tags: HashSet<String>,
     pub(crate) log_path: Option<RelativePathBuf>,
     pub(crate) file_log: bool,
+    #[serde(with = "humantime_serde")]
+    pub(crate) lifetime: Option<Duration>,
 }
 
 #[derive(Args, Debug, Serialize, Default)]
@@ -76,6 +78,10 @@ pub struct WorkerConfigCli {
     /// Enable logging to file
     #[arg(long)]
     pub file_log: bool,
+    // The lifetime of the worker to alive (e.g., 7d, 1year)
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub lifetime: Option<String>,
 }
 
 impl Default for WorkerConfig {
@@ -91,6 +97,7 @@ impl Default for WorkerConfig {
             tags: HashSet::new(),
             log_path: None,
             file_log: false,
+            lifetime: None,
         }
     }
 }

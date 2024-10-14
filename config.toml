@@ -16,6 +16,7 @@ access_token_expires_in = "7d"
 coordinator_addr = "http://127.0.0.1:5000"
 polling_interval = "3m"
 heartbeat_interval = "5m"
+lifetime = "7d"
 # credential_path is not set
 # user is not set
 # password is not set

@@ -71,6 +71,9 @@ pub struct GroupQueryInfo {
 pub struct RegisterWorkerReq {
     pub tags: HashSet<String>,
     pub groups: HashSet<String>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub lifetime: Option<std::time::Duration>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -5,7 +5,7 @@ use jsonwebtoken::EncodingKey;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::error::DecodeTokenError;
+use crate::error::{ApiError, DecodeTokenError};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TokenClaims<'a> {
@@ -30,6 +30,44 @@ where
     let claims = TokenClaims {
         sub: Cow::from(username.as_ref()),
         exp: OffsetDateTime::now_utc() + token_ttl.token_expires_in,
+        sign,
+    };
+
+    let encoding_key = crate::config::ENCODING_KEY
+        .get()
+        .ok_or(crate::error::Error::Custom(
+            "encoding key not found".to_string(),
+        ))?;
+    encode_token(&claims, encoding_key)
+}
+
+pub fn generate_worker_token<T>(
+    username: T,
+    sign: i64,
+    lifetime: Option<std::time::Duration>,
+) -> crate::error::Result<String>
+where
+    T: AsRef<str>,
+{
+    let token_ttl = match lifetime {
+        Some(ttl) => time::Duration::try_from(ttl).map_err(|_| {
+            ApiError::InvalidRequest(format!(
+                "Invalid lifetime {}",
+                humantime_serde::re::humantime::format_duration(ttl)
+            ))
+        })?,
+        None => {
+            crate::config::SERVER_CONFIG
+                .get()
+                .ok_or(crate::error::Error::Custom(
+                    "server config not found".to_string(),
+                ))?
+                .token_expires_in
+        }
+    };
+    let claims = TokenClaims {
+        sub: Cow::from(username.as_ref()),
+        exp: OffsetDateTime::now_utc() + token_ttl,
         sign,
     };
 

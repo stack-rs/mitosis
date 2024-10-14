@@ -12,7 +12,7 @@ use crate::{
     error::{ApiError, ApiResult, Error},
     schema::*,
     service::{
-        auth::{token::generate_token, worker_auth_middleware, AuthUser, AuthWorker},
+        auth::{token::generate_worker_token, worker_auth_middleware, AuthUser, AuthWorker},
         s3::{get_artifact, get_attachment},
         task::get_task,
         worker,
@@ -53,14 +53,15 @@ pub async fn register(
             ApiError::InternalServerError
         }
     })?;
-    let token = generate_token(uuid.clone().to_string(), 0).map_err(|e| match e {
-        crate::error::Error::AuthError(err) => ApiError::AuthError(err),
-        crate::error::Error::ApiError(e) => e,
-        _ => {
-            tracing::error!("{}", e);
-            ApiError::InternalServerError
-        }
-    })?;
+    let token =
+        generate_worker_token(uuid.clone().to_string(), 0, req.lifetime).map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
     let redis_url = REDIS_CONNECTION_INFO.get().map(|info| info.worker_url());
     Ok(Json(RegisterWorkerResp {
         worker_id: uuid,

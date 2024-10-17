@@ -139,6 +139,18 @@ pub struct UploadAttachmentResp {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct UploadArtifactReq {
+    pub uuid: Uuid,
+    pub content_type: ArtifactContentType,
+    pub content_length: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UploadArtifactResp {
+    pub url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SubmitTaskReq {
     pub group_name: String,
     pub tags: HashSet<String>,

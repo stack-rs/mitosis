@@ -14,3 +14,8 @@ pub mod state;
 pub mod user_group;
 pub mod users;
 pub mod workers;
+
+pub enum StoredTaskModel {
+    Active(active_tasks::Model),
+    Archived(archived_tasks::Model),
+}

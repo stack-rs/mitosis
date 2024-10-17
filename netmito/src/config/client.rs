@@ -88,8 +88,8 @@ pub enum ClientCommand {
     Get(GetArgs),
     /// Submit a task
     Submit(SubmitTaskCmdArgs),
-    /// Upload an attachment to a group
-    Upload(UploadAttachmentArgs),
+    /// Upload an artifact or attachment
+    Upload(UploadArgs),
     /// Manage a worker or a task
     Manage(ManageArgs),
     /// Quit the client's interactive mode
@@ -114,6 +114,12 @@ pub struct CreateArgs {
 pub struct GetArgs {
     #[command(subcommand)]
     pub command: GetCommands,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct UploadArgs {
+    #[command(subcommand)]
+    pub command: UploadCommands,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -150,6 +156,14 @@ pub enum GetCommands {
     Group(GetGroupArgs),
     /// Get all groups the user has access to
     Groups,
+}
+
+#[derive(Subcommand, Serialize, Debug, Deserialize)]
+pub enum UploadCommands {
+    /// Upload an artifact to a task
+    Artifact(UploadArtifactArgs),
+    /// Upload an attachment to a group
+    Attachment(UploadAttachmentArgs),
 }
 
 #[derive(Subcommand, Serialize, Debug, Deserialize)]
@@ -388,6 +402,17 @@ pub struct GetWorkersArgs {
 pub struct GetGroupArgs {
     /// The name of the group
     pub group: String,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct UploadArtifactArgs {
+    /// The UUID of the artifact
+    pub uuid: Uuid,
+    /// The content type of the artifact
+    #[arg(value_enum)]
+    pub content_type: ArtifactContentType,
+    /// The path of the local file to upload
+    pub local_file: PathBuf,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -937,9 +962,43 @@ impl From<GetWorkerArgs> for ClientCommand {
     }
 }
 
+impl From<UploadArtifactArgs> for UploadCommands {
+    fn from(args: UploadArtifactArgs) -> Self {
+        Self::Artifact(args)
+    }
+}
+
+impl From<UploadArtifactArgs> for UploadArgs {
+    fn from(args: UploadArtifactArgs) -> Self {
+        Self {
+            command: UploadCommands::Artifact(args),
+        }
+    }
+}
+
+impl From<UploadArtifactArgs> for ClientCommand {
+    fn from(args: UploadArtifactArgs) -> Self {
+        Self::Upload(args.into())
+    }
+}
+
+impl From<UploadAttachmentArgs> for UploadCommands {
+    fn from(args: UploadAttachmentArgs) -> Self {
+        Self::Attachment(args)
+    }
+}
+
+impl From<UploadAttachmentArgs> for UploadArgs {
+    fn from(args: UploadAttachmentArgs) -> Self {
+        Self {
+            command: UploadCommands::Attachment(args),
+        }
+    }
+}
+
 impl From<UploadAttachmentArgs> for ClientCommand {
     fn from(args: UploadAttachmentArgs) -> Self {
-        Self::Upload(args)
+        Self::Upload(args.into())
     }
 }
 

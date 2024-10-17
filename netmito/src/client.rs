@@ -802,6 +802,56 @@ impl MitoClient {
         }
     }
 
+    pub async fn upload_artifact(&mut self, args: UploadArtifactArgs) -> crate::error::Result<()> {
+        self.url.set_path("user/artifacts");
+        let metadata = args
+            .local_file
+            .metadata()
+            .map_err(crate::error::Error::from)?;
+        if metadata.is_dir() {
+            return Err(crate::error::Error::Custom(
+                "Currently we do not support uploading a directory".to_string(),
+            ));
+        }
+        let content_length = metadata.len();
+        let req = UploadArtifactReq {
+            uuid: args.uuid,
+            content_length,
+            content_type: args.content_type,
+        };
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .json(&req)
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<UploadArtifactResp>()
+                .await
+                .map_err(RequestError::from)?;
+            let file = tokio::fs::File::open(args.local_file).await?;
+            let upload_file = self
+                .http_client
+                .put(resp.url)
+                .header(CONTENT_LENGTH, content_length)
+                .body(file)
+                .send()
+                .await
+                .map_err(map_reqwest_err)?;
+            if upload_file.status().is_success() {
+                Ok(())
+            } else {
+                let msg = get_xml_error_message(upload_file).await?;
+                Err(S3Error::Custom(msg).into())
+            }
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn upload_attachment(
         &mut self,
         args: UploadAttachmentArgs,
@@ -1247,13 +1297,23 @@ impl MitoClient {
                     }
                 }
             }
-            ClientCommand::Upload(args) => match self.upload_attachment(args).await {
-                Ok(_) => {
-                    tracing::info!("Attachment uploaded successfully");
-                }
-                Err(e) => {
-                    tracing::error!("{}", e);
-                }
+            ClientCommand::Upload(args) => match args.command {
+                UploadCommands::Artifact(args) => match self.upload_artifact(args).await {
+                    Ok(_) => {
+                        tracing::info!("Artifact uploaded successfully");
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                UploadCommands::Attachment(args) => match self.upload_attachment(args).await {
+                    Ok(_) => {
+                        tracing::info!("Attachment uploaded successfully");
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
             },
             ClientCommand::Manage(args) => match args.command {
                 ManageCommands::Worker(args) => {

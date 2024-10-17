@@ -15,20 +15,19 @@ use sea_orm::{
 use crate::{
     config::InfraPool,
     entity::{
-        active_tasks as ActiveTask, archived_tasks as ArchivedTask, artifacts as Artifact,
-        group_worker as GroupWorker, groups as Group,
+        active_tasks as ActiveTask, archived_tasks as ArchivedTask, group_worker as GroupWorker,
+        groups as Group,
         role::{GroupWorkerRole, UserGroupRole},
-        state::{GroupState, TaskState, WorkerState},
-        user_group as UserGroup, users as User, workers as Worker,
+        state::{TaskState, WorkerState},
+        user_group as UserGroup, users as User, workers as Worker, StoredTaskModel,
     },
     error::{ApiError, Error},
     schema::{
         RawWorkerQueryInfo, ReportTaskOp, TaskSpec, WorkerQueryInfo, WorkerQueryResp,
         WorkerShutdownOp, WorkerTaskResp, WorkersQueryReq, WorkersQueryResp,
     },
+    service::s3::group_upload_artifact,
 };
-
-use super::s3::get_presigned_upload_link;
 
 pub async fn register_worker(
     creator_id: i64,
@@ -570,103 +569,14 @@ pub async fn report_task(
                 content_type,
                 content_length
             );
-            let content_length = content_length as i64;
-            let updated_task = ActiveTask::ActiveModel {
-                id: Set(task_id),
-                updated_at: Set(now),
-                ..Default::default()
-            };
-            updated_task.update(&pool.db).await?;
-            // Check group storage quota and allocate storage for the artifact
-            let group_id = task.group_id;
-            let s3_client = pool.s3.clone();
-            let uri = pool
-                .db
-                .transaction::<_, String, Error>(|txn| {
-                    Box::pin(async move {
-                        let group = Group::Entity::find_by_id(group_id).one(txn).await?.ok_or(
-                            ApiError::InvalidRequest("Group for the task not found".to_string()),
-                        )?;
-                        if group.state != GroupState::Active {
-                            return Err(ApiError::InvalidRequest(
-                                "Group is not active".to_string(),
-                            )
-                            .into());
-                        }
-                        let artifact = Artifact::Entity::find()
-                            .filter(Artifact::Column::TaskId.eq(task.uuid))
-                            .filter(Artifact::Column::ContentType.eq(content_type))
-                            .one(txn)
-                            .await?;
-                        let s3_object_key = format!("{}/{}", task.uuid, content_type);
-                        let url: String;
-                        match artifact {
-                            Some(artifact) => {
-                                let recorded_content_length = content_length.max(artifact.size);
-                                let new_storage_used =
-                                    group.storage_used + (recorded_content_length - artifact.size);
-                                if new_storage_used > group.storage_quota {
-                                    return Err(ApiError::QuotaExceeded.into());
-                                }
-                                url = get_presigned_upload_link(
-                                    &s3_client,
-                                    "mitosis-artifacts",
-                                    s3_object_key,
-                                    content_length,
-                                )
-                                .await
-                                .map_err(ApiError::from)?;
-                                let artifact = Artifact::ActiveModel {
-                                    id: Set(artifact.id),
-                                    size: Set(recorded_content_length),
-                                    updated_at: Set(now),
-                                    ..Default::default()
-                                };
-                                artifact.update(txn).await?;
-                                let group = Group::ActiveModel {
-                                    id: Set(group_id),
-                                    storage_used: Set(new_storage_used),
-                                    updated_at: Set(now),
-                                    ..Default::default()
-                                };
-                                group.update(txn).await?;
-                            }
-                            None => {
-                                let new_storage_used = group.storage_used + content_length;
-                                if new_storage_used > group.storage_quota {
-                                    return Err(ApiError::QuotaExceeded.into());
-                                }
-                                url = get_presigned_upload_link(
-                                    &s3_client,
-                                    "mitosis-artifacts",
-                                    s3_object_key,
-                                    content_length,
-                                )
-                                .await
-                                .map_err(ApiError::from)?;
-                                let artifact = Artifact::ActiveModel {
-                                    task_id: Set(task.uuid),
-                                    content_type: Set(content_type),
-                                    size: Set(content_length),
-                                    created_at: Set(now),
-                                    updated_at: Set(now),
-                                    ..Default::default()
-                                };
-                                artifact.insert(txn).await?;
-                                let group = Group::ActiveModel {
-                                    id: Set(group_id),
-                                    storage_used: Set(new_storage_used),
-                                    updated_at: Set(now),
-                                    ..Default::default()
-                                };
-                                group.update(txn).await?;
-                            }
-                        }
-                        Ok(url)
-                    })
-                })
-                .await?;
-            return Ok(Some(uri));
+            let url = group_upload_artifact(
+                pool,
+                StoredTaskModel::Active(task),
+                content_type,
+                content_length,
+            )
+            .await?;
+            return Ok(Some(url));
         }
     }
     Ok(None)

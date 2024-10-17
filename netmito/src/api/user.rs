@@ -17,7 +17,10 @@ use crate::{
     service::{
         auth::{user_auth_middleware, user_login, AuthUser},
         group::query_user_groups,
-        s3::{get_artifact, query_attachment_list, user_get_attachment, user_upload_attachment},
+        s3::{
+            get_artifact, query_attachment_list, user_get_attachment, user_upload_artifact,
+            user_upload_attachment,
+        },
         task::{
             get_task, query_task_list, user_cancel_task, user_change_task, user_change_task_labels,
             user_submit_task,
@@ -39,6 +42,7 @@ pub fn user_router(st: InfraPool) -> Router<InfraPool> {
         )
         .route("/tasks/:uuid/labels", put(change_task_labels))
         .route("/artifacts/:uuid/:content_type", get(download_artifact))
+        .route("/artifacts", post(upload_artifact))
         .route("/attachments/:group_name/*key", get(download_attachment))
         .route("/attachments", post(upload_attachment))
         .route("/workers/:uuid/", get(query_worker).delete(shutdown_worker))
@@ -187,6 +191,24 @@ pub async fn query_tasks(
             }
         })?;
     Ok(Json(tasks))
+}
+
+pub async fn upload_artifact(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Json(req): Json<UploadArtifactReq>,
+) -> Result<Json<UploadArtifactResp>, ApiError> {
+    let url = user_upload_artifact(&pool, u.id, req.uuid, req.content_type, req.content_length)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(UploadArtifactResp { url }))
 }
 
 pub async fn download_artifact(

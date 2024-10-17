@@ -5,14 +5,15 @@ use sea_orm::prelude::*;
 use tokio::{sync::mpsc::UnboundedReceiver, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::entity::{group_worker as GroupWorker, workers as Worker};
+use crate::{config::InfraPool, entity::workers as Worker};
+
 // MARK: HeartbeatQueue
 #[derive(Debug)]
 pub struct HeartbeatQueue {
     pub workers: PriorityQueue<i64, Reverse<Instant>>,
     cancel_token: CancellationToken,
     heartbeat_timeout: Duration,
-    db: DatabaseConnection,
+    pool: InfraPool,
     rx: UnboundedReceiver<HeartbeatOp>,
 }
 
@@ -25,14 +26,14 @@ impl HeartbeatQueue {
     pub fn new(
         cancel_token: CancellationToken,
         heartbeat_timeout: Duration,
-        db: DatabaseConnection,
+        pool: InfraPool,
         rx: UnboundedReceiver<HeartbeatOp>,
     ) -> Self {
         Self {
             workers: PriorityQueue::new(),
             cancel_token,
             heartbeat_timeout,
-            db,
+            pool,
             rx,
         }
     }
@@ -59,16 +60,15 @@ impl HeartbeatQueue {
         }
     }
 
-    async fn handle_timeout(&mut self) -> Result<(), DbErr> {
+    async fn handle_timeout(&mut self) -> crate::error::Result<()> {
         if let Some(true) = self.workers.peek().map(|(_, r)| r.0 <= Instant::now()) {
             let (worker_id, _) = self.workers.pop().unwrap();
-            GroupWorker::Entity::delete_many()
-                .filter(GroupWorker::Column::WorkerId.eq(worker_id))
-                .exec(&self.db)
-                .await?;
-            Worker::Entity::delete_by_id(worker_id)
-                .exec(&self.db)
-                .await?;
+            if let Some(worker) = Worker::Entity::find_by_id(worker_id)
+                .one(&self.pool.db)
+                .await?
+            {
+                super::remove_worker(worker, &self.pool).await?;
+            }
         }
         Ok(())
     }

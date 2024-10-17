@@ -170,10 +170,10 @@ impl CoordinatorConfig {
     pub fn build_worker_heartbeat_queue(
         &self,
         cancel_token: CancellationToken,
-        db: DatabaseConnection,
+        pool: InfraPool,
         rx: UnboundedReceiver<HeartbeatOp>,
     ) -> HeartbeatQueue {
-        HeartbeatQueue::new(cancel_token, self.heartbeat_timeout, db, rx)
+        HeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
     }
 
     pub async fn build_redis_connection_info(

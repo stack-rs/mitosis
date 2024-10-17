@@ -95,7 +95,7 @@ impl MitoCoordinator {
         // Setup worker heartbeat queue
         let worker_heartbeat_queue = config.build_worker_heartbeat_queue(
             cancel_token.clone(),
-            infra_pool.db.clone(),
+            infra_pool.clone(),
             worker_heartbeat_queue_rx,
         );
 

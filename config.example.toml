@@ -5,12 +5,17 @@ db_url = "postgres://mitosis:mitosis@localhost/mitosis"
 s3_url = "http://127.0.0.1:9000"
 s3_access_key = "mitosis_access"
 s3_secret_key = "mitosis_secret"
-redis_url = "redis://:mitosis@localhost"
+# redis_url is not set. It should be in format like "redis://:mitosis@localhost"
+# redis_worker_password is not set by default and will be generated randomly
+# redis_client_password is not set by default and will be generated randomly
 admin_user = "mitosis_admin"
 admin_password = "mitosis_admin"
 access_token_private_path = "private.pem"
 access_token_public_path = "public.pem"
 access_token_expires_in = "7d"
+heartbeat_timeout = "600s"
+file_log = false
+# log_path is not set. It will use the default rolling log file path if file_log is set to true
 
 [worker]
 coordinator_addr = "http://127.0.0.1:5000"
@@ -20,8 +25,11 @@ lifetime = "7d"
 # credential_path is not set
 # user is not set
 # password is not set
-# groups are not set
+# groups are not set, default to the user's group
 # tags are not set
+file_log = false
+# log_path is not set. It will use the default rolling log file path if file_log is set to true
+# lifetime is not set, default to the coordinator's setting
 
 [client]
 # user = "mitosis_admin"

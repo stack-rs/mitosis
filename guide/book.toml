@@ -1,0 +1,12 @@
+[book]
+authors = ["BobAnkh"]
+language = "en"
+multilingual = false
+src = "src"
+title = "Mitosis Documentation"
+description = "Mitosis is a Rust library and a command line tool to run distributed platforms for transport research."
+
+[output.html]
+git-repository-url = "https://github.com/stack-rs/mitosis/tree/master/guide"
+edit-url-template = "https://github.com/stack-rs/mitosis/edit/master/guide/{path}"
+# site-url = "/mitosis/"

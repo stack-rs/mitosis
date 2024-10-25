@@ -78,7 +78,7 @@ pub struct WorkerConfigCli {
     /// Enable logging to file
     #[arg(long)]
     pub file_log: bool,
-    // The lifetime of the worker to alive (e.g., 7d, 1year)
+    /// The lifetime of the worker to alive (e.g., 7d, 1year)
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub lifetime: Option<String>,
@@ -88,8 +88,8 @@ impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             coordinator_addr: Url::parse(&format!("http://{}", DEFAULT_COORDINATOR_ADDR)).unwrap(),
-            polling_interval: Duration::from_secs(5),
-            heartbeat_interval: Duration::from_secs(10),
+            polling_interval: Duration::from_secs(180),
+            heartbeat_interval: Duration::from_secs(300),
             credential_path: None,
             user: None,
             password: None,

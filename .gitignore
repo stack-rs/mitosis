@@ -16,3 +16,5 @@ target/
 .vscode
 *.pem
 .env
+config.toml
+guide/book

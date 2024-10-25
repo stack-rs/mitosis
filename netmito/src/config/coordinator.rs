@@ -79,7 +79,7 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub s3_secret_key: Option<String>,
-    // The Redis URL
+    /// The Redis URL
     #[arg(long = "redis")]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub redis_url: Option<String>,

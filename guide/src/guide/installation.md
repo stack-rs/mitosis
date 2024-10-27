@@ -19,6 +19,12 @@ For example, do `sudo install mito /usr/local/bin/mito` on Linux.
 
 ## Build from source using Rust
 
+### Dependencies
+
+You have to install pkg-config, libssl-dev if you want to build the binary from source.
+
+### Building
+
 To build the `mito` executable from source, you will first need to install Rust and Cargo.
 Follow the instructions on the [Rust installation page].
 

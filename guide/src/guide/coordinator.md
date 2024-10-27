@@ -28,6 +28,13 @@ file_log = false
 # log_path is not set. It will use the default rolling log file path if file_log is set to true
 ```
 
+For the private and public keys, you can generate them using the following commands:
+
+```sh
+openssl genpkey -algorithm ed25519 -out private.pem
+openssl pkey -in private.pem -pubout -out public.pem
+```
+
 To start a Coordinator, run the following command:
 
 ```sh

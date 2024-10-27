@@ -1,34 +1,19 @@
 # Mitosis: A Unified Transport Evaluation Framework
 
+**Mitosis** is a Rust library and a command line tool to run distributed platforms for transport research.
+
+This guide is an example of how to use Mitosis to run a simple distributed platform to parallelize your tasks.
+It is designed for transport-layer research, but it can be used for any other purpose.
+
 ## Usage
 
-### Coordinator
+Please check our [User Guide](https://stack.rs/mitosis/guide) for how to use Mitosis.
 
-#### Dependencies
+## Contributing
 
-pkg-config, libssl-dev
-
-#### Generate keys
-
-```bash
-openssl genpkey -algorithm ed25519 -out private.pem
-openssl pkey -in private.pem -pubout -out public.pem
-```
-
-#### Set .env file
-
-Copy `.env.example` to `.env` and set the variables in it.
-
-Configuring all the relevant options in config.toml for coordinator and run the following command:
-
-```bash
-mito coordinator --file-log
-```
-
-### Worker
-
-Configuring all the relevant options in config.toml for worker and run the following command:
-
-```bash
-mito worker --file-log
-```
+Mitosis is free and open source. You can find the source code on
+[GitHub](https://github.com/stack-rs/mitosis) and issues and feature requests can be posted on
+the [GitHub issue tracker](https://github.com/stack-rs/mitosis/issues). Mitosis relies on the community to fix bugs and
+add features: if you'd like to contribute, please read
+the [CONTRIBUTING](https://github.com/stack-rs/mitosis/blob/master/CONTRIBUTING.md) guide and consider opening
+a [pull request](https://github.com/stack-rs/mitosis/pulls).

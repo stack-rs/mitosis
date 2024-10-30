@@ -1,12 +1,16 @@
 # Running a Worker
 
-A Worker is a process that executes tasks. It is responsible for fetching tasks from the Coordinator, executing them, and reporting the results back to the Coordinator. The Worker is a long-running process that is typically deployed as a service.
+A Worker is a process that executes tasks.
+It is responsible for fetching tasks from the Coordinator, executing them, and reporting the results back to the Coordinator.
+The Worker is a long-running process that is typically deployed as a service.
 
 ## Starting a Worker
 
-To start a Worker, you need to provide a TOML file that configures the Worker. The TOML file specifies the Worker's configuration, such as the polling (fetching) interval, the URL of the Coordinator, and the the groups allowed to submit tasks to it. All configuration options are optional and have default values.
+To start a Worker, you need to provide a TOML file that configures the Worker.
+The TOML file specifies the Worker's configuration, such as the polling (fetching) interval, the URL of the Coordinator, and the the groups allowed to submit tasks to it.
+All configuration options are optional and have default values.
 
-Here is an example of a Worker configuration file:
+Here is an example of a Worker configuration file (you can also refer to `config.example.toml` in the repository):
 
 ```toml
 [worker]
@@ -26,7 +30,7 @@ file_log = false
 
 To start a Worker, run the following command:
 
-```sh
+```bash
 mito worker --config /path/to/worker.toml
 ```
 
@@ -36,7 +40,7 @@ We can also override the configuration settings using command-line arguments.
 Note that the names of command-line arguments may not be the same as those in the configuration file.
 For example, to change the polling interval, you can run:
 
-```sh
+```bash
 mito worker --config /path/to/worker.toml --polling-interval 5m
 ```
 

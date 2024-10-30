@@ -1,12 +1,39 @@
 # Running a Coordinator
 
-A Coordinator is a process that manages the execution of a workflow. It is responsible for scheduling tasks, tracking their progress, and handling failures. The Coordinator is a long-running process that is typically deployed as a service.
+A Coordinator is a process that manages the execution of a workflow.
+It is responsible for scheduling tasks, tracking their progress, and handling failures.
+The Coordinator is a long-running process that is typically deployed as a service.
+
+## External Requirements
+
+The Coordinator requires access to several external services.
+It needs a PostgreSQL database to store data, an S3-compatible storage service to store task artifacts or group attachments.
+The Redis server is an optional service that acts as a pub/sub provider,
+enabling clients to subscribe to and query more comprehensive details regarding the execution status of tasks.
+
+For those services, you can use the docker-compose file provided in the repository.
+First, Copy `.env.example` to `.env` and set the variables in it.
+And then, run the following command to start the services:
+
+```bash
+docker-compose up -d
+```
+
+The Coordinator also requires a private and public key pair to sign and verify access tokens.
+For the private and public keys, you can generate them using the following commands:
+
+```bash
+openssl genpkey -algorithm ed25519 -out private.pem
+openssl pkey -in private.pem -pubout -out public.pem
+```
 
 ## Starting a Coordinator
 
-To start a Coordinator, you need to provide a TOML file that configures the Coordinator. The TOML file specifies the Coordinator's configuration, such as the address it binds to, the URL of the postgres database, and token expiry settings. All configuration options are optional and have default values.
+To start a Coordinator, you need to provide a TOML file that configures the Coordinator.
+The TOML file specifies the Coordinator's configuration, such as the address it binds to, the URL of the postgres database, and token expiry settings.
+All configuration options are optional and have default values.
 
-Here is an example of a Coordinator configuration file:
+Here is an example of a Coordinator configuration file (you can also refer to `config.example.toml` in the repository):
 
 ```toml
 [coordinator]
@@ -28,16 +55,9 @@ file_log = false
 # log_path is not set. It will use the default rolling log file path if file_log is set to true
 ```
 
-For the private and public keys, you can generate them using the following commands:
-
-```sh
-openssl genpkey -algorithm ed25519 -out private.pem
-openssl pkey -in private.pem -pubout -out public.pem
-```
-
 To start a Coordinator, run the following command:
 
-```sh
+```bash
 mito coordinator --config /path/to/coordinator.toml
 ```
 
@@ -47,7 +67,7 @@ We can also override the configuration settings using command-line arguments.
 Note that the names of command-line arguments may not be the same as those in the configuration file.
 For example, to change the address the Coordinator binds to, you can run:
 
-```sh
+```bash
 mito coordinator --config /path/to/coordinator.toml --bind 0.0.0.0:8000
 ```
 

@@ -22,7 +22,13 @@ Follow the official [naming convention](https://rust-lang.github.io/api-guidelin
 
 ## Building Mitosis
 
-Mitosis builds on stable Rust, if you want to build mdBook from source, here are the steps to follow:
+### Dependencies
+
+You have to install pkg-config, libssl-dev if you want to build the binary from source.
+
+### Building
+
+Mitosis builds on stable Rust, if you want to build it from source, here are the steps to follow:
 
 1. Navigate to the directory of your choice
 2. Clone this repository with git.

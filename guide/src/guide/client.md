@@ -1,24 +1,30 @@
 # Running a Client
 
-A Client is a process that interact with the Coordinator. It is responsible for creating tasks, querying their results, and managing workers or groups. The Client is a short-lived process that is typically run on-demand.
+A Client is a process that interact with the Coordinator.
+It is responsible for creating tasks, querying their results, and managing workers or groups.
+The Client is a short-lived process that is typically run on-demand.
 
 ## Starting a Client
 
-While it's possible to provide a TOML configuration file to the client, it's often unnecessary given the limited number of configuration items, all of which pertain to login procedures.
+While it's possible to provide a TOML configuration file to the client,
+it's often unnecessary given the limited number of configuration items, all of which pertain to login procedures.
 
 Typically, to start a Client, we can simply run the following command to enter interactive mode:
 
-```sh
+```bash
 mito client -i
 ```
 
-If a user has never logged in or if his/her session has expired, the Client will prompt them to re-input their username and password for authentication. Alternatively, they can directly specify their username (`-u`) or password (`-p`) during execution. Once authenticated, the Client will retain their credentials in a file for future use.
+If a user has never logged in or if his/her session has expired, the Client will prompt them to re-input their username and password for authentication.
+Alternatively, they can directly specify their username (`-u`) or password (`-p`) during execution.
+Once authenticated, the Client will retain their credentials in a file for future use.
 
 We recommend using the interactive mode for most operations, as it provides a more user-friendly experience.
 
-We can also directly run a command without entering interactive mode by specifying the command as an argument. For example, to create a new user, we can run:
+We can also directly run a command without entering interactive mode by specifying the command as an argument.
+For example, to create a new user, we can run:
 
-```sh
+```bash
 mito client create user -u new_user -p new_password
 ```
 
@@ -49,7 +55,8 @@ Options:
   -V, --version                            Print version
 ```
 
-To know how each subcommand works, you can run `mito client <subcommand> --help`. For example, to know how to create a new user, you can run `mito client create user --help`:
+To know how each subcommand works, you can run `mito client <subcommand> --help`.
+For example, to know how to create a new user, you can run `mito client create user --help`:
 
 ```txt
 Create a new user

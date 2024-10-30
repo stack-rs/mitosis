@@ -11,7 +11,7 @@ netmito = "0.1"
 
 Here is a simple example of how to create a new user using the SDK:
 
-```rust
+```rust,ignore
 # use netmito::client::MitoClient;
 # use netmito::config::client::{ClientConfig, CreateUserArgs};
 # 

@@ -6,6 +6,8 @@ and a SDK library (named `netmito`) that you can use to create your own client.
 There are multiple ways to install the Mitosis CLI tool.
 Choose any one of the methods below that best suit your needs.
 
+> **ATTENTION**: As we are still in the early stages of development without a released version, we only support building from source currently.
+
 ## Pre-compiled binaries
 
 Executable binaries are available for download on the [GitHub Releases page][releases].
@@ -13,7 +15,7 @@ Download the binary and extract the archive.
 The archive contains an `mito` executable which you can run to start your distributed platform.
 
 To make it easier to run, put the path to the binary into your `PATH` or install it in a directory that is already in your `PATH`.
-For example, do `sudo install mito /usr/local/bin/mito` on Linux.
+For example, do `sudo install -m 755 mito /usr/local/bin/mito` on Linux.
 
 [releases]: https://github.com/stack-rs/mitosis/releases
 
@@ -23,14 +25,14 @@ For example, do `sudo install mito /usr/local/bin/mito` on Linux.
 
 You have to install pkg-config, libssl-dev if you want to build the binary from source.
 
-### Building
+### Installing with Cargo
 
 To build the `mito` executable from source, you will first need to install Rust and Cargo.
 Follow the instructions on the [Rust installation page].
 
 Once you have installed Rust, the following command can be used to build and install mito:
 
-```sh
+```bash
 cargo install mito
 ```
 
@@ -44,28 +46,29 @@ To uninstall, run the command `cargo uninstall mito`.
 [Rust installation page]: https://www.rust-lang.org/tools/install
 [crates.io]: https://crates.io/
 
-### Installing the latest master version
+### Installing the latest git version with Cargo
 
 The version published to crates.io will ever so slightly be behind the version hosted on GitHub.
 If you need the latest version you can build the git version of mito yourself.
 Cargo makes this ***super easy***!
 
-```sh
+```bash
 cargo install --git https://github.com/stack-rs/mitosis.git mito
 ```
 
 Again, make sure to add the Cargo bin directory to your `PATH`.
 
-## Basic Workflow
+### Building from source
 
-The Mitosis CLI tool is a single binary that provides subcommands for starting the Coordinator, Worker and Client processes.
+If you want to build the binary from source, you can clone the repository and build it using Cargo.
 
-Users function as units for access control, while groups operate as units for tangible resource control.
-Every user has an identically named group but also has the option to create or join additional groups.
+```bash
+git clone https://github.com/stack-rs/mitosis.git
+cd mitosis
+cargo build --release
+```
 
-Users can delegate tasks to various groups via the Client, which are then delivered to the Coordinator and subsequently executed by the corresponding Worker. Each Worker can be configured to permit specific groups and carry tags to denote its characteristics.
-
-Tasks, once submitted, are distributed to different Workers based on their groups and tags. Every task is assigned a unique UUID, allowing users to track the status and results of their tasks.
+Then you can find the binary in `target/release/mito` and install or run it as you like.
 
 ## Modifying and contributing
 

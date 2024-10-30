@@ -9,4 +9,4 @@ description = "Mitosis is a Rust library and a command line tool to run distribu
 [output.html]
 git-repository-url = "https://github.com/stack-rs/mitosis/tree/master/guide"
 edit-url-template = "https://github.com/stack-rs/mitosis/edit/master/guide/{path}"
-# site-url = "/mitosis/"
+site-url = "/mitosis/"

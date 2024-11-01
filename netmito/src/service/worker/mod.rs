@@ -372,8 +372,24 @@ pub async fn heartbeat(worker_id: i64, pool: &InfraPool) -> crate::error::Result
         last_heartbeat: Set(TimeDateTimeWithTimeZone::now_utc()),
         ..Default::default()
     };
-    // TODO: check if the task is already expired
-    let _worker = worker.update(&pool.db).await?;
+    // DONE: check if the task is already expired
+    let worker = worker.update(&pool.db).await?;
+    if let Some(task_id) = worker.assigned_task_id {
+        if let Some(task) = ActiveTask::Entity::find_by_id(task_id)
+            .one(&pool.db)
+            .await?
+        {
+            if task.state == TaskState::Running {
+                // We allow a 60 seconds grace period
+                if TimeDateTimeWithTimeZone::now_utc() - task.updated_at
+                    > time::Duration::seconds(task.timeout + 60)
+                {
+                    remove_worker(worker, pool).await?;
+                    return Ok(());
+                }
+            }
+        }
+    }
     if pool
         .worker_heartbeat_queue_tx
         .send(HeartbeatOp::Heartbeat(worker_id))

@@ -10,7 +10,7 @@ repository = "https://github.com/stack-rs/mitosis"
 rust-version = "1.76"
 
 [workspace.dependencies]
-clap = { version = "4.5.1", features = ["std", "derive"] }
+clap = { version = "4.5.20", features = ["std", "derive"] }
 jsonwebtoken = "9.3.0"
 md5 = "0.7.0"
 redis = { version = "0.26.0", features = ["tokio-comp"] }

@@ -5,6 +5,10 @@
 # Configuration options are organized into tables and keys.
 # See documentation for more information on available options.
 
+[remote.github]
+owner = "stack-rs"
+repo = "mitosis"
+
 [changelog]
 # changelog header
 header = """

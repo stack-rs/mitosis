@@ -3,7 +3,7 @@ members = [".", "netmito"]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 homepage = "https://github.com/stack-rs/mitosis"
 repository = "https://github.com/stack-rs/mitosis"
@@ -30,6 +30,22 @@ tokio = { version = "1.36", features = [
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 
+# Config for 'cargo dist'
+[workspace.metadata.dist]
+# The preferred cargo-dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.16.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["x86_64-unknown-linux-gnu"]
+# Publish jobs to run in CI
+pr-run-mode = "plan"
+# Whether to install an updater program
+install-updater = false
+allow-dirty = ["ci"]
+
 [package]
 name = "mito"
 version.workspace = true
@@ -49,3 +65,8 @@ tracing-subscriber = { workspace = true }
 
 [features]
 debugging = ["netmito/debugging"]
+
+# The profile that 'cargo dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

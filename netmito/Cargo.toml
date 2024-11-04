@@ -56,7 +56,7 @@ tower-http = { version = "0.5.2", features = ["cors"] }
 tracing = { workspace = true }
 tracing-appender = "0.2.3"
 tracing-subscriber = { workspace = true }
-url = { version = "2.5.0", features = ["serde"] }
+url = { version = "2.5.3", features = ["serde"] }
 uuid = { version = "1.8.0", features = ["v4"] }
 
 [dev-dependencies]

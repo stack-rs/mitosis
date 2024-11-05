@@ -11,7 +11,7 @@ rust-version = "1.76"
 license = "Apache-2.0"
 readme = "README.md"
 description = "A Unified Distributed Transport Evaluation Framework"
-keywords = ["distributed", "transport", "evaluation", "framework", "network", "utility"]
+keywords = ["distributed", "transport", "evaluation", "network", "utility"]
 categories = ["network-programming", "concurrency", "command-line-utilities"]
 
 [workspace.dependencies]

@@ -68,7 +68,7 @@ categories.workspace = true
 
 [dependencies]
 clap ={ workspace = true }
-netmito = { path = "netmito" }
+netmito = { path = "netmito" , version = "0.1.0" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

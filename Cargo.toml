@@ -8,6 +8,11 @@ edition = "2021"
 homepage = "https://github.com/stack-rs/mitosis"
 repository = "https://github.com/stack-rs/mitosis"
 rust-version = "1.76"
+license = "Apache-2.0"
+readme = "README.md"
+description = "A Unified Distributed Transport Evaluation Framework"
+keywords = ["distributed", "transport", "evaluation", "framework", "network", "utility"]
+categories = ["network-programming", "concurrency", "command-line-utilities"]
 
 [workspace.dependencies]
 clap = { version = "4.5.20", features = ["std", "derive"] }
@@ -53,6 +58,11 @@ edition.workspace = true
 homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
+description.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

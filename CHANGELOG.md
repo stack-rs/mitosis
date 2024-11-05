@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [unreleased]
+## [0.1.0](https://github.com/stack-rs/mitosis/releases/tag/mito-v0.1.0) - 2024-11-05
 
 ### Features
 
@@ -100,6 +100,11 @@ All notable changes to this project will be documented in this file.
 ### Miscellaneous Tasks
 
 - *(cliff)* Set values for Github integration - ([e049956](https://github.com/stack-rs/mitosis/commit/e0499567f524cd9cb48070f7d17a50a676687fcd))
+- Specify version for netmito in mito - ([4394da2](https://github.com/stack-rs/mitosis/commit/4394da26ad268f965d557c1d61de29327a32c40e))
+- Remove extra keywords in manifest - ([748ed1d](https://github.com/stack-rs/mitosis/commit/748ed1d245e4beef0692263a2bfed5bf73ff94ba))
+- Add manifest metadata - ([ab301fd](https://github.com/stack-rs/mitosis/commit/ab301fd30645d8ce1b86840866910a4b17643423))
+- Update release-plz workflow - ([48a47e9](https://github.com/stack-rs/mitosis/commit/48a47e9d544e1b0a443182c28ae8f1c39d769477))
+- Add CHANGELOG - ([7e184fd](https://github.com/stack-rs/mitosis/commit/7e184fdee5b41d66b93729a070ff0514c4f08b50))
 - Add release workflows - ([e18f8db](https://github.com/stack-rs/mitosis/commit/e18f8db399f93fe9903c16ce1f1f65a386d01a65))
 - Add site-url to mdbook build - ([6e5d053](https://github.com/stack-rs/mitosis/commit/6e5d05341e7fcb3a2acda3b65fc90a225e430edd))
 - Add gh-page build workflow - ([a80ff39](https://github.com/stack-rs/mitosis/commit/a80ff394d7c98c16fa47b9bc92b4ee255c7721aa))

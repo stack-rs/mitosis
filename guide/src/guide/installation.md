@@ -6,8 +6,6 @@ and a SDK library (named `netmito`) that you can use to create your own client.
 There are multiple ways to install the Mitosis CLI tool.
 Choose any one of the methods below that best suit your needs.
 
-> **ATTENTION**: As we are still in the early stages of development without a released version, we only support building from source currently.
-
 ## Pre-compiled binaries
 
 Executable binaries are available for download on the [GitHub Releases page][releases].
@@ -15,7 +13,20 @@ Download the binary and extract the archive.
 The archive contains an `mito` executable which you can run to start your distributed platform.
 
 To make it easier to run, put the path to the binary into your `PATH` or install it in a directory that is already in your `PATH`.
-For example, do `sudo install -m 755 mito /usr/local/bin/mito` on Linux.
+For example, do the following on Linux:
+
+```bash
+wget https://github.com/stack-rs/mitosis/releases/download/mito-v0.1.0/mito-x86_64-unknown-linux-gnu.tar.xz
+tar xf mito-x86_64-unknown-linux-gnu.tar.xz
+cd mito-x86_64-unknown-linux-gnu
+sudo install -m 755 mito /usr/local/bin/mito
+```
+
+We also have a installer script that you can use to install the latest version of Mitosis. You can change the version number in the URL to install a specific version. This script will install the binary in the `$HOME/.cargo/bin` directory.
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.1.0/mito-installer.sh | sh
+```
 
 [releases]: https://github.com/stack-rs/mitosis/releases
 

@@ -61,7 +61,6 @@ body = """
 {%- endfor -%}
 {%- endif %}
 
-
 """
 # template for the changelog footer
 footer = """

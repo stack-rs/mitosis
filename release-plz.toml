@@ -13,6 +13,7 @@ git_tag_enable = true
 git_release_enable = false
 # labels for the release PR
 pr_labels = ["release"]
+pr_name = "Release v{{ version }}"
 # disallow updating repositories with uncommitted changes
 allow_dirty = true
 # disallow packaging with uncommitted changes

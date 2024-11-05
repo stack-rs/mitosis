@@ -5,10 +5,6 @@
 # Configuration options are organized into tables and keys.
 # See documentation for more information on available options.
 
-[remote.github]
-owner = "stack-rs"
-repo = "mitosis"
-
 [changelog]
 # template for the changelog header
 header = """
@@ -19,7 +15,7 @@ All notable changes to this project will be documented in this file.\n
 # https://keats.github.io/tera/docs/#introduction
 body = """
 {%- macro remote_url() -%}
-  https://github.com/{{ remote.github.owner }}/{{ remote.github.repo }}
+  https://github.com/stack-rs/mitosis
 {%- endmacro -%}
 
 {% macro print_commit(commit) -%}

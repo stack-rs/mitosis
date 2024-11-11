@@ -262,6 +262,14 @@ pub struct TaskQueryResp {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct AttachmentMetadata {
+    pub content_type: AttachmentContentType,
+    pub size: i64,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AttachmentsQueryReq {
     pub group_name: Option<String>,
     pub key_prefix: Option<String>,

@@ -18,8 +18,8 @@ use crate::{
         auth::{user_auth_middleware, user_login, AuthUser},
         group::query_user_groups,
         s3::{
-            get_artifact, query_attachment_list, user_get_attachment, user_upload_artifact,
-            user_upload_attachment,
+            get_artifact, query_attachment_list, user_get_attachment, user_get_attachment_db,
+            user_upload_artifact, user_upload_attachment,
         },
         task::{
             get_task, query_task_list, user_cancel_task, user_change_task, user_change_task_labels,
@@ -44,6 +44,10 @@ pub fn user_router(st: InfraPool) -> Router<InfraPool> {
         .route("/artifacts/:uuid/:content_type", get(download_artifact))
         .route("/artifacts", post(upload_artifact))
         .route("/attachments/:group_name/*key", get(download_attachment))
+        .route(
+            "/attachments/meta/:group_name/*key",
+            get(get_attachment_metadata),
+        )
         .route("/attachments", post(upload_attachment))
         .route("/workers/:uuid/", get(query_worker).delete(shutdown_worker))
         .route("/workers/:uuid/tags", put(replace_worker_tags))
@@ -253,6 +257,24 @@ pub async fn download_attachment(
     Path((group_name, key)): Path<(String, String)>,
 ) -> Result<Json<RemoteResourceDownloadResp>, ApiError> {
     let attachment = user_get_attachment(&pool, u.id, group_name, key)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(attachment))
+}
+
+pub async fn get_attachment_metadata(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path((group_name, key)): Path<(String, String)>,
+) -> Result<Json<AttachmentMetadata>, ApiError> {
+    let attachment = user_get_attachment_db(&pool, u.id, group_name, key)
         .await
         .map_err(|e| match e {
             crate::error::Error::AuthError(err) => ApiError::AuthError(err),

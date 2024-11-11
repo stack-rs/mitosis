@@ -11,7 +11,7 @@ use sea_orm::{
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-use crate::schema::RemoteResourceDownloadResp;
+use crate::schema::{AttachmentMetadata, RemoteResourceDownloadResp};
 use crate::{config::InfraPool, error::S3Error};
 use crate::{
     entity::StoredTaskModel,
@@ -343,6 +343,44 @@ pub async fn get_attachment(
     Ok(RemoteResourceDownloadResp {
         url,
         size: attachment.size,
+    })
+}
+
+pub async fn user_get_attachment_db(
+    pool: &InfraPool,
+    user_id: i64,
+    group_name: String,
+    key: String,
+) -> Result<AttachmentMetadata, crate::error::Error> {
+    let group_id = Group::Entity::find()
+        .filter(Group::Column::GroupName.eq(group_name.clone()))
+        .one(&pool.db)
+        .await?
+        .ok_or(crate::error::ApiError::NotFound(format!(
+            "Attachment of group {} and key {}",
+            group_name, key
+        )))?
+        .id;
+    UserGroup::Entity::find()
+        .filter(UserGroup::Column::UserId.eq(user_id))
+        .filter(UserGroup::Column::GroupId.eq(group_id))
+        .one(&pool.db)
+        .await?
+        .ok_or(AuthError::PermissionDenied)?;
+    let attachment = Attachment::Entity::find()
+        .filter(Attachment::Column::GroupId.eq(group_id))
+        .filter(Attachment::Column::Key.eq(key.clone()))
+        .one(&pool.db)
+        .await?
+        .ok_or(crate::error::ApiError::NotFound(format!(
+            "Attachment of group {} and key {}",
+            group_name, key
+        )))?;
+    Ok(AttachmentMetadata {
+        content_type: attachment.content_type,
+        size: attachment.size,
+        created_at: attachment.created_at,
+        updated_at: attachment.updated_at,
     })
 }
 

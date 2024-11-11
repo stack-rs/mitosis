@@ -642,6 +642,32 @@ impl MitoClient {
         }
     }
 
+    pub async fn get_attachment_meta(
+        &mut self,
+        args: GetAttachmentMetaArgs,
+    ) -> crate::error::Result<AttachmentMetadata> {
+        self.url.set_path(&format!(
+            "user/attachments/meta/{}/{}",
+            args.group_name, args.key
+        ));
+        let resp = self
+            .http_client
+            .get(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let meta = resp
+                .json::<AttachmentMetadata>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(meta)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn get_tasks(
         &mut self,
         args: TasksQueryReq,
@@ -1215,6 +1241,19 @@ impl MitoClient {
                         }
                     }
                 }
+                GetCommands::AttachmentMeta(args) => match self.get_attachment_meta(args).await {
+                    Ok(info) => {
+                        tracing::info!(
+                            "Attachment of size {}B, Created at {} and Updated at {}",
+                            info.size,
+                            info.created_at,
+                            info.updated_at
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
                 GetCommands::Attachments(args) => match self.get_attachments(args.into()).await {
                     Ok(attachments) => {
                         for attachment in attachments {

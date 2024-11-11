@@ -144,6 +144,8 @@ pub enum GetCommands {
     Artifact(GetArtifactCmdArgs),
     /// Download an attachment of a group
     Attachment(GetAttachmentCmdArgs),
+    /// Get the metadata of an attachment
+    AttachmentMeta(GetAttachmentMetaArgs),
     /// Query a list of tasks subject to the filter
     Tasks(GetTasksArgs),
     /// Query a list of attachments subject to the filter
@@ -371,6 +373,14 @@ pub struct GetAttachmentsArgs {
     /// The offset of the tasks to query
     #[arg(long)]
     pub offset: Option<u64>,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct GetAttachmentMetaArgs {
+    /// The group of the attachment belongs to
+    pub group_name: String,
+    /// The key of the attachment
+    pub key: String,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -880,6 +890,26 @@ impl From<GetAttachmentsArgs> for AttachmentsQueryReq {
             limit: args.limit,
             offset: args.offset,
         }
+    }
+}
+
+impl From<GetAttachmentMetaArgs> for GetCommands {
+    fn from(args: GetAttachmentMetaArgs) -> Self {
+        Self::AttachmentMeta(args)
+    }
+}
+
+impl From<GetAttachmentMetaArgs> for GetArgs {
+    fn from(args: GetAttachmentMetaArgs) -> Self {
+        Self {
+            command: GetCommands::AttachmentMeta(args),
+        }
+    }
+}
+
+impl From<GetAttachmentMetaArgs> for ClientCommand {
+    fn from(args: GetAttachmentMetaArgs) -> Self {
+        Self::Get(args.into())
     }
 }
 

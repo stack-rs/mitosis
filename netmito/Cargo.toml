@@ -52,7 +52,7 @@ sea-orm = { version = "1.0.0", default-features = false, features = [
 sea-orm-migration = "1.0.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = "1.0.66"
+thiserror = "2.0.3"
 time = { version = "0.3.36", features = ["serde-human-readable"] }
 tokio = { workspace = true }
 tokio-tar = "0.3.1"

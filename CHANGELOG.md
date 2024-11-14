@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0](https://github.com/stack-rs/mitosis/compare/mito-v0.1.0...mito-v0.2.0) - 2024-11-14
+
+### Features
+
+- *(api)* Support attachment metadata query - ([c9d6637](https://github.com/stack-rs/mitosis/commit/c9d66377959c9d1472f8fc036a3e1c746be88940))
+- *(sdk)* Add attachment meta query to client - ([1537968](https://github.com/stack-rs/mitosis/commit/1537968d099e6650299eb9f54be0058465d11d33))
+
+### Documentation
+
+- Update installation guide - ([435f839](https://github.com/stack-rs/mitosis/commit/435f839f028a096e2c37781bfe8d1a2774252f41))
+
+### Miscellaneous Tasks
+
+- Change pr name of release-plz - ([9d94dcc](https://github.com/stack-rs/mitosis/commit/9d94dcc39024e12647d1b7a688aa8661240e234e))
+
 ## [0.1.0](https://github.com/stack-rs/mitosis/releases/tag/mito-v0.1.0) - 2024-11-05
 
 ### Features

@@ -1,6 +1,9 @@
-use std::path::PathBuf;
+use std::{borrow::Cow, path::PathBuf};
 
-use clap_repl::ClapEditor;
+use clap_repl::{
+    reedline::{self, FileBackedHistory},
+    ClapEditor, ReadCommandOutput,
+};
 use humansize::{format_size, DECIMAL};
 use ouroboros::self_referencing;
 use redis::{
@@ -23,6 +26,10 @@ use crate::{
         s3::{download_file, get_xml_error_message},
     },
 };
+
+static DEFAULT_LEFT_PROMPT: &str = "[mito::client]";
+static DEFAULT_INDICATOR: &str = "> ";
+static DEFAULT_MULTILINE_INDICATOR: &str = "::: ";
 
 #[self_referencing]
 pub struct MitoRedisPubSubClient {
@@ -196,6 +203,45 @@ impl MitoAsyncRedisClient {
     }
 }
 
+pub struct MitoPrompt;
+
+impl reedline::Prompt for MitoPrompt {
+    fn render_prompt_left(&self) -> std::borrow::Cow<str> {
+        Cow::Borrowed(DEFAULT_LEFT_PROMPT)
+    }
+
+    fn render_prompt_right(&self) -> std::borrow::Cow<str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_indicator(
+        &self,
+        _prompt_mode: reedline::PromptEditMode,
+    ) -> std::borrow::Cow<str> {
+        Cow::Borrowed(DEFAULT_INDICATOR)
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> std::borrow::Cow<str> {
+        Cow::Borrowed(DEFAULT_MULTILINE_INDICATOR)
+    }
+
+    fn render_prompt_history_search_indicator(
+        &self,
+        history_search: reedline::PromptHistorySearch,
+    ) -> std::borrow::Cow<str> {
+        let prefix = match history_search.status {
+            reedline::PromptHistorySearchStatus::Passing => "",
+            reedline::PromptHistorySearchStatus::Failing => "failing ",
+        };
+        // NOTE: magic strings, given there is logic on how these compose I am not sure if it
+        // is worth extracting in to static constant
+        Cow::Owned(format!(
+            "({}reverse-search: {}) ",
+            prefix, history_search.term
+        ))
+    }
+}
+
 pub struct MitoClient {
     http_client: Client,
     url: Url,
@@ -223,15 +269,38 @@ impl MitoClient {
                         client.handle_command(cmd).await;
                     }
                     if cli.interactive {
-                        tracing::info!("Client is running in interactive mode. Enter 'quit' to exit and 'help' to see available commands.");
-                        let mut rl = ClapEditor::<ClientInteractiveShell>::new_with_prompt(
-                            "[mito::client]> ",
-                        );
-                        loop {
-                            if let Some(c) = rl.read_command() {
-                                if !client.handle_command(c.command).await {
-                                    break;
+                        println!("Client is running in interactive mode. Enter 'quit' or Ctrl-D to exit and 'help' to see available commands.");
+                        let prompt = MitoPrompt;
+                        let cache_file = dirs::cache_dir().map(|mut p| {
+                            p.push("mitosis");
+                            p.push("client-history");
+                            p
+                        });
+                        let mut rl = ClapEditor::<ClientInteractiveShell>::builder()
+                            .with_prompt(Box::new(prompt))
+                            .with_editor_hook(|reed| {
+                                // Do custom things with `Reedline` instance here
+                                if let Some(history_file) = cache_file {
+                                    reed.with_history(Box::new(
+                                        FileBackedHistory::with_file(1000, history_file).unwrap(),
+                                    ))
+                                } else {
+                                    reed
                                 }
+                            })
+                            .build();
+                        loop {
+                            match rl.read_command() {
+                                ReadCommandOutput::Command(c) => {
+                                    if !client.handle_command(c.command).await {
+                                        break;
+                                    }
+                                },
+                                ReadCommandOutput::CtrlC | ReadCommandOutput::EmptyLine => {},
+                                ReadCommandOutput::ClapError(error) => tracing::error!("Clap parse error: {}", error),
+                                ReadCommandOutput::ShlexError => tracing::error!("Input was not lexically valid, for example it had odd number of \""),
+                                ReadCommandOutput::ReedlineError(error) => tracing::error!("Reedline failed to work with stdio: {}", error),
+                                ReadCommandOutput::CtrlD => break,
                             }
                         }
                     }

@@ -21,7 +21,7 @@ axum = { version = "0.7.4", features = ["http2"] }
 axum-extra = { version = "0.9.4", features = ["typed-header"] }
 base64 = "0.22.0"
 clap = { workspace = true }
-clap-repl = "0.1.1"
+clap-repl = "0.3.0"
 dirs = "5.0.1"
 figment = { version = "0.10", features = ["toml", "env"] }
 futures = "0.3.30"

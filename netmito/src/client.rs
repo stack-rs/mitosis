@@ -297,9 +297,9 @@ impl MitoClient {
                                     }
                                 },
                                 ReadCommandOutput::CtrlC | ReadCommandOutput::EmptyLine => {},
-                                ReadCommandOutput::ClapError(error) => tracing::error!("Clap parse error: {}", error),
-                                ReadCommandOutput::ShlexError => tracing::error!("Input was not lexically valid, for example it had odd number of \""),
-                                ReadCommandOutput::ReedlineError(error) => tracing::error!("Reedline failed to work with stdio: {}", error),
+                                ReadCommandOutput::ClapError(error) => println!("{}", error),
+                                ReadCommandOutput::ShlexError => println!("error: Input was not lexically valid, for example it had odd number of \""),
+                                ReadCommandOutput::ReedlineError(error) => println!("error: Reedline failed to work with stdio due to {}", error),
                                 ReadCommandOutput::CtrlD => break,
                             }
                         }

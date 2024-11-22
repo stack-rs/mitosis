@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1](https://github.com/stack-rs/mitosis/compare/mito-v0.2.0...mito-v0.2.1) - 2024-11-22
+
+### Bug Fixes
+
+- *(client)* Change interact error message display - ([57e4023](https://github.com/stack-rs/mitosis/commit/57e40239a9bdbdecc4e43dce011534716d391af0))
+
+### Miscellaneous Tasks
+
+- Update Cargo.lock dependencies - ([0000000](https://github.com/stack-rs/mitosis/commit/0000000))
+
 ## [0.2.0](https://github.com/stack-rs/mitosis/compare/mito-v0.1.0...mito-v0.2.0) - 2024-11-15
 
 ### Features

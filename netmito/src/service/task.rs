@@ -22,16 +22,17 @@ use crate::{
 
 use super::worker::{remove_task, TaskDispatcherOp};
 
+// XXX: Not sure if we can relax the constrains on local path checking.
+// We currently only check if the path is absolute or contains `..` and not check for `.`.
 fn check_task_spec(spec: &TaskSpec) -> crate::error::Result<()> {
     if spec.resources.iter().any(|r| {
         r.local_path.is_absolute()
-            || r.local_path.components().any(|c| {
-                matches!(c, std::path::Component::ParentDir)
-                    || matches!(c, std::path::Component::CurDir)
-            })
+            || r.local_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
     }) {
         return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
-            "Resource local path is absolute or contains `..` or `.`".to_string(),
+            "Resource local path is absolute or contains `..`".to_string(),
         )));
     }
     Ok(())

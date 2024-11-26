@@ -22,10 +22,11 @@ use axum::{
 #[cfg(feature = "debugging")]
 use http_body_util::BodyExt;
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 use crate::{config::InfraPool, service::auth::user_auth_middleware};
 
-pub fn router(st: InfraPool) -> Router {
+pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
     #[cfg(not(feature = "debugging"))]
     {
         Router::new()
@@ -35,7 +36,7 @@ pub fn router(st: InfraPool) -> Router {
             )
             .route("/login", post(user::login_user))
             .nest("/user", user::user_router(st.clone()))
-            .nest("/admin", admin::admin_router(st.clone()))
+            .nest("/admin", admin::admin_router(st.clone(), cancel_token))
             .nest("/groups", group::group_router(st.clone()))
             // .route(
             //     "/group",
@@ -63,7 +64,7 @@ pub fn router(st: InfraPool) -> Router {
             )
             .route("/login", post(user::login_user))
             .nest("/user", user::user_router(st.clone()))
-            .nest("/admin", admin::admin_router(st.clone()))
+            .nest("/admin", admin::admin_router(st.clone(), cancel_token))
             .nest("/groups", group::group_router(st.clone()))
             // .route(
             //     "/group",

@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use argon2::password_hash::rand_core::OsRng;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -77,6 +78,11 @@ impl MitoCoordinator {
                     crate::error::Error::Custom("set redis connection info failed".to_string())
                 })?;
         }
+        let shutdown_secret = argon2::password_hash::SaltString::generate(&mut OsRng).to_string();
+        tracing::warn!("Set random shutdown secret: {}", shutdown_secret);
+        crate::config::SHUTDOWN_SECRET
+            .set(shutdown_secret)
+            .map_err(|_| crate::error::Error::Custom("set shutdown secret failed".to_string()))?;
         let cancel_token = CancellationToken::new();
 
         let (worker_task_queue_tx, worker_task_queue_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -136,7 +142,7 @@ impl MitoCoordinator {
         let task_queue_hd = tokio::spawn(async move { worker_task_queue.run().await });
         let heartbeat_hd = tokio::spawn(async move { worker_heartbeat_queue.run().await });
         restore_workers(&infra_pool).await?;
-        let app = router(infra_pool);
+        let app = router(infra_pool, cancel_token.clone());
         let addr = crate::config::SERVER_CONFIG
             .get()
             .ok_or(crate::error::Error::Custom(
@@ -149,7 +155,7 @@ impl MitoCoordinator {
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(cancel_token.clone()))
         .await
         {
             tracing::error!("Server error: {}", e);

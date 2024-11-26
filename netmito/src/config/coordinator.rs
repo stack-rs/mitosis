@@ -416,3 +416,4 @@ pub(crate) static INIT_ADMIN_USER: OnceCell<InitAdminUser> = OnceCell::new();
 pub(crate) static ENCODING_KEY: OnceCell<EncodingKey> = OnceCell::new();
 pub(crate) static DECODING_KEY: OnceCell<DecodingKey> = OnceCell::new();
 pub(crate) static REDIS_CONNECTION_INFO: OnceCell<RedisConnectionInfo> = OnceCell::new();
+pub(crate) static SHUTDOWN_SECRET: OnceCell<String> = OnceCell::new();

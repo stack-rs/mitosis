@@ -492,7 +492,7 @@ impl MitoWorker {
         });
         tokio::select! {
             biased;
-            _ = shutdown_signal() => {
+            _ = shutdown_signal(self.cancel_token.clone()) => {
                 tracing::info!("Worker exits due to terminate signal received. Wait for resource cleanup");
                 self.cancel_token.cancel();
                 heartbeat_hd.await?;

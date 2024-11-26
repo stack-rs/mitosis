@@ -92,6 +92,8 @@ pub enum ClientCommand {
     Upload(UploadArgs),
     /// Manage a worker or a task
     Manage(ManageArgs),
+    /// Shutdown the coordinator
+    Shutdown(ShutdownArgs),
     /// Quit the client's interactive mode
     Quit,
 }
@@ -126,6 +128,11 @@ pub struct UploadArgs {
 pub struct ManageArgs {
     #[command(subcommand)]
     pub command: ManageCommands,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct ShutdownArgs {
+    pub secret: String,
 }
 
 #[derive(Subcommand, Serialize, Debug, Deserialize)]

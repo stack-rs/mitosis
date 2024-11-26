@@ -5,10 +5,11 @@ use axum::{
     Extension, Json, Router,
 };
 use sea_orm::DbErr;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    config::InfraPool,
+    config::{self, InfraPool},
     entity::state::UserState,
     error::{ApiError, ApiResult, Error},
     schema::*,
@@ -20,11 +21,15 @@ use crate::{
     },
 };
 
-pub fn admin_router(st: InfraPool) -> Router<InfraPool> {
+pub fn admin_router(st: InfraPool, cancel_token: CancellationToken) -> Router<InfraPool> {
     Router::new()
         .route("/user", post(create_user).delete(delete_user))
         .route("/user/state", post(change_user_state))
         .route("/workers/:uuid/", delete(shutdown_worker))
+        .route(
+            "/shutdown",
+            post(shutdown_coordinator).with_state(cancel_token),
+        )
         .layer(middleware::from_fn_with_state(
             st.clone(),
             admin_auth_middleware,
@@ -120,4 +125,24 @@ pub async fn shutdown_worker(
         })?;
 
     Ok(())
+}
+
+pub async fn shutdown_coordinator(
+    Extension(_): Extension<AuthAdminUser>,
+    State(cancel_token): State<CancellationToken>,
+    Json(req): Json<ShutdownReq>,
+) -> Result<(), ApiError> {
+    tracing::debug!("Shutdown coordinator");
+    if let Some(secret) = config::SHUTDOWN_SECRET.get() {
+        if *secret == req.secret {
+            cancel_token.cancel();
+            Ok(())
+        } else {
+            Err(ApiError::AuthError(
+                crate::error::AuthError::PermissionDenied,
+            ))
+        }
+    } else {
+        Err(ApiError::InternalServerError)
+    }
 }

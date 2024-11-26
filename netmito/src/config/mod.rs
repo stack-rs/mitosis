@@ -5,6 +5,7 @@ pub use client::{ClientConfig, ClientConfigCli};
 pub use coordinator::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 pub(crate) use coordinator::{
     DECODING_KEY, ENCODING_KEY, INIT_ADMIN_USER, REDIS_CONNECTION_INFO, SERVER_CONFIG,
+    SHUTDOWN_SECRET,
 };
 use tracing::subscriber::DefaultGuard;
 use tracing_appender::non_blocking::WorkerGuard;

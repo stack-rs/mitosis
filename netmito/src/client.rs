@@ -1198,6 +1198,23 @@ impl MitoClient {
         }
     }
 
+    pub async fn shutdown_coordinator(&mut self, secret: String) -> crate::error::Result<()> {
+        self.url.set_path("admin/shutdown");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .json(&ShutdownReq { secret })
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn quit(self) {}
 
     pub async fn handle_command<T>(&mut self, cmd: T) -> bool
@@ -1526,6 +1543,15 @@ impl MitoClient {
                             }
                         }
                     }
+                }
+            },
+            ClientCommand::Shutdown(args) => match self.shutdown_coordinator(args.secret).await {
+                Ok(_) => {
+                    tracing::info!("Coordinator shutdown successfully");
+                    return false;
+                }
+                Err(e) => {
+                    tracing::error!("{}", e);
                 }
             },
             ClientCommand::Quit => {

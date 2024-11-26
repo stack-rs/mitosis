@@ -398,6 +398,11 @@ pub struct RemoveUserGroupRoleReq {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct ShutdownReq {
+    pub secret: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WorkerShutdown {
     pub op: Option<WorkerShutdownOp>,
 }

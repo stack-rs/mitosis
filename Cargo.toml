@@ -32,7 +32,7 @@ tokio = { version = "1.36", features = [
     "sync",
     "io-util",
 ] }
-tracing = "0.1.40"
+tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 
 # Config for 'cargo dist'

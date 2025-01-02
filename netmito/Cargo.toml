@@ -49,7 +49,7 @@ sea-orm = { version = "1.0.0", default-features = false, features = [
   "with-time",
   "with-uuid",
 ] }
-sea-orm-migration = "1.0.0"
+sea-orm-migration = "1.1.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2.0.3"

@@ -25,12 +25,12 @@ pub fn admin_router(st: InfraPool, cancel_token: CancellationToken) -> Router<In
     Router::new()
         .route("/user", post(create_user).delete(delete_user))
         .route("/user/state", post(change_user_state))
-        .route("/workers/:uuid/", delete(shutdown_worker))
+        .route("/workers/{uuid}/", delete(shutdown_worker))
         .route(
             "/shutdown",
             post(shutdown_coordinator).with_state(cancel_token),
         )
-        .layer(middleware::from_fn_with_state(
+        .route_layer(middleware::from_fn_with_state(
             st.clone(),
             admin_auth_middleware,
         ))

@@ -37,22 +37,25 @@ pub fn user_router(st: InfraPool) -> Router<InfraPool> {
         .route("/auth", get(auth_user))
         .route("/tasks", post(submit_task))
         .route(
-            "/tasks/:uuid",
+            "/tasks/{uuid}",
             get(query_task).put(change_task).delete(cancel_task),
         )
-        .route("/tasks/:uuid/labels", put(change_task_labels))
-        .route("/artifacts/:uuid/:content_type", get(download_artifact))
+        .route("/tasks/{uuid}/labels", put(change_task_labels))
+        .route("/artifacts/{uuid}/{content_type}", get(download_artifact))
         .route("/artifacts", post(upload_artifact))
-        .route("/attachments/:group_name/*key", get(download_attachment))
+        .route("/attachments/{group_name}/{*key}", get(download_attachment))
         .route(
-            "/attachments/meta/:group_name/*key",
+            "/attachments/meta/{group_name}/{*key}",
             get(get_attachment_metadata),
         )
         .route("/attachments", post(upload_attachment))
-        .route("/workers/:uuid/", get(query_worker).delete(shutdown_worker))
-        .route("/workers/:uuid/tags", put(replace_worker_tags))
         .route(
-            "/workers/:uuid/groups",
+            "/workers/{uuid}/",
+            get(query_worker).delete(shutdown_worker),
+        )
+        .route("/workers/{uuid}/tags", put(replace_worker_tags))
+        .route(
+            "/workers/{uuid}/groups",
             put(update_worker_groups).delete(remove_worker_groups),
         )
         .route("/redis", get(query_redis_connection_info))
@@ -60,7 +63,7 @@ pub fn user_router(st: InfraPool) -> Router<InfraPool> {
         .route("/filters/attachments", post(query_attachments))
         .route("/filters/workers", post(query_workers))
         .route("/groups", get(query_groups))
-        .layer(middleware::from_fn_with_state(
+        .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
         ))

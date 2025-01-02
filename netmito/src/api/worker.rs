@@ -24,10 +24,10 @@ pub fn worker_router(st: InfraPool) -> Router<InfraPool> {
         .route("/", delete(unregister))
         .route("/heartbeat", post(heartbeat))
         .route("/tasks", post(report_task).get(fetch_task))
-        .route("/tasks/:uuid", get(query_task))
-        .route("/artifacts/:uuid/:content_type", get(download_artifact))
-        .route("/attachments/:uuid/*key", get(download_attachment))
-        .layer(middleware::from_fn_with_state(
+        .route("/tasks/{uuid}", get(query_task))
+        .route("/artifacts/{uuid}/{content_type}", get(download_artifact))
+        .route("/attachments/{uuid}/{*key}", get(download_attachment))
+        .route_layer(middleware::from_fn_with_state(
             st.clone(),
             worker_auth_middleware,
         ))

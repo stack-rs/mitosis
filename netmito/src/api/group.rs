@@ -18,12 +18,12 @@ use crate::{
 pub fn group_router(st: InfraPool) -> Router<InfraPool> {
     Router::new()
         .route("/", post(create_group))
-        .route("/:group", get(get_group))
+        .route("/{group}", get(get_group))
         .route(
-            "/:group/users",
+            "/{group}/users",
             put(update_user_group).delete(remove_user_group),
         )
-        .layer(middleware::from_fn_with_state(
+        .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
         ))

@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0](https://github.com/stack-rs/mitosis/compare/mito-v0.2.0...mito-v0.3.0) - 2025-01-31
+
+### Features
+
+- *(api)* Support admin shutdown coordinator - ([79bf8d1](https://github.com/stack-rs/mitosis/commit/79bf8d1853a9d97fd4f1e2e33245623130f12fe3))
+
+### Bug Fixes
+
+- *(client)* Change interact error message display - ([57e4023](https://github.com/stack-rs/mitosis/commit/57e40239a9bdbdecc4e43dce011534716d391af0))
+- *(task)* Relax local path constraints in spec - ([1282f72](https://github.com/stack-rs/mitosis/commit/1282f72ba01302093a4d634120d6cc0c3efb14f7))
+
 ## [0.2.0](https://github.com/stack-rs/mitosis/compare/mito-v0.1.0...mito-v0.2.0) - 2024-11-15
 
 ### Features

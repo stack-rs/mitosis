@@ -54,7 +54,7 @@ pub async fn user_login(
                 .verify_password(md5_password, &parsed_hash)
                 .is_ok()
             {
-                let sign = StdRng::from_entropy().next_u32() as i64;
+                let sign = StdRng::from_os_rng().next_u32() as i64;
                 let token = generate_token(username, sign)?;
                 let now = TimeDateTimeWithTimeZone::now_utc();
                 let active_user = User::ActiveModel {

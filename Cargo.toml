@@ -15,7 +15,7 @@ keywords = ["distributed", "transport", "evaluation", "network", "utility"]
 categories = ["network-programming", "concurrency", "command-line-utilities"]
 
 [workspace.dependencies]
-clap = { version = "4.5.27", features = ["std", "derive"] }
+clap = { version = "4.5.28", features = ["std", "derive"] }
 jsonwebtoken = "9.3.0"
 md5 = "0.7.0"
 redis = { version = "0.28.2", features = ["tokio-comp"] }

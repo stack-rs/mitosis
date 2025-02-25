@@ -62,7 +62,7 @@ tracing = { workspace = true }
 tracing-appender = "0.2.3"
 tracing-subscriber = { workspace = true }
 url = { version = "2.5.4", features = ["serde"] }
-uuid = { version = "1.13.1", features = ["v4"] }
+uuid = { version = "1.14.0", features = ["v4"] }
 
 [dev-dependencies]
 async-once-cell = "0.5.4"

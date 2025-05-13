@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1](https://github.com/stack-rs/mitosis/compare/mito-v0.3.0...mito-v0.3.1) - 2025-05-13
+
+### Miscellaneous Tasks
+
+- *(release)* Update dist workflow and config - ([a6ecfe3](https://github.com/stack-rs/mitosis/commit/a6ecfe3ea76259ed028b0818fb7d69b5ec72a1e6))
+
 ## [0.3.0](https://github.com/stack-rs/mitosis/compare/mito-v0.2.0...mito-v0.3.0) - 2025-01-31
 
 ### Features

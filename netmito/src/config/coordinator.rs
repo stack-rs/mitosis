@@ -264,9 +264,7 @@ impl CoordinatorConfig {
 
     pub fn build_admin_user(&self) -> crate::error::Result<InitAdminUser> {
         if self.admin_password.len() > 255 || self.admin_user.len() > 255 {
-            Err(crate::error::Error::ConfigError(figment::Error::from(
-                "username or password too long",
-            )))
+            Err(figment::Error::from("username or password too long").into())
         } else {
             Ok(InitAdminUser {
                 username: self.admin_user.clone(),
@@ -320,9 +318,9 @@ impl CoordinatorConfig {
                             tracing_appender::rolling::daily(dir, format!("{}.log", self.bind))
                         })
                 })
-                .ok_or(Error::ConfigError(figment::Error::from(
+                .ok_or(Error::ConfigError(Box::new(figment::Error::from(
                     "log path not valid and cache directory not found",
-                )))?;
+                ))))?;
             let (non_blocking, guard) = tracing_appender::non_blocking(file_logger);
             let env_filter = tracing_subscriber::EnvFilter::try_from_env("MITO_FILE_LOG")
                 .unwrap_or_else(|_| "netmito=info".into());

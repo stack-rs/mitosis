@@ -31,7 +31,7 @@ humantime-serde = "1.1.1"
 jsonwebtoken = { workspace = true }
 matrix_match = "1.0.0"
 md5 = { workspace = true }
-nix = { version = "0.29.0", features = ["process", "signal"] }
+nix = { version = "0.30.1", features = ["process", "signal"] }
 once_cell = "1.21.3"
 ouroboros = "0.18.5"
 path-clean = "1.0.1"

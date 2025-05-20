@@ -145,9 +145,9 @@ impl WorkerConfig {
                             tracing_appender::rolling::never(dir, format!("{}.log", id))
                         })
                 })
-                .ok_or(Error::ConfigError(figment::Error::from(
+                .ok_or(Error::ConfigError(Box::new(figment::Error::from(
                     "log path not valid and cache directory not found",
-                )))?;
+                ))))?;
             let (non_blocking, guard) = tracing_appender::non_blocking(file_logger);
             let env_filter = tracing_subscriber::EnvFilter::try_from_env("MITO_FILE_LOG")
                 .unwrap_or_else(|_| "netmito=info".into());

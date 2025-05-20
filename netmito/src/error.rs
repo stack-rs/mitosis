@@ -16,7 +16,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Invalid configuration {0}")]
-    ConfigError(#[from] figment::Error),
+    ConfigError(Box<figment::Error>),
     #[error("Database error: {0}")]
     DbError(#[from] DbErr),
     #[error("IO error: {0}")]
@@ -32,7 +32,7 @@ pub enum Error {
     #[error("Decode token error: {0}")]
     DecodeTokenError(#[from] DecodeTokenError),
     #[error("S3 error: {0}")]
-    S3Error(#[from] S3Error),
+    S3Error(Box<S3Error>),
     #[error("Parse url error: {0}")]
     ParseUrlError(#[from] url::ParseError),
     #[error("Request error: {0}")]
@@ -122,7 +122,7 @@ pub enum ApiError {
     #[error("Resource quota exceeded")]
     QuotaExceeded,
     #[error(transparent)]
-    PresignS3Error(#[from] S3Error),
+    PresignS3Error(Box<S3Error>),
 }
 
 #[derive(Serialize, Debug, Deserialize)]
@@ -216,5 +216,23 @@ pub(crate) async fn get_error_from_resp(resp: reqwest::Response) -> RequestError
             ClientError::Inner(status_code, resp).into()
         }
         Err(e) => RequestError::Custom(e),
+    }
+}
+
+impl From<figment::Error> for Error {
+    fn from(e: figment::Error) -> Self {
+        Error::ConfigError(Box::new(e))
+    }
+}
+
+impl From<S3Error> for Error {
+    fn from(e: S3Error) -> Self {
+        Error::S3Error(Box::new(e))
+    }
+}
+
+impl From<S3Error> for ApiError {
+    fn from(e: S3Error) -> Self {
+        ApiError::PresignS3Error(Box::new(e))
     }
 }

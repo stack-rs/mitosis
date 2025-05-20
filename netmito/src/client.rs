@@ -329,8 +329,8 @@ impl MitoClient {
                     p
                 })
             })
-            .ok_or(crate::error::Error::ConfigError(figment::Error::from(
-                "credential path not found",
+            .ok_or(crate::error::Error::ConfigError(Box::new(
+                figment::Error::from("credential path not found"),
             )))?;
         let (username, credential) = get_user_credential(
             config.credential_path.as_ref(),

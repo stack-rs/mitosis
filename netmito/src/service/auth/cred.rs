@@ -157,9 +157,9 @@ pub async fn get_user_credential(
                 p
             })
         })
-        .ok_or(Error::ConfigError(figment::Error::from(
+        .ok_or(Error::ConfigError(Box::new(figment::Error::from(
             "credential path not found",
-        )))?;
+        ))))?;
     // Check if the credential is valid
     if cred_path.exists() {
         if let Ok(mut lines) = read_lines(&cred_path).await {

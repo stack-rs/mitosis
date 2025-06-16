@@ -38,7 +38,7 @@ path-clean = "1.0.1"
 priority-queue = "2.5.0"
 rand = "0.9.1"
 redis = { workspace = true }
-reqwest = { version = "0.12.19", features = ["json", "stream"] }
+reqwest = { version = "0.12.20", features = ["json", "stream"] }
 roxmltree = "0.20.0"
 rpassword = "7.4.0"
 sea-orm = { version = "1.1.11", default-features = false, features = [

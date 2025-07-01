@@ -112,7 +112,7 @@ pub async fn get_group(
         .filter(Group::Column::GroupName.eq(&group_name))
         .one(&pool.db)
         .await?
-        .ok_or(ApiError::NotFound(format!("Group {}", group_name)))?;
+        .ok_or(ApiError::NotFound(format!("Group {group_name}")))?;
     let user_group = UserGroup::Entity::find()
         .filter(UserGroup::Column::UserId.eq(user_id))
         .filter(UserGroup::Column::GroupId.eq(group.id))
@@ -219,7 +219,7 @@ pub async fn update_user_group_role(
         .filter(Group::Column::GroupName.eq(&group_name))
         .one(&pool.db)
         .await?
-        .ok_or(ApiError::NotFound(format!("Group {}", group_name)))?;
+        .ok_or(ApiError::NotFound(format!("Group {group_name}")))?;
     let user_group = UserGroup::Entity::find()
         .filter(UserGroup::Column::UserId.eq(user_id))
         .filter(UserGroup::Column::GroupId.eq(group.id))
@@ -276,7 +276,7 @@ pub async fn remove_user_group_role(
         .filter(Group::Column::GroupName.eq(&group_name))
         .one(&pool.db)
         .await?
-        .ok_or(ApiError::NotFound(format!("Group {}", group_name)))?;
+        .ok_or(ApiError::NotFound(format!("Group {group_name}")))?;
     let user_group = UserGroup::Entity::find()
         .filter(UserGroup::Column::UserId.eq(user_id))
         .filter(UserGroup::Column::GroupId.eq(group.id))

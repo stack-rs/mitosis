@@ -68,7 +68,7 @@ impl MitoRedisPubSubClient {
     }
     pub fn get_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<TaskExecState> {
         self.with_connection_mut(|con| {
-            let state: i32 = con.get(format!("task:{}", uuid))?;
+            let state: i32 = con.get(format!("task:{uuid}"))?;
             Ok(TaskExecState::from(state))
         })
     }
@@ -80,7 +80,7 @@ impl MitoRedisPubSubClient {
     {
         let uuids = uuids
             .into_iter()
-            .map(|uuid| format!("task:{}", uuid))
+            .map(|uuid| format!("task:{uuid}"))
             .collect::<Vec<_>>();
         self.with_connection_mut(|con| Ok(con.subscribe(uuids, func)?))
     }
@@ -90,12 +90,12 @@ impl MitoRedisPubSubClient {
     }
 
     pub fn subscribe_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<()> {
-        self.with_pubsub_mut(|pubsub| pubsub.subscribe(format!("task:{}", uuid)))?;
+        self.with_pubsub_mut(|pubsub| pubsub.subscribe(format!("task:{uuid}")))?;
         Ok(())
     }
 
     pub fn unsubscribe_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<()> {
-        self.with_pubsub_mut(|pubsub| pubsub.unsubscribe(format!("task:{}", uuid)))?;
+        self.with_pubsub_mut(|pubsub| pubsub.unsubscribe(format!("task:{uuid}")))?;
         Ok(())
     }
 
@@ -111,7 +111,7 @@ impl MitoRedisClient {
         Ok(MitoRedisClient { client, connection })
     }
     pub fn get_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<TaskExecState> {
-        let state: i32 = self.connection.get(format!("task:{}", uuid))?;
+        let state: i32 = self.connection.get(format!("task:{uuid}"))?;
         Ok(TaskExecState::from(state))
     }
 
@@ -122,7 +122,7 @@ impl MitoRedisClient {
     {
         let uuids = uuids
             .into_iter()
-            .map(|uuid| format!("task:{}", uuid))
+            .map(|uuid| format!("task:{uuid}"))
             .collect::<Vec<_>>();
         Ok(self.connection.subscribe(uuids, func)?)
     }
@@ -168,12 +168,12 @@ impl MitoAsyncRedisClient {
         &mut self,
         uuid: &Uuid,
     ) -> crate::error::Result<TaskExecState> {
-        let state: i32 = self.connection.get(format!("task:{}", uuid)).await?;
+        let state: i32 = self.connection.get(format!("task:{uuid}")).await?;
         Ok(TaskExecState::from(state))
     }
 
     pub async fn subscribe_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<()> {
-        self.pubsub.subscribe(format!("task:{}", uuid)).await?;
+        self.pubsub.subscribe(format!("task:{uuid}")).await?;
         Ok(())
     }
 
@@ -184,7 +184,7 @@ impl MitoAsyncRedisClient {
     }
 
     pub async fn unsubscribe_task_exec_state(&mut self, uuid: &Uuid) -> crate::error::Result<()> {
-        self.pubsub.unsubscribe(format!("task:{}", uuid)).await?;
+        self.pubsub.unsubscribe(format!("task:{uuid}")).await?;
         Ok(())
     }
 
@@ -297,9 +297,9 @@ impl MitoClient {
                                     }
                                 },
                                 ReadCommandOutput::CtrlC | ReadCommandOutput::EmptyLine => {},
-                                ReadCommandOutput::ClapError(error) => println!("{}", error),
+                                ReadCommandOutput::ClapError(error) => println!("{error}"),
                                 ReadCommandOutput::ShlexError => println!("error: Input was not lexically valid, for example it had odd number of \""),
-                                ReadCommandOutput::ReedlineError(error) => println!("error: Reedline failed to work with stdio due to {}", error),
+                                ReadCommandOutput::ReedlineError(error) => println!("error: Reedline failed to work with stdio due to {error}"),
                                 ReadCommandOutput::CtrlD => break,
                             }
                         }
@@ -1016,10 +1016,10 @@ impl MitoClient {
         args: CancelWorkerArgs,
     ) -> crate::error::Result<()> {
         if args.force {
-            self.url.set_path(&format!("user/workers/{}/", uuid));
+            self.url.set_path(&format!("user/workers/{uuid}/"));
             self.url.set_query(Some("op=force"));
         } else {
-            self.url.set_path(&format!("user/workers/{}/", uuid));
+            self.url.set_path(&format!("user/workers/{uuid}/"));
         }
         let resp = self
             .http_client
@@ -1040,7 +1040,7 @@ impl MitoClient {
         uuid: Uuid,
         args: ReplaceWorkerTagsReq,
     ) -> crate::error::Result<()> {
-        self.url.set_path(&format!("user/workers/{}/tags", uuid));
+        self.url.set_path(&format!("user/workers/{uuid}/tags"));
         let resp = self
             .http_client
             .put(self.url.as_str())
@@ -1061,7 +1061,7 @@ impl MitoClient {
         uuid: Uuid,
         args: UpdateGroupWorkerRoleReq,
     ) -> crate::error::Result<()> {
-        self.url.set_path(&format!("user/workers/{}/groups", uuid));
+        self.url.set_path(&format!("user/workers/{uuid}/groups"));
         let resp = self
             .http_client
             .put(self.url.as_str())
@@ -1082,7 +1082,7 @@ impl MitoClient {
         uuid: Uuid,
         args: RemoveGroupWorkerRoleReq,
     ) -> crate::error::Result<()> {
-        self.url.set_path(&format!("user/workers/{}/groups", uuid));
+        self.url.set_path(&format!("user/workers/{uuid}/groups"));
         let resp = self
             .http_client
             .delete(self.url.as_str())
@@ -1099,7 +1099,7 @@ impl MitoClient {
     }
 
     pub async fn cancel_task(&mut self, uuid: Uuid) -> crate::error::Result<()> {
-        self.url.set_path(&format!("user/tasks/{}", uuid));
+        self.url.set_path(&format!("user/tasks/{uuid}"));
         let resp = self
             .http_client
             .delete(self.url.as_str())
@@ -1119,7 +1119,7 @@ impl MitoClient {
         uuid: Uuid,
         args: UpdateTaskLabelsReq,
     ) -> crate::error::Result<()> {
-        self.url.set_path(&format!("user/tasks/{}/labels", uuid));
+        self.url.set_path(&format!("user/tasks/{uuid}/labels"));
         let resp = self
             .http_client
             .put(self.url.as_str())
@@ -1140,7 +1140,7 @@ impl MitoClient {
         uuid: Uuid,
         args: ChangeTaskReq,
     ) -> crate::error::Result<()> {
-        self.url.set_path(&format!("user/tasks/{}", uuid));
+        self.url.set_path(&format!("user/tasks/{uuid}"));
         let resp = self
             .http_client
             .put(self.url.as_str())
@@ -1161,7 +1161,7 @@ impl MitoClient {
         group: String,
         args: UpdateUserGroupRoleReq,
     ) -> crate::error::Result<()> {
-        self.url.set_path(&format!("groups/{}/users", group));
+        self.url.set_path(&format!("groups/{group}/users"));
         let resp = self
             .http_client
             .put(self.url.as_str())
@@ -1182,7 +1182,7 @@ impl MitoClient {
         group: String,
         args: RemoveUserGroupRoleReq,
     ) -> crate::error::Result<()> {
-        self.url.set_path(&format!("groups/{}/users", group));
+        self.url.set_path(&format!("groups/{group}/users"));
         let resp = self
             .http_client
             .delete(self.url.as_str())

@@ -96,10 +96,9 @@ pub async fn get_artifact(
         .one(&pool.db)
         .await?
         .ok_or(crate::error::ApiError::NotFound(format!(
-            "Artifact with uuid {} and content type {}",
-            uuid, content_type
+            "Artifact with uuid {uuid} and content type {content_type}"
         )))?;
-    let key = format!("{}/{}", uuid, content_type);
+    let key = format!("{uuid}/{content_type}");
     let url =
         get_presigned_download_link(&pool.s3, "mitosis-artifacts", key, artifact.size).await?;
     Ok(RemoteResourceDownloadResp {
@@ -159,7 +158,7 @@ pub(crate) async fn group_upload_artifact(
                     .filter(Artifact::Column::ContentType.eq(content_type))
                     .one(txn)
                     .await?;
-                let s3_object_key = format!("{}/{}", uuid, content_type);
+                let s3_object_key = format!("{uuid}/{content_type}");
                 let url: String;
                 // Check group storage quota and allocate storage for the artifact
                 match artifact {
@@ -250,7 +249,7 @@ pub async fn user_upload_artifact(
                 .filter(ArchivedTask::Column::Uuid.eq(uuid))
                 .one(&pool.db)
                 .await?
-                .ok_or(ApiError::NotFound(format!("Task {} not found", uuid)))?;
+                .ok_or(ApiError::NotFound(format!("Task {uuid} not found")))?;
             (task.group_id, StoredTaskModel::Archived(task))
         }
     };
@@ -319,11 +318,9 @@ pub async fn get_attachment(
             {
                 Some(g) => g,
                 None => {
-                    return Err(crate::error::ApiError::NotFound(format!(
-                        "Task with uuid {}",
-                        uuid
-                    ))
-                    .into())
+                    return Err(
+                        crate::error::ApiError::NotFound(format!("Task with uuid {uuid}")).into(),
+                    )
                 }
             }
         }
@@ -334,10 +331,9 @@ pub async fn get_attachment(
         .one(&pool.db)
         .await?
         .ok_or(crate::error::ApiError::NotFound(format!(
-            "Attachment of group {} and key {}",
-            group_name, key
+            "Attachment of group {group_name} and key {key}"
         )))?;
-    let s3_key = format!("{}/{}", group_name, key);
+    let s3_key = format!("{group_name}/{key}");
     let url = get_presigned_download_link(&pool.s3, "mitosis-attachments", s3_key, attachment.size)
         .await?;
     Ok(RemoteResourceDownloadResp {
@@ -357,8 +353,7 @@ pub async fn user_get_attachment_db(
         .one(&pool.db)
         .await?
         .ok_or(crate::error::ApiError::NotFound(format!(
-            "Attachment of group {} and key {}",
-            group_name, key
+            "Attachment of group {group_name} and key {key}"
         )))?
         .id;
     UserGroup::Entity::find()
@@ -373,8 +368,7 @@ pub async fn user_get_attachment_db(
         .one(&pool.db)
         .await?
         .ok_or(crate::error::ApiError::NotFound(format!(
-            "Attachment of group {} and key {}",
-            group_name, key
+            "Attachment of group {group_name} and key {key}"
         )))?;
     Ok(AttachmentMetadata {
         content_type: attachment.content_type,
@@ -395,8 +389,7 @@ pub async fn user_get_attachment(
         .one(&pool.db)
         .await?
         .ok_or(crate::error::ApiError::NotFound(format!(
-            "Attachment of group {} and key {}",
-            group_name, key
+            "Attachment of group {group_name} and key {key}"
         )))?
         .id;
     UserGroup::Entity::find()
@@ -411,10 +404,9 @@ pub async fn user_get_attachment(
         .one(&pool.db)
         .await?
         .ok_or(crate::error::ApiError::NotFound(format!(
-            "Attachment of group {} and key {}",
-            group_name, key
+            "Attachment of group {group_name} and key {key}"
         )))?;
-    let s3_key = format!("{}/{}", group_name, key);
+    let s3_key = format!("{group_name}/{key}");
     let url = get_presigned_download_link(&pool.s3, "mitosis-attachments", s3_key, attachment.size)
         .await?;
     Ok(RemoteResourceDownloadResp {
@@ -440,7 +432,7 @@ pub async fn user_upload_attachment(
         key,
         content_length
     );
-    let s3_object_key = format!("{}/{}", group_name, key);
+    let s3_object_key = format!("{group_name}/{key}");
     if check_attachment_key(&s3_object_key) {
         return Err(ApiError::InvalidRequest(
             "Invalid attachment key. Should be a relative path pointing to a single location without \"./\" or \"../\""
@@ -459,7 +451,7 @@ pub async fn user_upload_attachment(
                     .filter(Group::Column::GroupName.eq(group_name.clone()))
                     .one(txn)
                     .await?
-                    .ok_or(ApiError::NotFound(format!("Group {}", group_name)))?;
+                    .ok_or(ApiError::NotFound(format!("Group {group_name}")))?;
                 if group.state != GroupState::Active {
                     return Err(ApiError::InvalidRequest("Group is not active".to_string()).into());
                 }
@@ -625,10 +617,7 @@ async fn check_task_list_query(
                 .map(|r| r.role);
             if role.is_none() {
                 return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
-                    format!(
-                        "Group with name {} not found or user is not in the group",
-                        group_name
-                    ),
+                    format!("Group with name {group_name} not found or user is not in the group"),
                 )));
             }
         }
@@ -674,8 +663,7 @@ pub async fn query_attachment_list(
         )
         .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name))
         .and_where(
-            Expr::col((Attachment::Entity, Attachment::Column::Key))
-                .like(format!("{}%", key_prefix)),
+            Expr::col((Attachment::Entity, Attachment::Column::Key)).like(format!("{key_prefix}%")),
         );
     if let Some(limit) = query.limit {
         attachment_stmt.limit(limit);

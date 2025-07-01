@@ -30,8 +30,7 @@ impl FromStr for UserGroupRole {
             "write" | "Write" | "WRITE" => Ok(Self::Write),
             "admin" | "Admin" | "ADMIN" => Ok(Self::Admin),
             _ => Err(crate::error::Error::Custom(format!(
-                "Invalid UserGroupRole: {}",
-                s
+                "Invalid UserGroupRole: {s}"
             ))),
         }
     }
@@ -39,7 +38,7 @@ impl FromStr for UserGroupRole {
 
 impl Display for UserGroupRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -69,8 +68,7 @@ impl FromStr for GroupWorkerRole {
             "write" | "Write" | "WRITE" => Ok(Self::Write),
             "admin" | "Admin" | "ADMIN" => Ok(Self::Admin),
             _ => Err(crate::error::Error::Custom(format!(
-                "Invalid GroupWorkerRole: {}",
-                s
+                "Invalid GroupWorkerRole: {s}"
             ))),
         }
     }
@@ -78,6 +76,6 @@ impl FromStr for GroupWorkerRole {
 
 impl Display for GroupWorkerRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }

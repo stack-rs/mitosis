@@ -62,21 +62,21 @@ impl TaskExecutor {
     async fn set_task_state_ex(&mut self, uuid: &Uuid, state: i32, ex: u64) {
         if let Some(ref mut conn) = self.task_redis_conn {
             tracing::trace!("Set task state: {} -> {}", uuid, state);
-            let _: Result<String, _> = conn.set_ex(format!("task:{}", uuid), state, ex).await;
+            let _: Result<String, _> = conn.set_ex(format!("task:{uuid}"), state, ex).await;
         }
     }
 
     async fn set_task_state(&mut self, uuid: &Uuid, state: i32) {
         if let Some(ref mut conn) = self.task_redis_conn {
             tracing::trace!("Set task state: {} -> {}", uuid, state);
-            let _: Result<String, _> = conn.set(format!("task:{}", uuid), state).await;
+            let _: Result<String, _> = conn.set(format!("task:{uuid}"), state).await;
         }
     }
 
     async fn get_task_state(&mut self, uuid: &Uuid) -> Option<TaskExecState> {
         if let Some(ref mut conn) = self.task_redis_conn {
             tracing::trace!("Get task state: {}", uuid);
-            let state: Result<i32, _> = conn.get(format!("task:{}", uuid)).await;
+            let state: Result<i32, _> = conn.get(format!("task:{uuid}")).await;
             state.ok().map(TaskExecState::from)
         } else {
             None
@@ -86,7 +86,7 @@ impl TaskExecutor {
     async fn publish_state(&mut self, uuid: &Uuid, state: i32) {
         if let Some(ref mut conn) = self.task_redis_conn {
             tracing::trace!("Publish task state: {} -> {}", uuid, state);
-            let _: Result<i32, _> = conn.publish(format!("task:{}", uuid), state).await;
+            let _: Result<i32, _> = conn.publish(format!("task:{uuid}"), state).await;
         }
     }
 
@@ -104,7 +104,7 @@ impl TaskExecutor {
         tracing::debug!("Watch task: {} -> {:?}", uuid, state);
         let mut wait_until = Instant::now();
         if let Some(pubsub) = self.task_redis_pubsub.as_mut() {
-            let channel_name = format!("task:{}", uuid);
+            let channel_name = format!("task:{uuid}");
             let _ = pubsub.subscribe(&channel_name).await;
             let mut stream = pubsub.on_message();
             loop {
@@ -126,7 +126,7 @@ impl TaskExecutor {
                         wait_until = Instant::now() + std::time::Duration::from_secs(30);
                         let cur_state = if let Some(ref mut conn) = self.task_redis_conn {
                             tracing::trace!("Get task state: {}", uuid);
-                            let state: Result<i32, _> = conn.get(format!("task:{}", uuid)).await;
+                            let state: Result<i32, _> = conn.get(format!("task:{uuid}")).await;
                             state.ok().map(TaskExecState::from)
                         } else {
                             None
@@ -137,7 +137,7 @@ impl TaskExecutor {
                             }
                         }
                         self.task_url
-                            .set_path(format!("worker/tasks/{}", uuid).as_str());
+                            .set_path(format!("worker/tasks/{uuid}").as_str());
                         let resp = self
                             .task_client
                             .get(self.task_url.as_str())
@@ -177,7 +177,7 @@ impl TaskExecutor {
                     }
                 }
                 self.task_url
-                    .set_path(format!("worker/tasks/{}", uuid).as_str());
+                    .set_path(format!("worker/tasks/{uuid}").as_str());
                 let resp = self
                     .task_client
                     .get(self.task_url.as_str())
@@ -210,13 +210,13 @@ impl TaskExecutor {
 
     pub async fn subscribe_task_exec_state(&mut self, uuid: &Uuid) {
         if let Some(pubsub) = self.task_redis_pubsub.as_mut() {
-            let _ = pubsub.subscribe(format!("task:{}", uuid)).await;
+            let _ = pubsub.subscribe(format!("task:{uuid}")).await;
         }
     }
 
     pub async fn unsubscribe_task_exec_state(&mut self, uuid: &Uuid) {
         if let Some(pubsub) = self.task_redis_pubsub.as_mut() {
-            let _ = pubsub.unsubscribe(format!("task:{}", uuid)).await;
+            let _ = pubsub.unsubscribe(format!("task:{uuid}")).await;
         }
     }
 }
@@ -584,7 +584,7 @@ async fn execute_task(
                 let content_serde_str = content_serde_val.as_str().unwrap_or("result");
                 task_executor
                     .task_url
-                    .set_path(&format!("worker/artifacts/{}/{}", uuid, content_serde_str));
+                    .set_path(&format!("worker/artifacts/{uuid}/{content_serde_str}"));
             }
             RemoteResource::Attachment { key } => {
                 task_executor
@@ -1317,8 +1317,7 @@ async fn process_task_result(
                             } else {
                                 let status = resp.status();
                                 return Err(Error::Custom(format!(
-                                    "Upload failed with status code: {}",
-                                    status
+                                    "Upload failed with status code: {status}"
                                 )));
                             }
                         }

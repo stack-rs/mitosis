@@ -263,10 +263,7 @@ pub async fn unregister_worker(worker_id: i64, pool: &InfraPool) -> crate::error
     let worker = Worker::Entity::find_by_id(worker_id)
         .one(&pool.db)
         .await?
-        .ok_or(ApiError::NotFound(format!(
-            "Worker {} not found",
-            worker_id
-        )))?;
+        .ok_or(ApiError::NotFound(format!("Worker {worker_id} not found")))?;
     remove_worker(worker, pool).await
 }
 
@@ -280,8 +277,7 @@ pub async fn remove_worker_by_uuid(
         .one(&pool.db)
         .await?
         .ok_or(ApiError::NotFound(format!(
-            "Worker {} not found",
-            worker_uuid
+            "Worker {worker_uuid} not found"
         )))?;
     match op {
         WorkerShutdownOp::Force => remove_worker(worker, pool).await?,
@@ -313,8 +309,7 @@ pub async fn user_remove_worker_by_uuid(
         .one(&pool.db)
         .await?
         .ok_or(ApiError::NotFound(format!(
-            "Worker {} not found",
-            worker_uuid
+            "Worker {worker_uuid} not found"
         )))?;
     let stmt = Query::select()
         .column((Group::Entity, Group::Column::GroupName))
@@ -428,7 +423,7 @@ pub async fn fetch_task(
         } else {
             match rx
                 .await
-                .map_err(|e| Error::Custom(format!("recv fetch task failed: {:?}", e)))?
+                .map_err(|e| Error::Custom(format!("recv fetch task failed: {e:?}")))?
             {
                 Some(id) => {
                     let now = TimeDateTimeWithTimeZone::now_utc();
@@ -476,13 +471,13 @@ pub async fn report_task(
     let task = ActiveTask::Entity::find_by_id(task_id)
         .one(&pool.db)
         .await?
-        .ok_or(ApiError::NotFound(format!("Task {} not found", task_id)))?;
+        .ok_or(ApiError::NotFound(format!("Task {task_id} not found")))?;
     if let Some(w_id) = task.assigned_worker {
         if w_id != worker_id {
-            return Err(ApiError::NotFound(format!("Task {} not found", task_id)).into());
+            return Err(ApiError::NotFound(format!("Task {task_id} not found")).into());
         }
     } else {
-        return Err(ApiError::NotFound(format!("Task {} not found", task_id)).into());
+        return Err(ApiError::NotFound(format!("Task {task_id} not found")).into());
     }
     match op {
         ReportTaskOp::Finish => {
@@ -650,7 +645,7 @@ pub async fn get_worker(
     let worker = RawWorkerQueryInfo::find_by_statement(builder.build(&stmt))
         .one(&pool.db)
         .await?
-        .ok_or(ApiError::NotFound(format!("Worker {}", worker_id)))?;
+        .ok_or(ApiError::NotFound(format!("Worker {worker_id}")))?;
     let id = worker.id;
     let info = worker.into();
     let group_stmt = Query::select()
@@ -813,8 +808,7 @@ pub async fn user_replace_worker_tags(
         .one(&pool.db)
         .await?
         .ok_or(ApiError::NotFound(format!(
-            "Worker {} not found",
-            worker_uuid
+            "Worker {worker_uuid} not found"
         )))?;
     let stmt = Query::select()
         .column((Group::Entity, Group::Column::GroupName))
@@ -878,8 +872,7 @@ pub async fn user_update_worker_groups(
         .one(&pool.db)
         .await?
         .ok_or(ApiError::NotFound(format!(
-            "Worker {} not found",
-            worker_uuid
+            "Worker {worker_uuid} not found"
         )))?;
     let stmt = Query::select()
         .column((Group::Entity, Group::Column::GroupName))
@@ -962,8 +955,7 @@ pub async fn user_remove_worker_groups(
         .one(&pool.db)
         .await?
         .ok_or(ApiError::NotFound(format!(
-            "Worker {} not found",
-            worker_uuid
+            "Worker {worker_uuid} not found"
         )))?;
     let stmt = Query::select()
         .column((Group::Entity, Group::Column::GroupName))

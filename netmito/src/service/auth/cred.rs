@@ -89,7 +89,7 @@ async fn extract_credential(
     match user {
         // Specify the user, let us try to find the credential for the user
         Some(user) => {
-            let prefix = format!("{}:", user);
+            let prefix = format!("{user}:");
             while let Some(line) = lines.next_line().await? {
                 if line.starts_with(&prefix) {
                     if let Some((username, token)) = expect_two!(line.splitn(2, ':')) {
@@ -119,22 +119,22 @@ async fn modify_or_append_credential(
     if cred_path.exists() {
         let mut lines = read_lines(cred_path).await?;
         let mut new_lines = Vec::new();
-        let prefix = format!("{}:", username);
+        let prefix = format!("{username}:");
         let mut found = false;
         while let Some(line) = lines.next_line().await? {
             if line.starts_with(&prefix) {
-                new_lines.push(format!("{}:{}", username, token));
+                new_lines.push(format!("{username}:{token}"));
                 found = true;
             } else {
                 new_lines.push(line);
             }
         }
         if !found {
-            new_lines.push(format!("{}:{}", username, token));
+            new_lines.push(format!("{username}:{token}"));
         }
         tokio::fs::write(cred_path, new_lines.join("\n")).await?;
     } else {
-        tokio::fs::write(cred_path, format!("{}:{}", username, token)).await?;
+        tokio::fs::write(cred_path, format!("{username}:{token}")).await?;
     }
     Ok(())
 }
@@ -190,7 +190,7 @@ pub async fn get_user_credential(
     tracing::warn!("Local credential not found or invalid, need to login");
     let username = user
         .map(|u| {
-            println!("Username: {}", u);
+            println!("Username: {u}");
             Ok::<_, std::io::Error>(u.clone())
         })
         .unwrap_or_else(|| {

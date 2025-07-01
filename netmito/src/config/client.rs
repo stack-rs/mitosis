@@ -578,7 +578,7 @@ pub struct RemoveUserGroupArgs {
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            coordinator_addr: Url::parse(&format!("http://{}", DEFAULT_COORDINATOR_ADDR)).unwrap(),
+            coordinator_addr: Url::parse(&format!("http://{DEFAULT_COORDINATOR_ADDR}")).unwrap(),
             credential_path: None,
             user: None,
             password: None,

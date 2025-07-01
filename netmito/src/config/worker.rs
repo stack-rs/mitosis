@@ -87,7 +87,7 @@ pub struct WorkerConfigCli {
 impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
-            coordinator_addr: Url::parse(&format!("http://{}", DEFAULT_COORDINATOR_ADDR)).unwrap(),
+            coordinator_addr: Url::parse(&format!("http://{DEFAULT_COORDINATOR_ADDR}")).unwrap(),
             polling_interval: Duration::from_secs(180),
             heartbeat_interval: Duration::from_secs(300),
             credential_path: None,
@@ -142,7 +142,7 @@ impl WorkerConfig {
                         })
                         .map(|dir| {
                             let id = worker_id.into();
-                            tracing_appender::rolling::never(dir, format!("{}.log", id))
+                            tracing_appender::rolling::never(dir, format!("{id}.log"))
                         })
                 })
                 .ok_or(Error::ConfigError(Box::new(figment::Error::from(

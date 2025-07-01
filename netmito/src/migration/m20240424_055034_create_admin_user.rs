@@ -25,8 +25,7 @@ impl MigrationTrait for Migration {
                     Ok(())
                 }
                 _ => Err(DbErr::Custom(format!(
-                    "Error creating default admin user: {}",
-                    e
+                    "Error creating default admin user: {e}"
                 ))),
             },
         }

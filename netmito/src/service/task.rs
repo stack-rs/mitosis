@@ -64,8 +64,7 @@ pub async fn user_submit_task(
         .await?;
     if group.is_empty() {
         return Err(Error::ApiError(crate::error::ApiError::NotFound(format!(
-            "User or group with name {}",
-            group_name
+            "User or group with name {group_name}"
         ))));
     }
     let group = group.into_iter().next().unwrap();
@@ -157,8 +156,7 @@ pub async fn user_change_task(
                     .one(txn)
                     .await?
                     .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
-                        "Task with uuid {}",
-                        uuid
+                        "Task with uuid {uuid}"
                     ))))?;
                 let user_group_role = UserGroup::Entity::find()
                     .filter(UserGroup::Column::UserId.eq(user_id))
@@ -278,8 +276,7 @@ pub async fn user_change_task_labels(
                         .one(txn)
                         .await?
                         .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
-                            "Task with uuid {}",
-                            uuid
+                            "Task with uuid {uuid}"
                         ))))?;
                     let user_group_role = UserGroup::Entity::find()
                         .filter(UserGroup::Column::UserId.eq(user_id))
@@ -325,8 +322,7 @@ pub async fn user_cancel_task(
                     .one(txn)
                     .await?
                     .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
-                        "Task with uuid {}",
-                        uuid
+                        "Task with uuid {uuid}"
                     ))))?;
                 let user_group_role = UserGroup::Entity::find()
                     .filter(UserGroup::Column::UserId.eq(user_id))
@@ -470,8 +466,7 @@ pub async fn get_task(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<Task
         }
     }
     .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
-        "Task with uuid {}",
-        uuid
+        "Task with uuid {uuid}"
     ))))?;
     let artifacts: Vec<ArtifactQueryResp> = Artifact::Entity::find()
         .filter(Artifact::Column::TaskId.eq(uuid))
@@ -545,10 +540,7 @@ async fn check_task_list_query(
                 .map(|r| r.role);
             if role.is_none() {
                 return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
-                    format!(
-                        "Group with name {} not found or user is not in the group",
-                        group_name
-                    ),
+                    format!("Group with name {group_name} not found or user is not in the group"),
                 )));
             }
         }

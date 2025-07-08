@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.2](https://github.com/stack-rs/mitosis/compare/mito-v0.3.1...mito-v0.3.2) - 2025-07-08
+
+### Miscellaneous Tasks
+
+- *(dist)* Fix dist runner image - ([b76d7d0](https://github.com/stack-rs/mitosis/commit/b76d7d0658479e51d097c285ff54a5c2e37862e4))
+
 ## [0.3.1](https://github.com/stack-rs/mitosis/compare/mito-v0.3.0...mito-v0.3.1) - 2025-07-08
 
 ### Styling

@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.3](https://github.com/stack-rs/mitosis/compare/mito-v0.3.2...mito-v0.3.3) - 2025-07-15
+
+### Features
+
+- *(worker)* Support specify group role on register - ([3226def](https://github.com/stack-rs/mitosis/commit/3226def828433ed107f9d57fd0e8daac2e04918b))
+
+### Documentation
+
+- *(guide)* Update installation instructions - ([0d9ecff](https://github.com/stack-rs/mitosis/commit/0d9ecff0c2e65ccb774faaf7ffa90e05153e0a9c))
+
 ## [0.3.2](https://github.com/stack-rs/mitosis/compare/mito-v0.3.1...mito-v0.3.2) - 2025-07-08
 
 ### Miscellaneous Tasks

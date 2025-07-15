@@ -16,7 +16,7 @@ To make it easier to run, put the path to the binary into your `PATH` or install
 For example, do the following on Linux:
 
 ```bash
-wget https://github.com/stack-rs/mitosis/releases/download/mito-v0.1.0/mito-x86_64-unknown-linux-gnu.tar.xz
+wget https://github.com/stack-rs/mitosis/releases/download/mito-v0.3.2/mito-x86_64-unknown-linux-gnu.tar.xz
 tar xf mito-x86_64-unknown-linux-gnu.tar.xz
 cd mito-x86_64-unknown-linux-gnu
 sudo install -m 755 mito /usr/local/bin/mito
@@ -25,7 +25,7 @@ sudo install -m 755 mito /usr/local/bin/mito
 We also have a installer script that you can use to install the latest version of Mitosis. You can change the version number in the URL to install a specific version. This script will install the binary in the `$HOME/.cargo/bin` directory.
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.1.0/mito-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.3.2/mito-installer.sh | sh
 ```
 
 [releases]: https://github.com/stack-rs/mitosis/releases
@@ -61,7 +61,7 @@ To uninstall, run the command `cargo uninstall mito`.
 
 The version published to crates.io will ever so slightly be behind the version hosted on GitHub.
 If you need the latest version you can build the git version of mito yourself.
-Cargo makes this ***super easy***!
+Cargo makes this **_super easy_**!
 
 ```bash
 cargo install --git https://github.com/stack-rs/mitosis.git mito
@@ -80,6 +80,17 @@ cargo build --release
 ```
 
 Then you can find the binary in `target/release/mito` and install or run it as you like.
+
+If you encounter compilation errors on rustls or aws-lc-sys in older Linux distributions, check gcc version and consider updating it.
+For example:
+
+```bash
+sudo apt update -y
+sudo apt upgrade -y
+sudo apt install -y build-essential
+sudo apt install -y gcc-10 g++-10 cpp-10
+sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 --slave /usr/bin/g++ g++ /usr/bin/g++-10 --slave /usr/bin/gcov gcov /usr/bin/gcov-10
+```
 
 ## Modifying and contributing
 

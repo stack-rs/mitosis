@@ -44,7 +44,17 @@ impl Display for UserGroupRole {
 
 /// The role of a group to a worker.
 #[derive(
-    EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, ValueEnum,
+    EnumIter,
+    DeriveActiveEnum,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    ValueEnum,
+    Copy,
 )]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum GroupWorkerRole {

@@ -1,14 +1,20 @@
 pub mod heartbeat;
 pub mod queue;
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
 
 pub use heartbeat::{HeartbeatOp, HeartbeatQueue};
 pub use queue::{TaskDispatcher, TaskDispatcherOp};
 
 use sea_orm::{
     prelude::*,
-    sea_query::{extension::postgres::PgExpr, Alias, Nullable, OnConflict, PgFunc, Query},
+    sea_query::{
+        extension::postgres::PgExpr, Alias, Asterisk, CommonTableExpression, Nullable, OnConflict,
+        PgFunc, Query, WithClause,
+    },
     FromQueryResult, QuerySelect, Set, TransactionTrait,
 };
 
@@ -32,7 +38,7 @@ use crate::{
 pub async fn register_worker(
     creator_id: i64,
     tags: Vec<String>,
-    groups: Vec<String>,
+    mut groups: Vec<String>,
     pool: &InfraPool,
 ) -> crate::error::Result<Uuid> {
     let uuid = uuid::Uuid::new_v4();
@@ -47,60 +53,80 @@ pub async fn register_worker(
         ..Default::default()
     };
     let worker = worker.insert(&pool.db).await?;
-    if !groups.is_empty() {
-        let write_groups: Vec<i64> = Group::Entity::find()
-            .filter(Expr::col(Group::Column::GroupName).eq(sea_orm::sea_query::PgFunc::any(groups)))
-            .select_only()
-            .column(Group::Column::Id)
-            .into_tuple()
-            .all(&pool.db)
-            .await?;
-        let write_group_relations =
-            write_groups
-                .into_iter()
-                .map(|group_id| GroupWorker::ActiveModel {
-                    group_id: Set(group_id),
-                    worker_id: Set(worker.id),
-                    role: Set(GroupWorkerRole::Write),
-                    ..Default::default()
-                });
-        GroupWorker::Entity::insert_many(write_group_relations)
-            .exec(&pool.db)
-            .await?;
-    }
+    let mut group_roles: HashMap<String, GroupWorkerRole> = if groups.is_empty() {
+        HashMap::new()
+    } else {
+        groups
+            .drain(..)
+            .filter_map(|g| {
+                let split = g.split(':').collect::<Vec<&str>>();
+                if split.len() == 1 {
+                    Some((split[0].to_string(), GroupWorkerRole::Write))
+                    // group_roles.insert(split[0], GroupWorkerRole::Write);
+                } else if split.len() == 2 {
+                    Some((
+                        split[0].to_string(),
+                        GroupWorkerRole::from_str(split[1]).unwrap_or(GroupWorkerRole::Write),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    let user = User::Entity::find_by_id(creator_id)
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    group_roles.insert(user.username, GroupWorkerRole::Admin);
 
-    let builder = pool.db.get_database_backend();
-    let group_id_stmt = Query::select()
-        .column((Group::Entity, Group::Column::Id))
-        .from(Group::Entity)
-        .join(
-            sea_orm::JoinType::Join,
-            User::Entity,
-            Expr::col((User::Entity, User::Column::Username))
-                .eq(Expr::col((Group::Entity, Group::Column::GroupName))),
+    // Create the CTE query for group data
+    let group_data_cte = Query::select()
+        .column(Asterisk)
+        .from_values(
+            group_roles
+                .drain()
+                .map(|(name, role)| (Value::from(name), role.to_value())),
+            Alias::new("group_data"),
         )
-        .and_where(User::Column::Id.eq(creator_id))
+        // .columns([Alias::new("group_name"), Alias::new("role")])
         .to_owned();
-    let group_id: Option<PartialGroupId> =
-        PartialGroupId::find_by_statement(builder.build(&group_id_stmt))
-            .one(&pool.db)
-            .await?;
-    if let Some(PartialGroupId { id }) = group_id {
-        let admin_group_relation = GroupWorker::ActiveModel {
-            group_id: Set(id),
-            worker_id: Set(worker.id),
-            role: Set(GroupWorkerRole::Admin),
-            ..Default::default()
-        };
-        GroupWorker::Entity::insert(admin_group_relation)
-            .on_conflict(
-                OnConflict::columns([GroupWorker::Column::GroupId, GroupWorker::Column::WorkerId])
-                    .update_column(GroupWorker::Column::Role)
-                    .to_owned(),
-            )
-            .exec(&pool.db)
-            .await?;
-    }
+    let mut group_data_cte = CommonTableExpression::from_select(group_data_cte);
+    group_data_cte
+        .table_name("group_data")
+        .column("group_name")
+        .column("role");
+    let with_clause = WithClause::new().cte(group_data_cte).to_owned();
+
+    // Create the select query that references the CTE
+    let select_query = Query::select()
+        .column((Group::Entity, Group::Column::Id))
+        .expr(Expr::val(worker.id))
+        .column((Alias::new("group_data"), Alias::new("role")))
+        .from(Group::Entity)
+        .inner_join(
+            Alias::new("group_data"),
+            Expr::col((Group::Entity, Group::Column::GroupName))
+                .equals((Alias::new("group_data"), Alias::new("group_name"))),
+        )
+        .to_owned();
+
+    // INSERT query with WITH clause
+    let insert_query = Query::insert()
+        .with_cte(with_clause)
+        .into_table(GroupWorker::Entity)
+        .columns([
+            GroupWorker::Column::GroupId,
+            GroupWorker::Column::WorkerId,
+            GroupWorker::Column::Role,
+        ])
+        .select_from(select_query)
+        .expect("Failed to build insert query for group_worker")
+        .to_owned();
+    pool.db
+        .execute(pool.db.get_database_backend().build(&insert_query))
+        .await?;
+
     setup_worker_queues(pool, worker.id, worker.tags).await?;
     Ok(worker.worker_id)
 }
@@ -171,11 +197,6 @@ async fn setup_worker_queues(
             Ok(())
         }
     }
-}
-
-#[derive(Debug, Clone, FromQueryResult)]
-struct PartialGroupId {
-    id: i64,
 }
 
 #[derive(Debug, Clone, FromQueryResult)]

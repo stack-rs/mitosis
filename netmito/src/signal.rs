@@ -28,5 +28,5 @@ pub(crate) async fn shutdown_signal(cancel_token: CancellationToken) {
             tracing::warn!("Cancellation token received");
         },
     }
-    tracing::warn!("Shutting down Axum server");
+    tracing::warn!("Shutting down...");
 }

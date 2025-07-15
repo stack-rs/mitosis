@@ -11,5 +11,5 @@ pub fn name_validator(name: &str) -> bool {
         && l < 256
         && name
             .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }

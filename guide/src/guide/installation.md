@@ -12,20 +12,22 @@ Executable binaries are available for download on the [GitHub Releases page][rel
 Download the binary and extract the archive.
 The archive contains an `mito` executable which you can run to start your distributed platform.
 
+We have a installer script that you can use to install Mitosis (you may need to adjust the version number in the URL to the latest in the [releases] page).
+You can also change the version number in the URL to install a specific version. This script will install the binary in the `$HOME/.cargo/bin` directory.
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.3.2/mito-installer.sh | sh
+```
+
+You can also download the binary directly from the [releases] page and install it manually.
 To make it easier to run, put the path to the binary into your `PATH` or install it in a directory that is already in your `PATH`.
-For example, do the following on Linux:
+For example, do the following on Linux (you may need to adjust the version number to the latest in the URL):
 
 ```bash
 wget https://github.com/stack-rs/mitosis/releases/download/mito-v0.3.2/mito-x86_64-unknown-linux-gnu.tar.xz
 tar xf mito-x86_64-unknown-linux-gnu.tar.xz
 cd mito-x86_64-unknown-linux-gnu
 sudo install -m 755 mito /usr/local/bin/mito
-```
-
-We also have a installer script that you can use to install the latest version of Mitosis. You can change the version number in the URL to install a specific version. This script will install the binary in the `$HOME/.cargo/bin` directory.
-
-```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.3.2/mito-installer.sh | sh
 ```
 
 [releases]: https://github.com/stack-rs/mitosis/releases

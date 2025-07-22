@@ -44,6 +44,23 @@ For example, to change the polling interval, you can run:
 mito worker --config /path/to/worker.toml --polling-interval 5m
 ```
 
+You can also specify the groups and their roles to this Worker using the `--groups` argument.
+The default roles for the groups are `Write`, meaning that the groups can submit tasks to this Worker.
+Groups have `Read` roles can query the Worker for its status and tasks.
+Groups have `Admin` roles can manage the Worker, such as stopping it or changing its configuration.
+
+```bash
+mito worker --config /path/to/worker.toml --groups group1,group2:write,group3:read,group4:admin
+```
+
+This will grant group1 and group2 `Write` roles, group3 `Read` role, and group4 `Admin` role to the Worker.
+The user who creates the Worker will be automatically granted the `Admin` role of the Worker.
+
+Another important argument is `--tags`, the tags of the Worker.
+It defines the characteristics of the Worker, such as its capabilities or the type of tasks it can handle.
+It is designed for some specific tasks who has special requirements on Workers.
+Only when a Worker's tags are empty or are the subset of the task's tags, the Worker can fetch the task.
+
 The full list of command-line arguments can be found by running `mito worker --help`:
 
 ```txt

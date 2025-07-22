@@ -13,6 +13,16 @@ enabling clients to subscribe to and query more comprehensive details regarding 
 
 For those services, you can use the docker-compose file provided in the repository.
 First, Copy `.env.example` to `.env` and set the variables in it.
+You have file variables to configure:
+
+```txt
+DB_USERNAME=
+DB_PASSWORD=
+S3_USERNAME=
+S3_PASSWORD=
+KV_PASSWORD=
+```
+
 And then, run the following command to start the services:
 
 ```bash
@@ -45,7 +55,9 @@ s3_secret_key = "mitosis_secret"
 # redis_url is not set. It should be in format like "redis://:mitosis@localhost"
 # redis_worker_password is not set by default and will be generated randomly
 # redis_client_password is not set by default and will be generated randomly
+# admin_user specifies the username of the admin user created on startup
 admin_user = "mitosis_admin"
+# admin_password specifies the password of the admin user created on startup
 admin_password = "mitosis_admin"
 access_token_private_path = "private.pem"
 access_token_public_path = "public.pem"

@@ -190,7 +190,14 @@ The Redis server is an optional service that acts as a pub/sub provider,
 enabling clients to subscribe to and query more comprehensive details regarding the execution status of tasks.</p>
 <p>For those services, you can use the docker-compose file provided in the repository.
 First, Copy <code>.env.example</code> to <code>.env</code> and set the variables in it.
-And then, run the following command to start the services:</p>
+You have file variables to configure:</p>
+<pre><code class="language-txt">DB_USERNAME=
+DB_PASSWORD=
+S3_USERNAME=
+S3_PASSWORD=
+KV_PASSWORD=
+</code></pre>
+<p>And then, run the following command to start the services:</p>
 <pre><code class="language-bash">docker-compose up -d
 </code></pre>
 <p>The Coordinator also requires a private and public key pair to sign and verify access tokens.
@@ -212,7 +219,9 @@ s3_secret_key = "mitosis_secret"
 # redis_url is not set. It should be in format like "redis://:mitosis@localhost"
 # redis_worker_password is not set by default and will be generated randomly
 # redis_client_password is not set by default and will be generated randomly
+# admin_user specifies the username of the admin user created on startup
 admin_user = "mitosis_admin"
+# admin_password specifies the password of the admin user created on startup
 admin_password = "mitosis_admin"
 access_token_private_path = "private.pem"
 access_token_public_path = "public.pem"

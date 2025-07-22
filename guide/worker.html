@@ -211,6 +211,18 @@ Note that the names of command-line arguments may not be the same as those in th
 For example, to change the polling interval, you can run:</p>
 <pre><code class="language-bash">mito worker --config /path/to/worker.toml --polling-interval 5m
 </code></pre>
+<p>You can also specify the groups and their roles to this Worker using the <code>--groups</code> argument.
+The default roles for the groups are <code>Write</code>, meaning that the groups can submit tasks to this Worker.
+Groups have <code>Read</code> roles can query the Worker for its status and tasks.
+Groups have <code>Admin</code> roles can manage the Worker, such as stopping it or changing its configuration.</p>
+<pre><code class="language-bash">mito worker --config /path/to/worker.toml --groups group1,group2:write,group3:read,group4:admin
+</code></pre>
+<p>This will grant group1 and group2 <code>Write</code> roles, group3 <code>Read</code> role, and group4 <code>Admin</code> role to the Worker.
+The user who creates the Worker will be automatically granted the <code>Admin</code> role of the Worker.</p>
+<p>Another important argument is <code>--tags</code>, the tags of the Worker.
+It defines the characteristics of the Worker, such as its capabilities or the type of tasks it can handle.
+It is designed for some specific tasks who has special requirements on Workers.
+Only when a Worker's tags are empty or are the subset of the task's tags, the Worker can fetch the task.</p>
 <p>The full list of command-line arguments can be found by running <code>mito worker --help</code>:</p>
 <pre><code class="language-txt">Run a mitosis worker
 

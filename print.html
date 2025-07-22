@@ -204,15 +204,17 @@ Choose any one of the methods below that best suit your needs.</p>
 <p>Executable binaries are available for download on the <a href="https://github.com/stack-rs/mitosis/releases">GitHub Releases page</a>.
 Download the binary and extract the archive.
 The archive contains an <code>mito</code> executable which you can run to start your distributed platform.</p>
-<p>To make it easier to run, put the path to the binary into your <code>PATH</code> or install it in a directory that is already in your <code>PATH</code>.
-For example, do the following on Linux:</p>
+<p>We have a installer script that you can use to install Mitosis (you may need to adjust the version number in the URL to the latest in the <a href="https://github.com/stack-rs/mitosis/releases">releases</a> page).
+You can also change the version number in the URL to install a specific version. This script will install the binary in the <code>$HOME/.cargo/bin</code> directory.</p>
+<pre><code class="language-bash">curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.3.2/mito-installer.sh | sh
+</code></pre>
+<p>You can also download the binary directly from the <a href="https://github.com/stack-rs/mitosis/releases">releases</a> page and install it manually.
+To make it easier to run, put the path to the binary into your <code>PATH</code> or install it in a directory that is already in your <code>PATH</code>.
+For example, do the following on Linux (you may need to adjust the version number to the latest in the URL):</p>
 <pre><code class="language-bash">wget https://github.com/stack-rs/mitosis/releases/download/mito-v0.3.2/mito-x86_64-unknown-linux-gnu.tar.xz
 tar xf mito-x86_64-unknown-linux-gnu.tar.xz
 cd mito-x86_64-unknown-linux-gnu
 sudo install -m 755 mito /usr/local/bin/mito
-</code></pre>
-<p>We also have a installer script that you can use to install the latest version of Mitosis. You can change the version number in the URL to install a specific version. This script will install the binary in the <code>$HOME/.cargo/bin</code> directory.</p>
-<pre><code class="language-bash">curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.3.2/mito-installer.sh | sh
 </code></pre>
 <h2 id="build-from-source-using-rust"><a class="header" href="#build-from-source-using-rust">Build from source using Rust</a></h2>
 <h3 id="dependencies"><a class="header" href="#dependencies">Dependencies</a></h3>
@@ -262,7 +264,14 @@ The Redis server is an optional service that acts as a pub/sub provider,
 enabling clients to subscribe to and query more comprehensive details regarding the execution status of tasks.</p>
 <p>For those services, you can use the docker-compose file provided in the repository.
 First, Copy <code>.env.example</code> to <code>.env</code> and set the variables in it.
-And then, run the following command to start the services:</p>
+You have file variables to configure:</p>
+<pre><code class="language-txt">DB_USERNAME=
+DB_PASSWORD=
+S3_USERNAME=
+S3_PASSWORD=
+KV_PASSWORD=
+</code></pre>
+<p>And then, run the following command to start the services:</p>
 <pre><code class="language-bash">docker-compose up -d
 </code></pre>
 <p>The Coordinator also requires a private and public key pair to sign and verify access tokens.
@@ -284,7 +293,9 @@ s3_secret_key = "mitosis_secret"
 # redis_url is not set. It should be in format like "redis://:mitosis@localhost"
 # redis_worker_password is not set by default and will be generated randomly
 # redis_client_password is not set by default and will be generated randomly
+# admin_user specifies the username of the admin user created on startup
 admin_user = "mitosis_admin"
+# admin_password specifies the password of the admin user created on startup
 admin_password = "mitosis_admin"
 access_token_private_path = "private.pem"
 access_token_public_path = "public.pem"
@@ -379,6 +390,18 @@ Note that the names of command-line arguments may not be the same as those in th
 For example, to change the polling interval, you can run:</p>
 <pre><code class="language-bash">mito worker --config /path/to/worker.toml --polling-interval 5m
 </code></pre>
+<p>You can also specify the groups and their roles to this Worker using the <code>--groups</code> argument.
+The default roles for the groups are <code>Write</code>, meaning that the groups can submit tasks to this Worker.
+Groups have <code>Read</code> roles can query the Worker for its status and tasks.
+Groups have <code>Admin</code> roles can manage the Worker, such as stopping it or changing its configuration.</p>
+<pre><code class="language-bash">mito worker --config /path/to/worker.toml --groups group1,group2:write,group3:read,group4:admin
+</code></pre>
+<p>This will grant group1 and group2 <code>Write</code> roles, group3 <code>Read</code> role, and group4 <code>Admin</code> role to the Worker.
+The user who creates the Worker will be automatically granted the <code>Admin</code> role of the Worker.</p>
+<p>Another important argument is <code>--tags</code>, the tags of the Worker.
+It defines the characteristics of the Worker, such as its capabilities or the type of tasks it can handle.
+It is designed for some specific tasks who has special requirements on Workers.
+Only when a Worker's tags are empty or are the subset of the task's tags, the Worker can fetch the task.</p>
 <p>The full list of command-line arguments can be found by running <code>mito worker --help</code>:</p>
 <pre><code class="language-txt">Run a mitosis worker
 
@@ -427,7 +450,10 @@ it's often unnecessary given the limited number of configuration items, all of w
 <p>If a user has never logged in or if his/her session has expired, the Client will prompt them to re-input their username and password for authentication.
 Alternatively, they can directly specify their username (<code>-u</code>) or password (<code>-p</code>) during execution.
 Once authenticated, the Client will retain their credentials in a file for future use.</p>
-<p>We recommend using the interactive mode for most operations, as it provides a more user-friendly experience.</p>
+<p>We recommend using the interactive mode for most operations, as it provides a more user-friendly experience. It will prompt you something like this:</p>
+<pre><code class="language-txt">[mito::client]&gt;
+</code></pre>
+<p>You can press <code>CTRL-D</code> or type in <code>exit</code> to exit the interactive mode. <code>CTRL-C</code> will just clear the current line and prompt you again.</p>
 <p>We can also directly run a command without entering interactive mode by specifying the command as an argument.
 For example, to create a new user, we can run:</p>
 <pre><code class="language-bash">mito client create user -u new_user -p new_password
@@ -438,13 +464,15 @@ For example, to create a new user, we can run:</p>
 Usage: mito client [OPTIONS] [COMMAND]
 
 Commands:
-  create  Create a new user or group
-  get     Get the info of a task, artifact, attachment, or a list of tasks subject to the filters
-  submit  Submit a task
-  upload  Upload an attachment to a group
-  cancel  Cancel a worker or a task
-  quit    Quit the client's interactive mode
-  help    Print this message or the help of the given subcommand(s)
+  auth      Authenticate the user
+  create    Create a new user or group
+  get       Get the info of a task, artifact, attachment, or a list of tasks subject to the filters
+  submit    Submit a task
+  upload    Upload an artifact or attachment
+  manage    Manage a worker, a task or a group
+  shutdown  Shutdown the coordinator
+  quit      Quit the client's interactive mode
+  help      Print this message or the help of the given subcommand(s)
 
 Options:
       --config &lt;CONFIG&gt;                    The path of the config file
@@ -469,6 +497,170 @@ Options:
   -h, --help                 Print help
   -V, --version              Print version
 </code></pre>
+<p>For the rest of this section, we will explain the common use cases of the Client on different scenarios.
+For the sake of convenience, we will assume that the user is already in interactive mode.
+And for the direct executing mode, it only requires adding "mito client" at the front.</p>
+<h2 id="create-sub-commands"><a class="header" href="#create-sub-commands"><code>Create</code> sub-commands</a></h2>
+<p>Input <code>help create</code> to show the help message of the <code>create</code> sub-commands:</p>
+<pre><code class="language-txt">Create a new user or group
+
+Usage: create &lt;COMMAND&gt;
+
+Commands:
+  user   Create a new user
+  group  Create a new group
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+</code></pre>
+<p>We can create a new user by running the following command:</p>
+<pre><code class="language-txt">create user -u test_user_name -p test_user_password
+</code></pre>
+<p>We can create a new group by running the following command:</p>
+<pre><code class="language-txt">create group test_group
+</code></pre>
+<p>This will create a group called <code>test_group</code> containing the current logged in user.
+This user will be granted the <code>Admin</code> role to this group to manage it.</p>
+<h2 id="submit-sub-commands"><a class="header" href="#submit-sub-commands"><code>Submit</code> sub-commands</a></h2>
+<p>Input <code>help submit</code> to show the help message of the <code>submit</code> sub-commands:</p>
+<pre><code class="language-txt">Submit a task
+
+Usage: submit [OPTIONS] [-- &lt;COMMAND&gt;...]
+
+Arguments:
+  [COMMAND]...  The command to run
+
+Options:
+  -g, --group &lt;GROUP_NAME&gt;    The name of the group this task is submitted to
+  -t, --tags [&lt;TAGS&gt;...]      The tags of the task, used to filter workers to execute the task
+  -l, --labels [&lt;LABELS&gt;...]  The labels of the task, used for querying tasks
+      --timeout &lt;TIMEOUT&gt;     The timeout of the task [default: 10min]
+  -p, --priority &lt;PRIORITY&gt;   The priority of the task [default: 0]
+  -e, --envs [&lt;ENVS&gt;...]      The environment variables to set
+      --terminal              Whether to collect the terminal standard output and error of the executed task
+      --watch &lt;WATCH&gt;         The UUID and the state of the task to watch before triggering this task. Should specify it as `UUID,STATE`, e.g. `123e4567-e89b-12d3-a456-426614174000,ExecSpawned`
+  -h, --help                  Print help
+</code></pre>
+<p>Submit a task to the Coordinator can be as simple as running the following command:</p>
+<pre><code class="language-txt">submit -- echo hello
+</code></pre>
+<p>The content after <code>--</code> is the command to run on the worker. It will return a UUID to identify the task.</p>
+<p>You can also specify the group to submit the task to by using the <code>-g</code> option.</p>
+<p>The <code>labels</code> are used to mark the task for querying later, it won't affect how the task is fetched ans executed.</p>
+<p>The <code>tags</code> are used to define the characteristics of the task, such as its requirements on the Worker.
+Only when a Worker's tags are empty or are the subset of the task's tags, the Worker can fetch the task.</p>
+<p>You can also set some environment variables for the task by using the <code>-e</code> option.</p>
+<pre><code class="language-txt">submit -g test_group -t wireless,4g -l mobile,video -e TEST_KEY=1,TEST_VAL=2 -- echo hello
+</code></pre>
+<p>For the output of the task, we allow 3 types of output to be collected:</p>
+<ol>
+<li><strong>Result</strong>: Files put under the directory specified by the environment variable <code>MITO_RESULT_DIR</code> will be packed into an artifact and uploaded to the Coordinator.
+If the directory is empty, no artifact will be created.</li>
+<li><strong>Exec</strong>: Files put under the directory specified by the environment variable <code>MITO_EXEC_DIR</code> will be packed into an artifact and uploaded to the Coordinator.
+If the directory is empty, no artifact will be created.</li>
+<li><strong>Terminal</strong>: If the <code>--terminal</code> option is specified, the standard output and error of the executed task will be collected and uploaded to the Coordinator.
+The terminal output will be stored in a file named <code>stdout.log</code> and <code>stderr.log</code> respectively in an artifact.</li>
+</ol>
+<h2 id="get-sub-commands"><a class="header" href="#get-sub-commands"><code>Get</code> sub-commands</a></h2>
+<p>Input <code>help get</code> to show the help message of the <code>get</code> sub-commands:</p>
+<pre><code class="language-txt">Get the info of task, attachment, worker or group, or query a list of them subject to the filters. Download attachment and artifact is also supported
+
+Usage: get &lt;COMMAND&gt;
+
+Commands:
+  task             Get the info of a task
+  tasks            Query a list of tasks subject to the filter
+  attachment-meta  Get the metadata of an attachment
+  attachments      Query a list of attachments subject to the filter
+  worker           Get the info of a worker
+  workers          Query a list of workers subject to the filter
+  group            Get the information of a group
+  groups           Get all groups the user has access to
+  artifact         Download an artifact of a task
+  attachment       Download an attachment of a group
+  help             Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help (see more with '--help')
+</code></pre>
+<p>Basically, the <code>get</code> sub-commands are used to query information or download files from the Coordinator.
+For information, it can be a task, a worker, a group, or a list of them subject to the filters.</p>
+<p>For example, you get a task's information by providing its UUID:</p>
+<pre><code class="language-txt">get task e07a2bf2-166d-40b5-8bb6-a78104c072f9
+</code></pre>
+<p>Or you can just query a list of tasks with label <code>mobile</code>:</p>
+<pre><code class="language-txt">get tasks -l mobile
+</code></pre>
+<p>More filter options can be found in the help message by executing <code>get tasks -h</code></p>
+<p>You can also get the information of a group with its name and that of a worker with its id.
+Query a list of them is also supported with similar logic as querying tasks.</p>
+<p>For downloading files, you can download an artifact of a task or an attachment of a group.
+To make it clear, an artifact is a collection of files generated by a task (as output), while an attachment is a file uploaded to a group.</p>
+<p>It is easy to download an artifact of a task by providing its UUID. But you also have to specify the the output type you want.
+There are three types of output: <code>result</code>, <code>exec-log</code>, and <code>std-log</code>. You can also specify the output path to download the artifact to with <code>-o</code> argument.</p>
+<pre><code class="language-txt">get artifact e07a2bf2-166d-40b5-8bb6-a78104c072f9 result
+</code></pre>
+<p>To download an attachment of a group, you can provide the group name and the attachment key:</p>
+<pre><code class="language-txt">get attachment test_group attachment_key
+</code></pre>
+<h2 id="upload-sub-commands"><a class="header" href="#upload-sub-commands"><code>Upload</code> sub-commands</a></h2>
+<p>Input <code>help upload</code> to show the help message of the <code>upload</code> sub-commands:</p>
+<pre><code class="language-txt">Upload an artifact or attachment
+
+Usage: upload &lt;COMMAND&gt;
+
+Commands:
+  artifact    Upload an artifact to a task
+  attachment  Upload an attachment to a group
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+</code></pre>
+<p>Similar to how we download files with <code>get</code> sub-commands, we can upload an artifact to a task or an attachment to a group.</p>
+<p>For example, to upload an artifact to a task as result, we can run:</p>
+<pre><code class="language-txt">upload artifact e07a2bf2-166d-40b5-8bb6-a78104c072f9 result local.tar.gz
+</code></pre>
+<p>Another example, to upload an attachment to a group, we can run:</p>
+<pre><code class="language-txt">upload attachment -g test_group local.tar.gz attachment_key
+</code></pre>
+<p>You can also just run <code>upload attachment local.tar.gz</code>.
+This will directly upload the file to the current group you are in and use the file name as the attachment key.</p>
+<h2 id="manage-sub-commands"><a class="header" href="#manage-sub-commands"><code>Manage</code> sub-commands</a></h2>
+<p>Input <code>help manage</code> to show the help message of the <code>manage</code> sub-commands:</p>
+<pre><code class="language-txt">Manage a worker, a task or a group
+
+Usage: manage &lt;COMMAND&gt;
+
+Commands:
+  worker  Manage a worker
+  task    Manage a task
+  group   Manage a group
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help0
+</code></pre>
+<p>We can manage a worker, a task, or a group with the <code>manage</code> sub-commands.</p>
+<p>For example, we can stop a worker by running:</p>
+<pre><code class="language-txt">manage worker b168dbe6-5c44-4529-a3b4-51940d6bb3c5 cancel
+</code></pre>
+<p>Or we can update the tags of a worker by running:</p>
+<pre><code class="language-txt">manage worker b168dbe6-5c44-4529-a3b4-51940d6bb3c5 update-tags wired file
+</code></pre>
+<p>And we can grant another group <code>Write</code> access to this worker (it means the group can submit tasks to this worker) by running:</p>
+<pre><code class="language-txt">manage worker b168dbe6-5c44-4529-a3b4-51940d6bb3c5 update-roles test_group:admin another_group:write
+</code></pre>
+<p>You can perform the opposite action to remove certain groups' access permissions to the Worker using the <code>remove-roles</code> subcommand.</p>
+<p>For a task, we can also cancel it, update its labels or change its specification to run with its UUID provides. For example:</p>
+<pre><code class="language-txt">manage task e07a2bf2-166d-40b5-8bb6-a78104c072f9 cancel
+</code></pre>
+<p>This will cancel the task if it is not started yet.</p>
+<p>To change how the task is executed, we can run:</p>
+<pre><code class="language-txt">manage task e07a2bf2-166d-40b5-8bb6-a78104c072f9 change --terminal -- echo world
+</code></pre>
+<p>This will alter the task to collect standard output and error when finishes, and execute <code>echo world</code> instead of <code>echo hello</code>.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="client-sdk"><a class="header" href="#client-sdk">Client SDK</a></h1>
 <p>The Mitosis project contains a SDK library (named <code>netmito</code>) that you can use to create your own client programmatically.</p>
 <p>To use the SDK, add the following to your <code>Cargo.toml</code>:</p>

@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0](https://github.com/stack-rs/mitosis/compare/mito-v0.3.2...mito-v0.4.0) - 2025-07-22
+
+### Features
+
+- *(skd)* Support no-download of artifact - ([0f10dc4](https://github.com/stack-rs/mitosis/commit/0f10dc4a9cb01e0a1f891ea5985ec0d3e0c2c0be))
+- *(worker)* Support specify group role on register - ([3226def](https://github.com/stack-rs/mitosis/commit/3226def828433ed107f9d57fd0e8daac2e04918b))
+
+### Documentation
+
+- *(guide)* Prepare for new release version - ([4bfb5c0](https://github.com/stack-rs/mitosis/commit/4bfb5c05342607fc398f9714a5e6c1651680d224))
+- *(guide)* Add examples of usage - ([118c6ce](https://github.com/stack-rs/mitosis/commit/118c6ce4a2d25da35d438bb860872b9339323124))
+- *(guide)* Update installation instructions - ([0d9ecff](https://github.com/stack-rs/mitosis/commit/0d9ecff0c2e65ccb774faaf7ffa90e05153e0a9c))
+
+### Miscellaneous Tasks
+
+- Update build conditions - ([950c1a8](https://github.com/stack-rs/mitosis/commit/950c1a8abfac1f96090413f4c0d2babdc4afaf59))
+
 ## [0.3.2](https://github.com/stack-rs/mitosis/compare/mito-v0.3.1...mito-v0.3.2) - 2025-07-08
 
 ### Miscellaneous Tasks

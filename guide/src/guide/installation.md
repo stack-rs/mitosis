@@ -16,7 +16,7 @@ We have a installer script that you can use to install Mitosis (you may need to 
 You can also change the version number in the URL to install a specific version. This script will install the binary in the `$HOME/.cargo/bin` directory.
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.3.2/mito-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.4.0/mito-installer.sh | sh
 ```
 
 You can also download the binary directly from the [releases] page and install it manually.
@@ -24,7 +24,7 @@ To make it easier to run, put the path to the binary into your `PATH` or install
 For example, do the following on Linux (you may need to adjust the version number to the latest in the URL):
 
 ```bash
-wget https://github.com/stack-rs/mitosis/releases/download/mito-v0.3.2/mito-x86_64-unknown-linux-gnu.tar.xz
+wget https://github.com/stack-rs/mitosis/releases/download/mito-v0.4.0/mito-x86_64-unknown-linux-gnu.tar.xz
 tar xf mito-x86_64-unknown-linux-gnu.tar.xz
 cd mito-x86_64-unknown-linux-gnu
 sudo install -m 755 mito /usr/local/bin/mito

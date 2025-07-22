@@ -19,12 +19,33 @@ pub enum AttachmentContentType {
 #[serde(rename_all = "kebab-case")]
 pub enum ArtifactContentType {
     /// The artifact is a file containing the task's output.
+    #[serde(alias = "Result", alias = "RESULT")]
     Result = 0,
     /// The artifact contains user-specified records of the task execution.
     /// Should be retrieved by user.
+    #[serde(
+        alias = "exec",
+        alias = "EXEC",
+        alias = "Exec",
+        alias = "execlog",
+        alias = "EXECLOG",
+        alias = "Execlog",
+        alias = "ExecLog"
+    )]
     ExecLog = 1,
     /// The artifact contains stdout and stderr of the worker's sub-process executing task.
     /// Automatically retrieved by worker.
+    #[serde(
+        alias = "std",
+        alias = "STD",
+        alias = "Std",
+        alias = "stdlog",
+        alias = "Stdlog",
+        alias = "STDLOG",
+        alias = "terminal",
+        alias = "Terminal",
+        alias = "TERMINAL"
+    )]
     StdLog = 2,
 }
 

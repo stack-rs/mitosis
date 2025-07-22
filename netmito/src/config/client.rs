@@ -82,15 +82,16 @@ pub enum ClientCommand {
     Auth(AuthArgs),
     /// Create a new user or group
     Create(CreateArgs),
-    /// Get the info of a task, artifact, attachment, or a list of tasks subject to the filters
+    /// Get the info of task, attachment, worker or group, or query a list of them subject to the
+    /// filters. Download attachment and artifact is also supported.
     ///
-    /// Query for users or workers is not implemented yet
+    /// Query for users is not implemented yet
     Get(GetArgs),
     /// Submit a task
     Submit(SubmitTaskCmdArgs),
     /// Upload an artifact or attachment
     Upload(UploadArgs),
-    /// Manage a worker or a task
+    /// Manage a worker, a task or a group
     Manage(ManageArgs),
     /// Shutdown the coordinator
     Shutdown(ShutdownArgs),
@@ -147,14 +148,10 @@ pub enum CreateCommands {
 pub enum GetCommands {
     /// Get the info of a task
     Task(GetTaskArgs),
-    /// Download an artifact of a task
-    Artifact(GetArtifactCmdArgs),
-    /// Download an attachment of a group
-    Attachment(GetAttachmentCmdArgs),
-    /// Get the metadata of an attachment
-    AttachmentMeta(GetAttachmentMetaArgs),
     /// Query a list of tasks subject to the filter
     Tasks(GetTasksArgs),
+    /// Get the metadata of an attachment
+    AttachmentMeta(GetAttachmentMetaArgs),
     /// Query a list of attachments subject to the filter
     Attachments(GetAttachmentsArgs),
     /// Get the info of a worker
@@ -165,6 +162,10 @@ pub enum GetCommands {
     Group(GetGroupArgs),
     /// Get all groups the user has access to
     Groups,
+    /// Download an artifact of a task
+    Artifact(GetArtifactCmdArgs),
+    /// Download an attachment of a group
+    Attachment(GetAttachmentCmdArgs),
 }
 
 #[derive(Subcommand, Serialize, Debug, Deserialize)]
@@ -271,6 +272,22 @@ where
 }
 
 /// Parse a single key-value pair
+fn parse_key_val_colon<T, U>(
+    s: &str,
+) -> Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
+where
+    T: std::str::FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
+    U: std::str::FromStr,
+    U::Err: std::error::Error + Send + Sync + 'static,
+{
+    let pos = s
+        .find(':')
+        .ok_or_else(|| format!("invalid key-value pair: no `:` found in `{s}`"))?;
+    Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
+}
+
+/// Parse a single key-value pair
 fn parse_watch_task<T, U>(
     s: &str,
 ) -> Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
@@ -302,6 +319,9 @@ pub struct GetArtifactCmdArgs {
     /// Specify the directory to download the artifact
     #[arg(short, long = "output")]
     pub output_path: Option<String>,
+    /// Only output the URL without downloading the attachment
+    #[arg(long)]
+    pub no_download: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -481,7 +501,7 @@ pub struct ReplaceWorkerTagsArgs {
 #[derive(Serialize, Debug, Deserialize, Args)]
 pub struct UpdateWorkerGroupArgs {
     /// The name and role of the group on the worker to update
-    #[arg(num_args = 0.., value_parser = parse_key_val::<String, GroupWorkerRole>)]
+    #[arg(num_args = 0.., value_parser = parse_key_val_colon::<String, GroupWorkerRole>)]
     pub roles: Vec<(String, GroupWorkerRole)>,
 }
 
@@ -564,7 +584,7 @@ pub enum ManageGroupCommands {
 #[derive(Serialize, Debug, Deserialize, Args)]
 pub struct UpdateUserGroupArgs {
     /// The username and role of the user to the group
-    #[arg(num_args = 0.., value_parser = parse_key_val::<String, UserGroupRole>)]
+    #[arg(num_args = 0.., value_parser = parse_key_val_colon::<String, UserGroupRole>)]
     pub roles: Vec<(String, UserGroupRole)>,
 }
 

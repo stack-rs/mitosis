@@ -655,6 +655,34 @@ impl MitoClient {
         }
     }
 
+    pub async fn get_artifact_url(
+        &mut self,
+        args: GetArtifactArgs,
+    ) -> crate::error::Result<String> {
+        let content_serde_val = serde_json::to_value(args.content_type)?;
+        let content_serde_str = content_serde_val.as_str().unwrap_or("result");
+        self.url.set_path(&format!(
+            "user/artifacts/{}/{}",
+            args.uuid, content_serde_str
+        ));
+        let resp = self
+            .http_client
+            .get(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let download_resp = resp
+                .json::<RemoteResourceDownloadResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(download_resp.url)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn get_attachment(
         &mut self,
         args: GetAttachmentArgs,
@@ -1271,18 +1299,31 @@ impl MitoClient {
                         tracing::error!("{}", e);
                     }
                 },
-                GetCommands::Artifact(args) => match self.get_artifact(args.into()).await {
-                    Ok(info) => {
-                        tracing::info!(
-                            "Artifact of size {}B downloaded to {}",
-                            info.size,
-                            info.local_path.display()
-                        );
+                GetCommands::Artifact(args) => {
+                    if args.no_download {
+                        match self.get_artifact_url(args.into()).await {
+                            Ok(url) => {
+                                tracing::info!("Artifact URL: {}", url);
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        }
+                    } else {
+                        match self.get_artifact(args.into()).await {
+                            Ok(info) => {
+                                tracing::info!(
+                                    "Artifact of size {}B downloaded to {}",
+                                    info.size,
+                                    info.local_path.display()
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!("{}", e);
-                    }
-                },
+                }
                 GetCommands::Tasks(args) => {
                     let verbose = args.verbose;
                     match self.get_tasks(args.into()).await {

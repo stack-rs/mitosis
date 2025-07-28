@@ -16,7 +16,7 @@ categories.workspace = true
 [dependencies]
 argon2 = { version = "0.5.3", features = ["std"] }
 async-compression = { version = "0.4.27", features = ["gzip", "tokio"] }
-aws-sdk-s3 = { version = "1.96.0", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.100.0", features = ["behavior-version-latest"] }
 axum = { version = "0.8.4", features = ["http2"] }
 axum-extra = { version = "0.10.1", features = ["typed-header"] }
 base64 = "0.22.1"

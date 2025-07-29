@@ -5,8 +5,8 @@ on:
     branches:
       - main
     paths:
-      - 'guide/**'
-      - '.github/workflows/gh-pages.yml'
+      - "guide/**"
+      - ".github/workflows/gh-pages.yml"
   workflow_dispatch:
 
 jobs:
@@ -20,9 +20,22 @@ jobs:
       - name: Setup mdBook
         uses: peaceiris/actions-mdbook@v2
         with:
-          mdbook-version: '0.4.40'
+          mdbook-version: "0.4.40"
           # mdbook-version: 'latest'
 
+      - name: Pull latest version
+        run: |
+          TARGET_FILE="guide/src/guide/installation.md"
+          MITO_RELEASE=$(curl curl --silent -m 10 --connect-timeout 5 "https://api.github.com/repos/stack-rs/mitosis/releases/latest")
+          VERSION=$(echo "$MITO_RELEASE" | grep -oP '"tag_name":\s*"[^"]*-v?\K[0-9]+\.[0-9]+\.[0-9]+')
+          echo "Latest version: $VERSION"
+          TEMP_FILE=$(mktemp)
+          awk -v new_version="mito-v$VERSION" '{ gsub(/mito-v[0-9]+\.[0-9]+\.[0-9]+/, new_version); print }' "$TARGET_FILE" >"$TEMP_FILE"
+          if [ $? -ne 0 ]; then
+            rm -f "$TEMP_FILE"
+            exit 0
+          fi
+          mv "$TEMP_FILE" "$TARGET_FILE"
       - run: mdbook build
         working-directory: ./guide
 

@@ -18,3 +18,5 @@ target/
 .env
 config.toml
 guide/book
+data
+**/*.log

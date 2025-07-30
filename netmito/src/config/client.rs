@@ -22,8 +22,7 @@ use crate::{
     schema::{
         AttachmentsQueryReq, ChangeTaskReq, RemoteResourceDownload, RemoveGroupWorkerRoleReq,
         RemoveUserGroupRoleReq, ReplaceWorkerTagsReq, TaskSpec, TasksQueryReq,
-        UpdateGroupWorkerRoleReq, UpdateTaskLabelsReq, UpdateUserGroupRoleReq, UserLoginReq,
-        WorkersQueryReq,
+        UpdateGroupWorkerRoleReq, UpdateTaskLabelsReq, UpdateUserGroupRoleReq, WorkersQueryReq,
     },
 };
 
@@ -78,6 +77,8 @@ pub struct ClientInteractiveShell {
 
 #[derive(Subcommand, Serialize, Debug, Deserialize)]
 pub enum ClientCommand {
+    /// Admin operations, including shutdown the coordinator, chaning user password, etc.
+    Admin(AdminArgs),
     /// Authenticate the user
     Auth(AuthArgs),
     /// Create a new user or group
@@ -91,20 +92,24 @@ pub enum ClientCommand {
     Submit(SubmitTaskCmdArgs),
     /// Upload an artifact or attachment
     Upload(UploadArgs),
-    /// Manage a worker, a task or a group
+    /// Manage a task, a user, a group or a worker
     Manage(ManageArgs),
-    /// Shutdown the coordinator
-    Shutdown(ShutdownArgs),
     /// Quit the client's interactive mode
     Quit,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
+pub struct AdminArgs {
+    #[command(subcommand)]
+    pub command: AdminCommands,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
 pub struct AuthArgs {
     /// The username of the user
-    pub username: String,
+    pub username: Option<String>,
     /// The password of the user
-    pub password: String,
+    pub password: Option<String>,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -134,6 +139,14 @@ pub struct ManageArgs {
 #[derive(Serialize, Debug, Deserialize, Args)]
 pub struct ShutdownArgs {
     pub secret: String,
+}
+
+#[derive(Subcommand, Serialize, Debug, Deserialize)]
+pub enum AdminCommands {
+    /// Change the password of a user
+    Password(ChangePasswordArgs),
+    /// Shutdown the coordinator
+    Shutdown(ShutdownArgs),
 }
 
 #[derive(Subcommand, Serialize, Debug, Deserialize)]
@@ -184,6 +197,16 @@ pub enum ManageCommands {
     Task(ManageTaskArgs),
     /// Manage a group
     Group(ManageGroupArgs),
+    /// Manage a user (change password)
+    User(ManageUserArgs),
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct ChangePasswordArgs {
+    /// The name of the user
+    pub username: Option<String>,
+    /// The new password of the user
+    pub new_password: Option<String>,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -573,6 +596,16 @@ pub struct ManageGroupArgs {
     pub command: ManageGroupCommands,
 }
 
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct ManageUserArgs {
+    /// The name of the user
+    pub username: Option<String>,
+    /// The original password of the user
+    pub orig_password: Option<String>,
+    /// The new password of the user
+    pub new_password: Option<String>,
+}
+
 #[derive(Subcommand, Serialize, Debug, Deserialize)]
 pub enum ManageGroupCommands {
     /// Update the roles of users to a group
@@ -618,18 +651,15 @@ impl ClientConfig {
     }
 }
 
-impl From<AuthArgs> for ClientCommand {
-    fn from(args: AuthArgs) -> Self {
-        Self::Auth(args)
+impl From<AdminArgs> for ClientCommand {
+    fn from(args: AdminArgs) -> Self {
+        Self::Admin(args)
     }
 }
 
-impl From<AuthArgs> for UserLoginReq {
+impl From<AuthArgs> for ClientCommand {
     fn from(args: AuthArgs) -> Self {
-        Self {
-            username: args.username,
-            md5_password: md5::compute(args.password.as_bytes()).0,
-        }
+        Self::Auth(args)
     }
 }
 
@@ -648,6 +678,46 @@ impl From<GetArgs> for ClientCommand {
 impl From<SubmitTaskCmdArgs> for ClientCommand {
     fn from(args: SubmitTaskCmdArgs) -> Self {
         Self::Submit(args)
+    }
+}
+
+impl From<ChangePasswordArgs> for AdminCommands {
+    fn from(args: ChangePasswordArgs) -> Self {
+        Self::Password(args)
+    }
+}
+
+impl From<ChangePasswordArgs> for AdminArgs {
+    fn from(args: ChangePasswordArgs) -> Self {
+        Self {
+            command: AdminCommands::Password(args),
+        }
+    }
+}
+
+impl From<ChangePasswordArgs> for ClientCommand {
+    fn from(args: ChangePasswordArgs) -> Self {
+        Self::Admin(args.into())
+    }
+}
+
+impl From<ShutdownArgs> for AdminCommands {
+    fn from(args: ShutdownArgs) -> Self {
+        Self::Shutdown(args)
+    }
+}
+
+impl From<ShutdownArgs> for AdminArgs {
+    fn from(args: ShutdownArgs) -> Self {
+        Self {
+            command: AdminCommands::Shutdown(args),
+        }
+    }
+}
+
+impl From<ShutdownArgs> for ClientCommand {
+    fn from(args: ShutdownArgs) -> Self {
+        Self::Admin(args.into())
     }
 }
 
@@ -1396,5 +1466,25 @@ impl From<RemoveUserGroupArgs> for RemoveUserGroupRoleReq {
         Self {
             users: args.users.into_iter().collect(),
         }
+    }
+}
+
+impl From<ManageUserArgs> for ManageCommands {
+    fn from(args: ManageUserArgs) -> Self {
+        Self::User(args)
+    }
+}
+
+impl From<ManageUserArgs> for ManageArgs {
+    fn from(args: ManageUserArgs) -> Self {
+        Self {
+            command: ManageCommands::User(args),
+        }
+    }
+}
+
+impl From<ManageUserArgs> for ClientCommand {
+    fn from(args: ManageUserArgs) -> Self {
+        Self::Manage(args.into())
     }
 }

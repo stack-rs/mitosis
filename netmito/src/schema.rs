@@ -33,6 +33,24 @@ pub struct UserLoginResp {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct UserChangePasswordReq {
+    pub username: String,
+    pub old_md5_password: [u8; 16],
+    pub new_md5_password: [u8; 16],
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UserChangePasswordResp {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChangePasswordReq {
+    pub username: String,
+    pub new_md5_password: [u8; 16],
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DeleteUserReq {
     pub username: String,
 }

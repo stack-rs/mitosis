@@ -111,7 +111,7 @@ async fn extract_credential(
     }
 }
 
-async fn modify_or_append_credential(
+pub(crate) async fn modify_or_append_credential(
     cred_path: &std::path::PathBuf,
     username: &String,
     token: &String,

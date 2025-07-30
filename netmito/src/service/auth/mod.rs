@@ -3,7 +3,10 @@ pub mod token;
 
 use std::net::SocketAddr;
 
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
+    Argon2, PasswordHash, PasswordVerifier,
+};
 use axum::{body::Body, extract::State, http::Request, middleware::Next, response::IntoResponse};
 use axum_extra::{
     headers::{authorization::Bearer, Authorization},
@@ -16,6 +19,7 @@ use crate::{
     config::InfraPool,
     entity::{state::UserState, users as User, workers as Worker},
     error::{ApiError, AuthError},
+    schema::{ChangePasswordReq, UserChangePasswordReq},
 };
 use token::{generate_token, verify_token};
 
@@ -80,6 +84,84 @@ pub async fn user_login(
             Err(AuthError::WrongCredentials.into())
         }
     }
+}
+
+pub async fn change_password(
+    db: &DatabaseConnection,
+    user_id: i64,
+    ip: SocketAddr,
+    UserChangePasswordReq {
+        username,
+        old_md5_password: orig_md5_password,
+        new_md5_password,
+    }: UserChangePasswordReq,
+) -> crate::error::Result<String> {
+    let user = User::Entity::find_by_id(user_id)
+        .one(db)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    if user.username != username {
+        return Err(AuthError::WrongCredentials.into());
+    }
+    if user.state != UserState::Active {
+        return Err(AuthError::PermissionDenied.into());
+    }
+    let parsed_hash = PasswordHash::new(&user.encrypted_password)?;
+    if Argon2::default()
+        .verify_password(&orig_md5_password, &parsed_hash)
+        .is_ok()
+    {
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(&new_md5_password, &salt)?.to_string();
+        let sign = StdRng::from_os_rng().next_u32() as i64;
+        let token = generate_token(&username, sign)?;
+        let now = TimeDateTimeWithTimeZone::now_utc();
+        let active_user = User::ActiveModel {
+            id: Set(user.id),
+            encrypted_password: Set(password_hash),
+            auth_signature: Set(Some(sign)),
+            current_sign_in_at: Set(Some(now)),
+            last_sign_in_at: Set(user.current_sign_in_at),
+            current_sign_in_ip: Set(Some(ip.ip().to_string())),
+            last_sign_in_ip: Set(user.current_sign_in_ip),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        tracing::debug!("User {} change password and logged in", username);
+        active_user.update(db).await?;
+        Ok(token)
+    } else {
+        tracing::debug!("Wrong password for user {}", username);
+        Err(AuthError::WrongCredentials.into())
+    }
+}
+
+pub async fn admin_change_password(
+    db: &DatabaseConnection,
+    ChangePasswordReq {
+        username,
+        new_md5_password,
+    }: ChangePasswordReq,
+) -> crate::error::Result<()> {
+    let user = User::Entity::find()
+        .filter(User::Column::Username.eq(&username))
+        .one(db)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    let password_hash = argon2.hash_password(&new_md5_password, &salt)?.to_string();
+    let now = TimeDateTimeWithTimeZone::now_utc();
+    let active_user = User::ActiveModel {
+        id: Set(user.id),
+        encrypted_password: Set(password_hash),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+    tracing::debug!("User {} change password", username);
+    active_user.update(db).await?;
+    Ok(())
 }
 
 pub async fn user_auth_middleware(

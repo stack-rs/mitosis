@@ -35,6 +35,7 @@ use crate::{
 pub fn user_router(st: InfraPool) -> Router<InfraPool> {
     Router::new()
         .route("/auth", get(auth_user))
+        .route("/password", post(change_password))
         .route("/tasks", post(submit_task))
         .route(
             "/tasks/{uuid}",
@@ -90,6 +91,25 @@ pub async fn login_user(
 
 pub async fn auth_user(Extension(_): Extension<AuthUser>) -> StatusCode {
     StatusCode::OK
+}
+
+pub async fn change_password(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Json(req): Json<UserChangePasswordReq>,
+) -> Result<Json<UserChangePasswordResp>, ApiError> {
+    let token = crate::service::auth::change_password(&pool.db, u.id, addr, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(UserChangePasswordResp { token }))
 }
 
 pub async fn submit_task(

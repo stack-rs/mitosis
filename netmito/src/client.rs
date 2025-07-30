@@ -1,4 +1,4 @@
-use std::{borrow::Cow, path::PathBuf};
+use std::{borrow::Cow, io::Write, path::PathBuf};
 
 use clap_repl::{
     reedline::{self, FileBackedHistory},
@@ -22,7 +22,9 @@ use crate::{
     error::{get_error_from_resp, map_reqwest_err, RequestError, S3Error},
     schema::*,
     service::{
-        auth::cred::{get_user_credential, refresh_user_credential},
+        auth::cred::{
+            get_user_credential, modify_or_append_credential, refresh_user_credential, GetPathBuf,
+        },
         s3::{download_file, get_xml_error_message},
     },
 };
@@ -269,7 +271,11 @@ impl MitoClient {
                         client.handle_command(cmd).await;
                     }
                     if cli.interactive {
-                        println!("Client is running in interactive mode. Enter 'quit' or Ctrl-D to exit and 'help' to see available commands.");
+                        let username = client.username.as_str();
+                        println!("Logged in as {username}. Client is running in interactive mode.");
+                        println!(
+                            "Enter 'quit' or Ctrl-D to exit and 'help' to see available commands."
+                        );
                         let prompt = MitoPrompt;
                         let cache_file = dirs::cache_dir().map(|mut p| {
                             p.push("mitosis");
@@ -559,6 +565,56 @@ impl MitoClient {
         .await?;
         self.credential = token;
         Ok(())
+    }
+
+    pub async fn change_password(&mut self, args: ChangePasswordReq) -> crate::error::Result<()> {
+        self.url.set_path("admin/password");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .json(&args)
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn user_change_password(
+        &mut self,
+        args: UserChangePasswordReq,
+    ) -> crate::error::Result<()> {
+        self.url.set_path("user/password");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .json(&args)
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<crate::schema::UserChangePasswordResp>()
+                .await
+                .map_err(RequestError::from)?;
+            let token = resp.token;
+            let cred_path = self.credential_path.get_path_buf();
+            if cred_path.exists() {
+                if let Some(parent) = cred_path.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                modify_or_append_credential(&self.credential_path, &args.username, &token).await?;
+            }
+            self.credential = token;
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
     }
 
     pub async fn create_user(&mut self, args: CreateUserArgs) -> crate::error::Result<()> {
@@ -1251,10 +1307,42 @@ impl MitoClient {
     {
         let cmd = cmd.into();
         match cmd {
-            ClientCommand::Auth(args) => match self.auth_user(args.into()).await {
-                Ok(_) => {
-                    tracing::info!("Successfully authenticated");
+            ClientCommand::Admin(admin_args) => match admin_args.command {
+                AdminCommands::Shutdown(args) => match self.shutdown_coordinator(args.secret).await
+                {
+                    Ok(_) => {
+                        tracing::info!("Coordinator shutdown successfully");
+                        return false;
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                AdminCommands::Password(args) => {
+                    match fill_change_password(args.username, args.new_password) {
+                        Ok(req) => match self.change_password(req).await {
+                            Ok(_) => {
+                                tracing::info!("Successfully changed password");
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        },
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    }
                 }
+            },
+            ClientCommand::Auth(args) => match fill_user_auth(args.username, args.password) {
+                Ok(req) => match self.auth_user(req).await {
+                    Ok(_) => {
+                        tracing::info!("Successfully authenticated");
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
                 Err(e) => {
                     tracing::error!("{}", e);
                 }
@@ -1585,14 +1673,24 @@ impl MitoClient {
                         }
                     }
                 }
-            },
-            ClientCommand::Shutdown(args) => match self.shutdown_coordinator(args.secret).await {
-                Ok(_) => {
-                    tracing::info!("Coordinator shutdown successfully");
-                    return false;
-                }
-                Err(e) => {
-                    tracing::error!("{}", e);
+                ManageCommands::User(args) => {
+                    match fill_user_change_password(
+                        args.username,
+                        args.orig_password,
+                        args.new_password,
+                    ) {
+                        Ok(req) => match self.user_change_password(req).await {
+                            Ok(_) => {
+                                tracing::info!("User password changed successfully");
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        },
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    }
                 }
             },
             ClientCommand::Quit => {
@@ -1738,6 +1836,103 @@ fn output_group_info(info: &GroupQueryInfo) {
         tracing::info!("Users in the group:");
         for (user, role) in users {
             tracing::info!(" > {} = {}", user, role);
+        }
+    }
+}
+
+fn get_and_prompt_username(username: Option<String>, prompt: &str) -> crate::error::Result<String> {
+    let username = username
+        .map(|u| {
+            println!("{prompt}: {u}");
+            Ok::<_, std::io::Error>(u.clone())
+        })
+        .unwrap_or_else(|| {
+            let mut user = String::new();
+            print!("{prompt}: ");
+            std::io::stdout().flush()?;
+            std::io::stdin().read_line(&mut user)?;
+            user.pop();
+            Ok(user)
+        })?;
+    Ok(username)
+}
+
+fn get_and_prompt_password(
+    password: Option<String>,
+    prompt: &str,
+) -> crate::error::Result<[u8; 16]> {
+    let md5_password = password
+        .map(|p| {
+            println!("{prompt} Already Given");
+            Ok::<_, std::io::Error>(md5::compute(p.as_bytes()).0)
+        })
+        .unwrap_or_else(|| {
+            let password = rpassword::prompt_password(format!("Please Input {prompt}: "))?;
+            Ok(md5::compute(password.as_bytes()).0)
+        })?;
+    Ok(md5_password)
+}
+
+fn fill_user_auth(
+    username: Option<String>,
+    password: Option<String>,
+) -> crate::error::Result<UserLoginReq> {
+    match (username, password) {
+        (Some(username), Some(password)) => Ok(UserLoginReq {
+            username,
+            md5_password: md5::compute(password.as_bytes()).0,
+        }),
+        (username, password) => {
+            let username = get_and_prompt_username(username, "Username")?;
+            let md5_password = get_and_prompt_password(password, "Password")?;
+            Ok(UserLoginReq {
+                username,
+                md5_password,
+            })
+        }
+    }
+}
+
+fn fill_change_password(
+    username: Option<String>,
+    password: Option<String>,
+) -> crate::error::Result<ChangePasswordReq> {
+    match (username, password) {
+        (Some(username), Some(password)) => Ok(ChangePasswordReq {
+            username,
+            new_md5_password: md5::compute(password.as_bytes()).0,
+        }),
+        (username, password) => {
+            let username = get_and_prompt_username(username, "Username")?;
+            let new_md5_password = get_and_prompt_password(password, "New Password")?;
+            Ok(ChangePasswordReq {
+                username,
+                new_md5_password,
+            })
+        }
+    }
+}
+
+fn fill_user_change_password(
+    username: Option<String>,
+    old_password: Option<String>,
+    new_password: Option<String>,
+) -> crate::error::Result<UserChangePasswordReq> {
+    match (username, old_password, new_password) {
+        (Some(username), Some(old_password), Some(new_password)) => Ok(UserChangePasswordReq {
+            username,
+            old_md5_password: md5::compute(old_password.as_bytes()).0,
+            new_md5_password: md5::compute(new_password.as_bytes()).0,
+        }),
+        (username, old_password, new_password) => {
+            let username = get_and_prompt_username(username, "Username")?;
+            let old_md5_password = get_and_prompt_password(old_password, "Old Password")?;
+            let new_md5_password = get_and_prompt_password(new_password, "New Password")?;
+            Ok(UserChangePasswordReq {
+                username,
+                old_md5_password,
+                new_md5_password,
+            })
         }
     }
 }

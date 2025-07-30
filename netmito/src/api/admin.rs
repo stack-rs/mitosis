@@ -24,6 +24,7 @@ use crate::{
 pub fn admin_router(st: InfraPool, cancel_token: CancellationToken) -> Router<InfraPool> {
     Router::new()
         .route("/user", post(create_user).delete(delete_user))
+        .route("/password", post(change_password))
         .route("/user/state", post(change_user_state))
         .route("/workers/{uuid}/", delete(shutdown_worker))
         .route(
@@ -85,6 +86,24 @@ pub async fn delete_user(
         }
         _ => Err(ApiError::InternalServerError),
     }
+}
+
+pub async fn change_password(
+    Extension(_): Extension<AuthAdminUser>,
+    State(pool): State<InfraPool>,
+    Json(req): Json<ChangePasswordReq>,
+) -> ApiResult<()> {
+    crate::service::auth::admin_change_password(&pool.db, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
 }
 
 pub async fn change_user_state(

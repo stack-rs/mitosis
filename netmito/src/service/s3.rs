@@ -57,7 +57,7 @@ pub async fn get_presigned_upload_link<T: Into<String>>(
         return Err(S3Error::InvalidContentLength(length));
     }
     // Restrict the link to be valid for at most 15 minutes
-    let expires = Duration::from_secs(900);
+    let expires = Duration::from_secs(3600);
     let resp = client
         .put_object()
         .bucket(bucket)
@@ -75,7 +75,7 @@ pub async fn get_presigned_download_link<T: Into<String>>(
     length: i64,
 ) -> Result<String, S3Error> {
     // At least valid for 3 days and at most valid for 7 days
-    let expires = Duration::from_secs(604800.min(259200.max(length as u64 / 1000000)));
+    let expires = Duration::from_secs(86400.min(3600.max(length as u64 / 1000000)));
     let resp = client
         .get_object()
         .bucket(bucket)

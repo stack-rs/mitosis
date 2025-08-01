@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0](https://github.com/stack-rs/mitosis/compare/mito-v0.4.0...mito-v0.5.0) - 2025-08-01
+
+### Features
+
+- *(api)* Support change password - ([9a52468](https://github.com/stack-rs/mitosis/commit/9a524680ab1b038f220ee51fa98904f1f413b900))
+- *(api)* Allow CORS - ([2caf034](https://github.com/stack-rs/mitosis/commit/2caf034119d640de31fecff4d80e08933cbb99a5))
+- *(s3)* Allow more time for uploading - ([75fd9ea](https://github.com/stack-rs/mitosis/commit/75fd9ea3d589f1b66961f186e7eaad9d5b99b637))
+
+### Miscellaneous Tasks
+
+- Replace latest version on docs build - ([2f74600](https://github.com/stack-rs/mitosis/commit/2f74600706de46e7d8a518d280b30f73863a5e38))
+
 ## [0.4.0](https://github.com/stack-rs/mitosis/compare/mito-v0.3.2...mito-v0.4.0) - 2025-07-22
 
 ### Features

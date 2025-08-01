@@ -23,6 +23,7 @@ use axum::{
 use http_body_util::BodyExt;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
+use tower_http::cors::CorsLayer;
 
 use crate::{config::InfraPool, service::auth::user_auth_middleware};
 
@@ -54,6 +55,7 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
             )
             .nest("/worker", worker::worker_router(st.clone()))
             .with_state(st)
+            .layer(CorsLayer::permissive())
     }
     #[cfg(feature = "debugging")]
     {
@@ -82,6 +84,7 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
             )
             .nest("/worker", worker::worker_router(st.clone()))
             .with_state(st)
+            .layer(CorsLayer::permissive())
             .layer(middleware::from_fn(print_request_addr))
             .layer(middleware::from_fn(print_request_response))
     }

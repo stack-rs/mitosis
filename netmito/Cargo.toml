@@ -56,7 +56,7 @@ thiserror = "2.0.12"
 time = { version = "0.3.41", features = ["serde-human-readable"] }
 tokio = { workspace = true }
 tokio-tar = "0.3.1"
-tokio-util = "0.7.15"
+tokio-util = "0.7.16"
 tower-http = { version = "0.6.6", features = ["cors"] }
 tracing = { workspace = true }
 tracing-appender = "0.2.3"

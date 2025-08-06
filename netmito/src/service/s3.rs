@@ -2,13 +2,16 @@ use std::path::Path;
 use std::time::Duration;
 
 use aws_sdk_s3::{error::SdkError, presigning::PresigningConfig, Client};
-use reqwest::Response;
+use futures::StreamExt;
+use indicatif::{ProgressBar, ProgressState, ProgressStyle};
+use reqwest::{header::CONTENT_LENGTH, Response};
 use sea_orm::{
     prelude::*,
     sea_query::{Expr, Query},
     FromQueryResult, Set, TransactionTrait,
 };
 use tokio::io::AsyncWriteExt;
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::schema::{AttachmentMetadata, RemoteResourceDownloadResp};
@@ -540,16 +543,21 @@ pub async fn user_upload_attachment(
     Ok(uri)
 }
 
+// show_pb is used to show progress bar
 pub async fn download_file(
     client: &reqwest::Client,
     resp: &RemoteResourceDownloadResp,
     local_path: impl AsRef<Path>,
+    show_pb: bool,
 ) -> crate::error::Result<()> {
     tracing::debug!(
         "Downloading file from {} to {:?}",
         resp.url,
         local_path.as_ref()
     );
+    let total_size = resp.size as u64;
+    let mut pb = None;
+    let mut downloaded: u64 = 0;
     let mut resp = client
         .get(&resp.url)
         .send()
@@ -559,14 +567,87 @@ pub async fn download_file(
         if let Some(parent_dir) = local_path.as_ref().parent() {
             tokio::fs::create_dir_all(parent_dir).await?;
         }
+        if show_pb {
+            let inner_pb = ProgressBar::new(total_size);
+            inner_pb.set_style(ProgressStyle::with_template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+        .unwrap()
+        .with_key("eta", |state: &ProgressState, w: &mut dyn std::fmt::Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
+            .progress_chars("=>-"),
+        );
+            inner_pb.set_message(format!(
+                "Downloading to {}",
+                local_path.as_ref().to_string_lossy()
+            ));
+            pb = Some(inner_pb);
+        }
         let mut file = tokio::fs::File::create(local_path).await?;
         while let Some(chunk) = resp.chunk().await.map_err(RequestError::from)? {
             file.write_all(&chunk).await?;
+            downloaded = std::cmp::min(downloaded + (chunk.len() as u64), total_size);
+            if let Some(ref pb) = pb {
+                pb.set_position(downloaded);
+            }
         }
         file.flush().await?;
+        if let Some(ref pb) = pb {
+            pb.finish();
+        }
         Ok(())
     } else {
         let msg = get_xml_error_message(resp).await?;
+        Err(S3Error::Custom(msg).into())
+    }
+}
+
+pub async fn upload_file(
+    client: &reqwest::Client,
+    url: &str,
+    content_length: u64,
+    local_path: impl AsRef<Path>,
+    show_pb: bool,
+) -> crate::error::Result<()> {
+    let file = tokio::fs::File::open(local_path.as_ref()).await?;
+    let mut pb = None;
+    let mut uploaded: u64 = 0;
+    if show_pb {
+        let inner_pb = ProgressBar::new(content_length);
+        inner_pb.set_style(ProgressStyle::with_template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+        .unwrap()
+        .with_key("eta", |state: &ProgressState, w: &mut dyn std::fmt::Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
+            .progress_chars("=>-"),
+        );
+        inner_pb.set_message(format!(
+            "Uploading from {}",
+            local_path.as_ref().to_string_lossy()
+        ));
+        pb = Some(inner_pb);
+    }
+    let mut reader_stream = ReaderStream::new(file);
+    let async_stream = async_stream::stream! {
+        while let Some(chunk) = reader_stream.next().await {
+            if let Ok(chunk) = &chunk {
+                uploaded = std::cmp::min(uploaded + (chunk.len() as u64), content_length);
+                if let Some(ref pb) = pb {
+                    pb.set_position(uploaded);
+                    if uploaded >= content_length {
+                        pb.finish();
+                    }
+                }
+            }
+            yield chunk;
+        }
+    };
+    let upload_file = client
+        .put(url)
+        .header(CONTENT_LENGTH, content_length)
+        .body(reqwest::Body::wrap_stream(async_stream))
+        .send()
+        .await
+        .map_err(map_reqwest_err)?;
+    if upload_file.status().is_success() {
+        Ok(())
+    } else {
+        let msg = get_xml_error_message(upload_file).await?;
         Err(S3Error::Custom(msg).into())
     }
 }

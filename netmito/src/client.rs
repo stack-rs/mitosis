@@ -10,7 +10,7 @@ use redis::{
     aio::{MultiplexedConnection, PubSub},
     AsyncCommands, Commands, Msg, PubSubCommands, PushInfo,
 };
-use reqwest::{header::CONTENT_LENGTH, Client};
+use reqwest::Client;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use url::Url;
@@ -19,13 +19,13 @@ use uuid::Uuid;
 use crate::{
     config::{client::*, ClientConfig, ClientConfigCli},
     entity::{role::GroupWorkerRole, state::TaskExecState},
-    error::{get_error_from_resp, map_reqwest_err, RequestError, S3Error},
+    error::{get_error_from_resp, map_reqwest_err, RequestError},
     schema::*,
     service::{
         auth::cred::{
             get_user_credential, modify_or_append_credential, refresh_user_credential, GetPathBuf,
         },
-        s3::{download_file, get_xml_error_message},
+        s3::{download_file, upload_file},
     },
 };
 
@@ -701,7 +701,13 @@ impl MitoClient {
                 .json::<RemoteResourceDownloadResp>()
                 .await
                 .map_err(RequestError::from)?;
-            download_file(&self.http_client, &download_resp, &args.output_path).await?;
+            download_file(
+                &self.http_client,
+                &download_resp,
+                &args.output_path,
+                args.show_pb,
+            )
+            .await?;
             Ok(ResourceDownloadInfo {
                 size: download_resp.size,
                 local_path: args.output_path,
@@ -759,7 +765,13 @@ impl MitoClient {
                 .json::<RemoteResourceDownloadResp>()
                 .await
                 .map_err(RequestError::from)?;
-            download_file(&self.http_client, &download_resp, &args.output_path).await?;
+            download_file(
+                &self.http_client,
+                &download_resp,
+                &args.output_path,
+                args.show_pb,
+            )
+            .await?;
             Ok(ResourceDownloadInfo {
                 size: download_resp.size,
                 local_path: args.output_path,
@@ -1011,21 +1023,14 @@ impl MitoClient {
                 .json::<UploadArtifactResp>()
                 .await
                 .map_err(RequestError::from)?;
-            let file = tokio::fs::File::open(args.local_file).await?;
-            let upload_file = self
-                .http_client
-                .put(resp.url)
-                .header(CONTENT_LENGTH, content_length)
-                .body(file)
-                .send()
-                .await
-                .map_err(map_reqwest_err)?;
-            if upload_file.status().is_success() {
-                Ok(())
-            } else {
-                let msg = get_xml_error_message(upload_file).await?;
-                Err(S3Error::Custom(msg).into())
-            }
+            upload_file(
+                &self.http_client,
+                resp.url.as_str(),
+                content_length,
+                args.local_file,
+                args.pb,
+            )
+            .await
         } else {
             Err(get_error_from_resp(resp).await.into())
         }
@@ -1074,21 +1079,14 @@ impl MitoClient {
                 .json::<UploadAttachmentResp>()
                 .await
                 .map_err(RequestError::from)?;
-            let file = tokio::fs::File::open(args.local_file).await?;
-            let upload_file = self
-                .http_client
-                .put(resp.url)
-                .header(CONTENT_LENGTH, content_length)
-                .body(file)
-                .send()
-                .await
-                .map_err(map_reqwest_err)?;
-            if upload_file.status().is_success() {
-                Ok(())
-            } else {
-                let msg = get_xml_error_message(upload_file).await?;
-                Err(S3Error::Custom(msg).into())
-            }
+            upload_file(
+                &self.http_client,
+                resp.url.as_str(),
+                content_length,
+                args.local_file,
+                args.pb,
+            )
+            .await
         } else {
             Err(get_error_from_resp(resp).await.into())
         }

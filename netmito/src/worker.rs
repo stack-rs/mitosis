@@ -669,7 +669,7 @@ async fn execute_task(
                 .join(resource.local_path);
             tokio::select! {
                 biased;
-                res = download_file(&task_executor.task_client, &download_resp, local_path) => {
+                res = download_file(&task_executor.task_client, &download_resp, local_path, false) => {
                     if let Err(e) = res {
                         tracing::error!("Failed to download resource: {}", e);
                         let req = ReportTaskReq {

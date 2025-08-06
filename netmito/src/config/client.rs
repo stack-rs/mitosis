@@ -345,6 +345,9 @@ pub struct GetArtifactCmdArgs {
     /// Only output the URL without downloading the attachment
     #[arg(long)]
     pub no_download: bool,
+    /// Whether to show progress bar when downloading
+    #[arg(long)]
+    pub pb: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -383,6 +386,8 @@ pub struct GetArtifactArgs {
     pub content_type: ArtifactContentType,
     /// Specify the path to download the artifact
     pub output_path: PathBuf,
+    /// Whether to show progress bar when downloading
+    pub show_pb: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -397,6 +402,9 @@ pub struct GetAttachmentCmdArgs {
     /// Only output the URL without downloading the attachment
     #[arg(long)]
     pub no_download: bool,
+    /// Whether to show progress bar when downloading
+    #[arg(long)]
+    pub pb: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize)]
@@ -407,6 +415,8 @@ pub struct GetAttachmentArgs {
     pub key: String,
     /// Specify the path to download the artifact
     pub output_path: PathBuf,
+    /// Whether to show progress bar when downloading
+    pub show_pb: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -473,6 +483,9 @@ pub struct UploadArtifactArgs {
     pub content_type: ArtifactContentType,
     /// The path of the local file to upload
     pub local_file: PathBuf,
+    /// Whether to show progress bar when downloading
+    #[arg(long)]
+    pub pb: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -484,6 +497,9 @@ pub struct UploadAttachmentArgs {
     pub local_file: PathBuf,
     /// The key of the attachment uploaded to. If not specified, the filename will be used.
     pub key: Option<String>,
+    /// Whether to show progress bar when downloading
+    #[arg(long)]
+    pub pb: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -822,6 +838,7 @@ impl From<GetArtifactCmdArgs> for GetArtifactArgs {
             uuid: args.uuid,
             content_type: args.content_type,
             output_path,
+            show_pb: args.pb,
         }
     }
 }
@@ -867,6 +884,7 @@ impl From<GetAttachmentCmdArgs> for GetAttachmentArgs {
             group_name: args.group_name,
             key: args.key,
             output_path,
+            show_pb: args.pb,
         }
     }
 }

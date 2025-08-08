@@ -5,6 +5,11 @@ on:
     paths-ignore:
       - ".github/**"
       - "guide/**"
+  pull_request:
+    types: [ready_for_review, opened, synchronize, reopened]
+    paths-ignore:
+      - "documents/**"
+      - "assets/**"
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
@@ -15,6 +20,7 @@ concurrency:
 jobs:
   build:
     name: cargo build with all features
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +31,7 @@ jobs:
 
   clippy:
     name: cargo clippy
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +43,7 @@ jobs:
 
   fmt:
     name: cargo fmt
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

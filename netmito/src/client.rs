@@ -212,29 +212,29 @@ impl MitoAsyncRedisClient {
 pub struct MitoPrompt;
 
 impl reedline::Prompt for MitoPrompt {
-    fn render_prompt_left(&self) -> std::borrow::Cow<str> {
+    fn render_prompt_left(&self) -> std::borrow::Cow<'_, str> {
         Cow::Borrowed(DEFAULT_LEFT_PROMPT)
     }
 
-    fn render_prompt_right(&self) -> std::borrow::Cow<str> {
+    fn render_prompt_right(&self) -> std::borrow::Cow<'_, str> {
         Cow::Borrowed("")
     }
 
     fn render_prompt_indicator(
         &self,
         _prompt_mode: reedline::PromptEditMode,
-    ) -> std::borrow::Cow<str> {
+    ) -> std::borrow::Cow<'_, str> {
         Cow::Borrowed(DEFAULT_INDICATOR)
     }
 
-    fn render_prompt_multiline_indicator(&self) -> std::borrow::Cow<str> {
+    fn render_prompt_multiline_indicator(&self) -> std::borrow::Cow<'_, str> {
         Cow::Borrowed(DEFAULT_MULTILINE_INDICATOR)
     }
 
     fn render_prompt_history_search_indicator(
         &self,
         history_search: reedline::PromptHistorySearch,
-    ) -> std::borrow::Cow<str> {
+    ) -> std::borrow::Cow<'_, str> {
         let prefix = match history_search.status {
             reedline::PromptHistorySearchStatus::Passing => "",
             reedline::PromptHistorySearchStatus::Failing => "failing ",

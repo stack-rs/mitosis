@@ -89,7 +89,7 @@ pub fn encode_token(
     Ok(token_base64)
 }
 
-pub fn verify_token(token: &str) -> crate::error::Result<TokenClaims> {
+pub fn verify_token(token: &str) -> crate::error::Result<TokenClaims<'_>> {
     let token = general_purpose::STANDARD
         .decode(token)
         .map_err(DecodeTokenError::from)?;

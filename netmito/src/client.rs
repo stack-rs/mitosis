@@ -1,4 +1,4 @@
-use std::{borrow::Cow, path::PathBuf};
+use std::{borrow::Cow, io::Write, path::PathBuf, process::Stdio};
 
 use clap_repl::{
     reedline::{self, FileBackedHistory},
@@ -1370,6 +1370,26 @@ impl MitoClient {
                     }
                 },
             },
+            ClientCommand::Cmd(args) => {
+                if !args.command.is_empty() {
+                    let shell = std::env::var("SHELL").unwrap_or("/bin/bash".to_string());
+                    let mut cmd_handle = std::process::Command::new(shell);
+                    cmd_handle.arg("-c");
+                    if args.split {
+                        cmd_handle.args(args.command);
+                    } else {
+                        cmd_handle.arg(args.command.join(" "));
+                    }
+                    let output = cmd_handle
+                        .stdin(Stdio::inherit())
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .output()
+                        .unwrap();
+                    std::io::stdout().write_all(&output.stdout).unwrap();
+                    std::io::stderr().write_all(&output.stderr).unwrap();
+                }
+            }
             ClientCommand::Get(args) => match args.command {
                 GetCommands::Task(args) => match self.get_task(args).await {
                     Ok(resp) => {

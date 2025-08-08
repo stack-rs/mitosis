@@ -87,6 +87,8 @@ pub enum ClientCommand {
     Auth(AuthArgs),
     /// Create a new user or group
     Create(CreateArgs),
+    /// Run an external command
+    Cmd(CmdArgs),
     /// Get the info of task, attachment, worker or group, or query a list of them subject to the
     /// filters. Download attachment and artifact is also supported.
     ///
@@ -123,6 +125,16 @@ pub struct AuthArgs {
 pub struct CreateArgs {
     #[command(subcommand)]
     pub command: CreateCommands,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct CmdArgs {
+    /// Do not merge the command into one string
+    #[arg(short, long)]
+    pub split: bool,
+    /// The command to run
+    #[arg(last = true)]
+    pub command: Vec<String>,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]

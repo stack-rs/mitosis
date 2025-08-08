@@ -1,4 +1,4 @@
-use std::{io::Write, path::PathBuf};
+use std::path::PathBuf;
 
 use figment::value::magic::RelativePathBuf;
 use reqwest::Client;
@@ -9,6 +9,7 @@ use url::Url;
 use crate::{
     error::{ApiError, Error, ErrorMsg, RequestError},
     schema::UserLoginReq,
+    service::auth::fill_user_auth,
 };
 
 macro_rules! expect_two {
@@ -144,8 +145,9 @@ pub async fn get_user_credential(
     cred_path: Option<&RelativePathBuf>,
     client: &Client,
     mut url: Url,
-    user: Option<&String>,
-    password: Option<&String>,
+    user: Option<String>,
+    password: Option<String>,
+    retain: bool,
 ) -> crate::error::Result<(String, String)> {
     // Try to load credential from file
     let cred_path = cred_path
@@ -163,7 +165,7 @@ pub async fn get_user_credential(
     // Check if the credential is valid
     if cred_path.exists() {
         if let Ok(mut lines) = read_lines(&cred_path).await {
-            if let Some((username, cred)) = extract_credential(user, &mut lines).await? {
+            if let Some((username, cred)) = extract_credential(user.as_ref(), &mut lines).await? {
                 url.set_path("user/auth");
                 let resp = client
                     .get(url.as_str())
@@ -188,30 +190,7 @@ pub async fn get_user_credential(
     }
     // Local credential not found or invalid, need to login
     tracing::warn!("Local credential not found or invalid, need to login");
-    let username = user
-        .map(|u| {
-            println!("Username: {u}");
-            Ok::<_, std::io::Error>(u.clone())
-        })
-        .unwrap_or_else(|| {
-            let mut user = String::new();
-            print!("Username: ");
-            std::io::stdout().flush()?;
-            std::io::stdin().read_line(&mut user)?;
-            user.pop();
-            Ok(user)
-        })?;
-    let md5_password = password
-        .map(|p| Ok::<_, std::io::Error>(md5::compute(p.as_bytes()).0))
-        .unwrap_or_else(|| {
-            let password = rpassword::prompt_password("Password: ")?;
-            Ok(md5::compute(password.as_bytes()).0)
-        })?;
-
-    let req = UserLoginReq {
-        username: username.clone(),
-        md5_password,
-    };
+    let req = fill_user_auth(user, password, retain)?;
     url.set_path("login");
     let resp = client
         .post(url.as_str())
@@ -235,8 +214,8 @@ pub async fn get_user_credential(
         if let Some(parent) = cred_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        modify_or_append_credential(&cred_path, &username, &token).await?;
-        Ok((username, token))
+        modify_or_append_credential(&cred_path, &req.username, &token).await?;
+        Ok((req.username, token))
     } else {
         let resp = resp.json::<ErrorMsg>().await.map_err(RequestError::from)?;
         Err(Error::Custom(resp.msg))

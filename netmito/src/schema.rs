@@ -25,6 +25,8 @@ pub struct CreateUserReq {
 pub struct UserLoginReq {
     pub username: String,
     pub md5_password: [u8; 16],
+    #[serde(default)]
+    pub retain: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

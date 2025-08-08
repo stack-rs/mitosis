@@ -1,7 +1,7 @@
 pub mod cred;
 pub mod token;
 
-use std::net::SocketAddr;
+use std::{io::Write, net::SocketAddr};
 
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
@@ -19,7 +19,7 @@ use crate::{
     config::InfraPool,
     entity::{state::UserState, users as User, workers as Worker},
     error::{ApiError, AuthError},
-    schema::{ChangePasswordReq, UserChangePasswordReq},
+    schema::{ChangePasswordReq, UserChangePasswordReq, UserLoginReq},
 };
 use token::{generate_token, verify_token};
 
@@ -38,10 +38,70 @@ pub struct AuthWorker {
     pub id: i64,
 }
 
+pub(crate) fn get_and_prompt_username(
+    username: Option<String>,
+    prompt: &str,
+) -> crate::error::Result<String> {
+    let username = username
+        .map(|u| {
+            println!("{prompt}: {u}");
+            Ok::<_, std::io::Error>(u.clone())
+        })
+        .unwrap_or_else(|| {
+            let mut user = String::new();
+            print!("{prompt}: ");
+            std::io::stdout().flush()?;
+            std::io::stdin().read_line(&mut user)?;
+            user.pop();
+            Ok(user)
+        })?;
+    Ok(username)
+}
+
+pub(crate) fn get_and_prompt_password(
+    password: Option<String>,
+    prompt: &str,
+) -> crate::error::Result<[u8; 16]> {
+    let md5_password = password
+        .map(|p| {
+            println!("{prompt} Already Given");
+            Ok::<_, std::io::Error>(md5::compute(p.as_bytes()).0)
+        })
+        .unwrap_or_else(|| {
+            let password = rpassword::prompt_password(format!("Please Input {prompt}: "))?;
+            Ok(md5::compute(password.as_bytes()).0)
+        })?;
+    Ok(md5_password)
+}
+
+pub(crate) fn fill_user_auth(
+    username: Option<String>,
+    password: Option<String>,
+    retain: bool,
+) -> crate::error::Result<UserLoginReq> {
+    match (username, password) {
+        (Some(username), Some(password)) => Ok(UserLoginReq {
+            username,
+            md5_password: md5::compute(password.as_bytes()).0,
+            retain,
+        }),
+        (username, password) => {
+            let username = get_and_prompt_username(username, "Username")?;
+            let md5_password = get_and_prompt_password(password, "Password")?;
+            Ok(UserLoginReq {
+                username,
+                md5_password,
+                retain,
+            })
+        }
+    }
+}
+
 pub async fn user_login(
     db: &DatabaseConnection,
     username: &str,
     md5_password: &[u8; 16],
+    retain: bool,
     ip: SocketAddr,
 ) -> crate::error::Result<String> {
     match User::Entity::find()
@@ -58,7 +118,12 @@ pub async fn user_login(
                 .verify_password(md5_password, &parsed_hash)
                 .is_ok()
             {
-                let sign = StdRng::from_os_rng().next_u32() as i64;
+                let sign = if retain {
+                    user.auth_signature
+                        .unwrap_or_else(|| StdRng::from_os_rng().next_u32() as i64)
+                } else {
+                    StdRng::from_os_rng().next_u32() as i64
+                };
                 let token = generate_token(username, sign)?;
                 let now = TimeDateTimeWithTimeZone::now_utc();
                 let active_user = User::ActiveModel {
@@ -153,9 +218,11 @@ pub async fn admin_change_password(
     let argon2 = Argon2::default();
     let password_hash = argon2.hash_password(&new_md5_password, &salt)?.to_string();
     let now = TimeDateTimeWithTimeZone::now_utc();
+    let sign = StdRng::from_os_rng().next_u32() as i64;
     let active_user = User::ActiveModel {
         id: Set(user.id),
         encrypted_password: Set(password_hash),
+        auth_signature: Set(Some(sign)),
         updated_at: Set(now),
         ..Default::default()
     };

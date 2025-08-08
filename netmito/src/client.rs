@@ -1,4 +1,4 @@
-use std::{borrow::Cow, io::Write, path::PathBuf};
+use std::{borrow::Cow, path::PathBuf};
 
 use clap_repl::{
     reedline::{self, FileBackedHistory},
@@ -22,8 +22,12 @@ use crate::{
     error::{get_error_from_resp, map_reqwest_err, RequestError},
     schema::*,
     service::{
-        auth::cred::{
-            get_user_credential, modify_or_append_credential, refresh_user_credential, GetPathBuf,
+        auth::{
+            cred::{
+                get_user_credential, modify_or_append_credential, refresh_user_credential,
+                GetPathBuf,
+            },
+            fill_user_auth, get_and_prompt_password, get_and_prompt_username,
         },
         s3::{download_file, upload_file},
     },
@@ -265,7 +269,7 @@ impl MitoClient {
             .with(tracing_subscriber::fmt::layer())
             .init();
         match ClientConfig::new(&cli) {
-            Ok(config) => match Self::setup(&config).await {
+            Ok(config) => match Self::setup(config).await {
                 Ok(mut client) => {
                     if let Some(cmd) = cli.command.take() {
                         client.handle_command(cmd).await;
@@ -321,7 +325,7 @@ impl MitoClient {
         }
     }
 
-    pub async fn setup(config: &ClientConfig) -> crate::error::Result<Self> {
+    pub async fn setup(config: ClientConfig) -> crate::error::Result<Self> {
         tracing::debug!("Client is setting up");
         let http_client = Client::new();
         let credential_path = config
@@ -342,8 +346,9 @@ impl MitoClient {
             config.credential_path.as_ref(),
             &http_client,
             config.coordinator_addr.clone(),
-            config.user.as_ref(),
-            config.password.as_ref(),
+            config.user,
+            config.password,
+            config.retain,
         )
         .await?;
         let url = config.coordinator_addr.clone();
@@ -1332,19 +1337,21 @@ impl MitoClient {
                     }
                 }
             },
-            ClientCommand::Auth(args) => match fill_user_auth(args.username, args.password) {
-                Ok(req) => match self.auth_user(req).await {
-                    Ok(_) => {
-                        tracing::info!("Successfully authenticated");
-                    }
+            ClientCommand::Auth(args) => {
+                match fill_user_auth(args.username, args.password, args.retain) {
+                    Ok(req) => match self.auth_user(req).await {
+                        Ok(_) => {
+                            tracing::info!("Successfully authenticated");
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    },
                     Err(e) => {
                         tracing::error!("{}", e);
                     }
-                },
-                Err(e) => {
-                    tracing::error!("{}", e);
                 }
-            },
+            }
             ClientCommand::Create(create_args) => match create_args.command {
                 CreateCommands::User(args) => match self.create_user(args).await {
                     Ok(_) => {
@@ -1834,59 +1841,6 @@ fn output_group_info(info: &GroupQueryInfo) {
         tracing::info!("Users in the group:");
         for (user, role) in users {
             tracing::info!(" > {} = {}", user, role);
-        }
-    }
-}
-
-fn get_and_prompt_username(username: Option<String>, prompt: &str) -> crate::error::Result<String> {
-    let username = username
-        .map(|u| {
-            println!("{prompt}: {u}");
-            Ok::<_, std::io::Error>(u.clone())
-        })
-        .unwrap_or_else(|| {
-            let mut user = String::new();
-            print!("{prompt}: ");
-            std::io::stdout().flush()?;
-            std::io::stdin().read_line(&mut user)?;
-            user.pop();
-            Ok(user)
-        })?;
-    Ok(username)
-}
-
-fn get_and_prompt_password(
-    password: Option<String>,
-    prompt: &str,
-) -> crate::error::Result<[u8; 16]> {
-    let md5_password = password
-        .map(|p| {
-            println!("{prompt} Already Given");
-            Ok::<_, std::io::Error>(md5::compute(p.as_bytes()).0)
-        })
-        .unwrap_or_else(|| {
-            let password = rpassword::prompt_password(format!("Please Input {prompt}: "))?;
-            Ok(md5::compute(password.as_bytes()).0)
-        })?;
-    Ok(md5_password)
-}
-
-fn fill_user_auth(
-    username: Option<String>,
-    password: Option<String>,
-) -> crate::error::Result<UserLoginReq> {
-    match (username, password) {
-        (Some(username), Some(password)) => Ok(UserLoginReq {
-            username,
-            md5_password: md5::compute(password.as_bytes()).0,
-        }),
-        (username, password) => {
-            let username = get_and_prompt_username(username, "Username")?;
-            let md5_password = get_and_prompt_password(password, "Password")?;
-            Ok(UserLoginReq {
-                username,
-                md5_password,
-            })
         }
     }
 }

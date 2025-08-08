@@ -248,15 +248,16 @@ impl MitoWorker {
         }
     }
 
-    pub async fn setup(config: WorkerConfig) -> crate::error::Result<(Self, TracingGuard)> {
+    pub async fn setup(mut config: WorkerConfig) -> crate::error::Result<(Self, TracingGuard)> {
         tracing::debug!("Worker is setting up");
         let http_client = Client::new();
         let (_, credential) = get_user_credential(
             config.credential_path.as_ref(),
             &http_client,
             config.coordinator_addr.clone(),
-            config.user.as_ref(),
-            config.password.as_ref(),
+            config.user.take(),
+            config.password.take(),
+            false,
         )
         .await?;
         let mut url = config.coordinator_addr.clone();

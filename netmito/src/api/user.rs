@@ -76,7 +76,7 @@ pub async fn login_user(
     State(pool): State<InfraPool>,
     Json(req): Json<UserLoginReq>,
 ) -> Result<Json<UserLoginResp>, ApiError> {
-    let token = user_login(&pool.db, &req.username, &req.md5_password, addr)
+    let token = user_login(&pool.db, &req.username, &req.md5_password, req.retain, addr)
         .await
         .map_err(|e| match e {
             crate::error::Error::AuthError(err) => ApiError::AuthError(err),

@@ -34,6 +34,7 @@ pub struct ClientConfig {
     pub credential_path: Option<RelativePathBuf>,
     pub user: Option<String>,
     pub password: Option<String>,
+    pub retain: bool,
 }
 
 #[derive(Args, Debug, Serialize, Default)]
@@ -62,6 +63,9 @@ pub struct ClientConfigCli {
     /// Enable interactive mode
     #[arg(short, long)]
     pub interactive: bool,
+    /// Whether to retain the previous login state without refetching the credential
+    #[arg(long)]
+    pub retain: bool,
     /// The command to run
     #[command(subcommand)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -110,6 +114,9 @@ pub struct AuthArgs {
     pub username: Option<String>,
     /// The password of the user
     pub password: Option<String>,
+    /// Whether to retain the previous login state without refetching the credential
+    #[arg(long)]
+    pub retain: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -651,6 +658,7 @@ impl Default for ClientConfig {
             credential_path: None,
             user: None,
             password: None,
+            retain: false,
         }
     }
 }

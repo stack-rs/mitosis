@@ -680,13 +680,23 @@ impl Default for ClientConfig {
 
 impl ClientConfig {
     pub fn new(cli: &ClientConfigCli) -> crate::error::Result<Self> {
-        Ok(Figment::new()
-            .merge(Serialized::from(Self::default(), "client"))
+        let global_config = dirs::config_dir().map(|mut p| {
+            p.push("mitosis");
+            p.push("config.toml");
+            p
+        });
+        let mut figment = Figment::new().merge(Serialized::from(Self::default(), "client"));
+        if let Some(global_config) = global_config {
+            if global_config.exists() {
+                figment = figment.merge(Toml::file(global_config).nested());
+            }
+        }
+        figment = figment
             .merge(Toml::file(cli.config.as_deref().unwrap_or("config.toml")).nested())
             .merge(Env::prefixed("MITO_").profile("client"))
             .merge(Serialized::from(cli, "client"))
-            .select("client")
-            .extract()?)
+            .select("client");
+        Ok(figment.extract()?)
     }
 }
 

@@ -150,13 +150,23 @@ impl Default for CoordinatorConfig {
 
 impl CoordinatorConfig {
     pub fn new(cli: &CoordinatorConfigCli) -> crate::error::Result<Self> {
-        Ok(Figment::new()
-            .merge(Serialized::from(Self::default(), "coordinator"))
+        let global_config = dirs::config_dir().map(|mut p| {
+            p.push("mitosis");
+            p.push("config.toml");
+            p
+        });
+        let mut figment = Figment::new().merge(Serialized::from(Self::default(), "coordinator"));
+        if let Some(global_config) = global_config {
+            if global_config.exists() {
+                figment = figment.merge(Toml::file(global_config).nested());
+            }
+        }
+        figment = figment
             .merge(Toml::file(cli.config.as_deref().unwrap_or("config.toml")).nested())
             .merge(Env::prefixed("MITO_").profile("coordinator"))
             .merge(Serialized::from(cli, "coordinator"))
-            .select("coordinator")
-            .extract()?)
+            .select("coordinator");
+        Ok(figment.extract()?)
     }
 
     pub fn build_worker_task_queue(

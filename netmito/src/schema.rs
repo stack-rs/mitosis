@@ -312,6 +312,7 @@ pub struct WorkersQueryReq {
     pub role: Option<HashSet<GroupWorkerRole>>,
     pub tags: Option<HashSet<String>>,
     pub creator_username: Option<String>,
+    pub count: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromQueryResult)]
@@ -325,6 +326,11 @@ pub(crate) struct RawWorkerQueryInfo {
     pub(crate) state: WorkerState,
     pub(crate) last_heartbeat: OffsetDateTime,
     pub(crate) assigned_task_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromQueryResult)]
+pub struct CountQuery {
+    pub count: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromQueryResult)]
@@ -347,6 +353,7 @@ pub struct WorkerQueryResp {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkersQueryResp {
+    pub count: u64,
     pub workers: Vec<WorkerQueryInfo>,
     pub group_name: String,
 }

@@ -1500,19 +1500,24 @@ impl MitoClient {
                 },
                 GetCommands::Workers(args) => {
                     let verbose = args.verbose;
+                    let counted = args.count;
                     match self.get_workers(args.into()).await {
                         Ok(resp) => {
                             let WorkersQueryResp {
+                                count,
                                 workers,
                                 group_name,
                             } = resp;
-                            if verbose {
-                                for worker in workers {
-                                    output_worker_list_info(&worker, &group_name);
-                                }
-                            } else {
-                                for worker in workers {
-                                    tracing::info!("{}", worker.worker_id);
+                            tracing::info!("Found {} workers in group {}", count, group_name);
+                            if !counted {
+                                if verbose {
+                                    for worker in workers {
+                                        output_worker_list_info(&worker, &group_name);
+                                    }
+                                } else {
+                                    for worker in workers {
+                                        tracing::info!("{}", worker.worker_id);
+                                    }
                                 }
                             }
                         }
@@ -1531,8 +1536,9 @@ impl MitoClient {
                 },
                 GetCommands::Groups => match self.get_groups().await {
                     Ok(resp) => {
+                        tracing::info!("Currently in {} groups", resp.groups.len());
                         for (group, role) in resp.groups {
-                            tracing::info!("{} = {}", group, role);
+                            tracing::info!("Have {} access for group {}", role, group);
                         }
                     }
                     Err(e) => {

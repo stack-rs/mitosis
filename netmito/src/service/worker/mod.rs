@@ -29,7 +29,7 @@ use crate::{
     },
     error::{ApiError, Error},
     schema::{
-        RawWorkerQueryInfo, ReportTaskOp, TaskSpec, WorkerQueryInfo, WorkerQueryResp,
+        CountQuery, RawWorkerQueryInfo, ReportTaskOp, TaskSpec, WorkerQueryInfo, WorkerQueryResp,
         WorkerShutdownOp, WorkerTaskResp, WorkersQueryReq, WorkersQueryResp,
     },
     service::s3::group_upload_artifact,
@@ -742,8 +742,11 @@ pub async fn query_worker_list(
         .one(&pool.db)
         .await?
         .ok_or(crate::error::AuthError::PermissionDenied)?;
-    let mut stmt = Query::select()
-        .columns([
+    let mut stmt = Query::select().to_owned();
+    if query.count {
+        stmt.expr(Expr::col((Worker::Entity, Worker::Column::WorkerId)).count());
+    } else {
+        stmt.columns([
             (Worker::Entity, Worker::Column::WorkerId),
             (Worker::Entity, Worker::Column::Tags),
             (Worker::Entity, Worker::Column::CreatedAt),
@@ -762,8 +765,9 @@ pub async fn query_worker_list(
             )
             .finally(Expr::col((ActiveTask::Entity, ActiveTask::Column::Uuid))),
             Alias::new("assigned_task_id"),
-        )
-        .from(Worker::Entity)
+        );
+    }
+    stmt.from(Worker::Entity)
         .join(
             sea_orm::JoinType::LeftJoin,
             ActiveTask::Entity,
@@ -785,8 +789,7 @@ pub async fn query_worker_list(
         .and_where(
             Expr::col((GroupWorker::Entity, GroupWorker::Column::GroupId))
                 .eq(user_group_role.group_id),
-        )
-        .to_owned();
+        );
     if let Some(tags) = query.tags {
         let tags: Vec<String> = tags.into_iter().collect();
         stmt.and_where(Expr::col((Worker::Entity, Worker::Column::Tags)).contains(tags));
@@ -803,12 +806,26 @@ pub async fn query_worker_list(
                 .eq(sea_orm::sea_query::PgFunc::any(role)),
         );
     }
-    let workers = WorkerQueryInfo::find_by_statement(builder.build(&stmt))
-        .all(&pool.db)
-        .await?;
-    let resp = WorkersQueryResp {
-        workers,
-        group_name: user_group_role.group_name,
+    let resp = if query.count {
+        let count = CountQuery::find_by_statement(builder.build(&stmt))
+            .one(&pool.db)
+            .await?
+            .map(|c| c.count)
+            .unwrap_or(0) as u64;
+        WorkersQueryResp {
+            count,
+            workers: vec![],
+            group_name: user_group_role.group_name,
+        }
+    } else {
+        let workers = WorkerQueryInfo::find_by_statement(builder.build(&stmt))
+            .all(&pool.db)
+            .await?;
+        WorkersQueryResp {
+            count: workers.len() as u64,
+            workers,
+            group_name: user_group_role.group_name,
+        }
     };
     Ok(resp)
 }

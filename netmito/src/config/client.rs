@@ -473,6 +473,9 @@ pub struct GetWorkersArgs {
     /// Whether to output the verbose information of workers
     #[arg(short, long)]
     pub verbose: bool,
+    /// Only count the number of workers
+    #[arg(long)]
+    pub count: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -1071,6 +1074,7 @@ impl From<GetWorkersArgs> for WorkersQueryReq {
                 Some(args.tags.into_iter().collect())
             },
             creator_username: args.creator,
+            count: args.count,
         }
     }
 }

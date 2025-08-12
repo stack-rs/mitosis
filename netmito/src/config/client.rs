@@ -452,6 +452,9 @@ pub struct GetAttachmentsArgs {
     /// The offset of the tasks to query
     #[arg(long)]
     pub offset: Option<u64>,
+    /// Only count the number of workers
+    #[arg(long)]
+    pub count: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -1037,6 +1040,7 @@ impl From<GetAttachmentsArgs> for AttachmentsQueryReq {
             key_prefix: args.key_prefix,
             limit: args.limit,
             offset: args.offset,
+            count: args.count,
         }
     }
 }

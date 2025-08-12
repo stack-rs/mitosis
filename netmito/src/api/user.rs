@@ -314,7 +314,7 @@ pub async fn query_attachments(
     Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
     Json(req): Json<AttachmentsQueryReq>,
-) -> Result<Json<Vec<AttachmentQueryInfo>>, ApiError> {
+) -> Result<Json<AttachmentsQueryResp>, ApiError> {
     let attachments = query_attachment_list(u.id, &pool, req)
         .await
         .map_err(|e| match e {

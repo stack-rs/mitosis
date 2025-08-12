@@ -295,6 +295,7 @@ pub struct AttachmentsQueryReq {
     pub key_prefix: Option<String>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
+    pub count: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromQueryResult)]
@@ -304,6 +305,13 @@ pub struct AttachmentQueryInfo {
     pub size: i64,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AttachmentsQueryResp {
+    pub count: u64,
+    pub attachments: Vec<AttachmentQueryInfo>,
+    pub group_name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

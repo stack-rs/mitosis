@@ -14,7 +14,9 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use crate::schema::{AttachmentMetadata, RemoteResourceDownloadResp};
+use crate::schema::{
+    AttachmentMetadata, AttachmentsQueryResp, CountQuery, RemoteResourceDownloadResp,
+};
 use crate::{config::InfraPool, error::S3Error};
 use crate::{
     entity::StoredTaskModel,
@@ -722,19 +724,23 @@ pub async fn query_attachment_list(
     user_id: i64,
     pool: &InfraPool,
     mut query: AttachmentsQueryReq,
-) -> Result<Vec<AttachmentQueryInfo>, crate::error::Error> {
+) -> Result<AttachmentsQueryResp, crate::error::Error> {
     check_task_list_query(user_id, pool, &mut query).await?;
     let key_prefix = query.key_prefix.take().unwrap_or_default();
     let group_name = query.group_name.unwrap();
     let mut attachment_stmt = Query::select();
-    attachment_stmt
-        .columns([
+    if query.count {
+        attachment_stmt.expr(Expr::col((Attachment::Entity, Attachment::Column::Id)).count());
+    } else {
+        attachment_stmt.columns([
             (Attachment::Entity, Attachment::Column::Key),
             (Attachment::Entity, Attachment::Column::ContentType),
             (Attachment::Entity, Attachment::Column::Size),
             (Attachment::Entity, Attachment::Column::CreatedAt),
             (Attachment::Entity, Attachment::Column::UpdatedAt),
-        ])
+        ]);
+    }
+    attachment_stmt
         .from(Attachment::Entity)
         .join(
             sea_orm::JoinType::Join,
@@ -742,9 +748,10 @@ pub async fn query_attachment_list(
             Expr::col((Group::Entity, Group::Column::Id))
                 .eq(Expr::col((Attachment::Entity, Attachment::Column::GroupId))),
         )
-        .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name))
+        .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()))
         .and_where(
-            Expr::col((Attachment::Entity, Attachment::Column::Key)).like(format!("{key_prefix}%")),
+            Expr::col((Attachment::Entity, Attachment::Column::Key))
+                .like(format!("%{key_prefix}%")),
         );
     if let Some(limit) = query.limit {
         attachment_stmt.limit(limit);
@@ -753,8 +760,26 @@ pub async fn query_attachment_list(
         attachment_stmt.offset(offset);
     }
     let builder = pool.db.get_database_backend();
-    let attachments = AttachmentQueryInfo::find_by_statement(builder.build(&attachment_stmt))
-        .all(&pool.db)
-        .await?;
-    Ok(attachments)
+    let resp = if query.count {
+        let count = CountQuery::find_by_statement(builder.build(&attachment_stmt))
+            .one(&pool.db)
+            .await?
+            .map(|c| c.count)
+            .unwrap_or(0) as u64;
+        AttachmentsQueryResp {
+            count,
+            attachments: vec![],
+            group_name,
+        }
+    } else {
+        let attachments = AttachmentQueryInfo::find_by_statement(builder.build(&attachment_stmt))
+            .all(&pool.db)
+            .await?;
+        AttachmentsQueryResp {
+            count: attachments.len() as u64,
+            attachments,
+            group_name,
+        }
+    };
+    Ok(resp)
 }

@@ -865,7 +865,7 @@ impl MitoClient {
     pub async fn get_attachments(
         &mut self,
         args: AttachmentsQueryReq,
-    ) -> crate::error::Result<Vec<AttachmentQueryInfo>> {
+    ) -> crate::error::Result<AttachmentsQueryResp> {
         self.url.set_path("user/filters/attachments");
         let resp = self
             .http_client
@@ -877,7 +877,7 @@ impl MitoClient {
             .map_err(map_reqwest_err)?;
         if resp.status().is_success() {
             let resp = resp
-                .json::<Vec<AttachmentQueryInfo>>()
+                .json::<AttachmentsQueryResp>()
                 .await
                 .map_err(RequestError::from)?;
             Ok(resp)
@@ -1494,22 +1494,34 @@ impl MitoClient {
                         tracing::error!("{}", e);
                     }
                 },
-                GetCommands::Attachments(args) => match self.get_attachments(args.into()).await {
-                    Ok(attachments) => {
-                        for attachment in attachments {
-                            tracing::info!(
-                                "Attachment {} of size {}B, Created at {} and Updated at {}",
-                                attachment.key,
-                                attachment.size,
-                                attachment.created_at,
-                                attachment.updated_at
-                            );
+                GetCommands::Attachments(args) => {
+                    let counted = args.count;
+                    match self.get_attachments(args.into()).await {
+                        Ok(resp) => {
+                            let AttachmentsQueryResp {
+                                count,
+                                attachments,
+                                group_name,
+                            } = resp;
+
+                            tracing::info!("Found {} attachments in group {}", count, group_name);
+                            if !counted {
+                                for attachment in attachments {
+                                    tracing::info!(
+                                    "Attachment {} of size {}B, Created at {} and Updated at {}",
+                                    attachment.key,
+                                    attachment.size,
+                                    attachment.created_at,
+                                    attachment.updated_at
+                                );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
                         }
                     }
-                    Err(e) => {
-                        tracing::error!("{}", e);
-                    }
-                },
+                }
                 GetCommands::Worker(args) => match self.get_worker(args).await {
                     Ok(resp) => {
                         output_worker_info(&resp.info, &resp.groups);

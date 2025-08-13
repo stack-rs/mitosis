@@ -576,7 +576,7 @@ async fn execute_task(
     task_executor
         .announce_task_state_ex(&task.uuid, TaskExecState::FetchResource as i32, 360)
         .await;
-    // Allow downloading resources for 5 minutes
+    // Allow downloading resources for at most 30 minutes
     let timeout_until = tokio::time::Instant::now() + std::time::Duration::from_secs(1800);
     for resource in task.spec.resources {
         match resource.remote_file {

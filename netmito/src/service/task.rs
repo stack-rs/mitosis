@@ -1,13 +1,14 @@
 use sea_orm::sea_query::extension::postgres::PgExpr;
-use sea_orm::sea_query::{Alias, PgFunc, Query};
+use sea_orm::sea_query::{Alias, ExprTrait, PgFunc, Query};
 use sea_orm::{prelude::*, FromQueryResult, Set, TransactionTrait};
 use uuid::Uuid;
 
 use crate::entity::role::{GroupWorkerRole, UserGroupRole};
 use crate::entity::state::TaskState;
 use crate::schema::{
-    ArtifactQueryResp, ChangeTaskReq, ParsedTaskQueryInfo, SubmitTaskReq, SubmitTaskResp,
-    TaskQueryInfo, TaskQueryResp, TaskResultSpec, TasksQueryReq, UpdateTaskLabelsReq,
+    ArtifactQueryResp, ChangeTaskReq, CountQuery, ParsedTaskQueryInfo, SubmitTaskReq,
+    SubmitTaskResp, TaskQueryInfo, TaskQueryResp, TaskResultSpec, TasksQueryReq, TasksQueryResp,
+    UpdateTaskLabelsReq,
 };
 use crate::{config::InfraPool, schema::TaskSpec};
 
@@ -517,6 +518,20 @@ async fn check_task_list_query(
             )));
         }
     }
+    if let Some(ref creator_usernames) = query.creator_usernames {
+        if creator_usernames.is_empty() {
+            return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                "Creator username cannot be empty if specified".to_string(),
+            )));
+        }
+    }
+    if let Some(ref states) = query.states {
+        if states.is_empty() {
+            return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                "State cannot be empty if specified".to_string(),
+            )));
+        }
+    }
     match query.group_name {
         Some(ref group_name) => {
             let builder = pool.db.get_database_backend();
@@ -560,35 +575,70 @@ async fn check_task_list_query(
     Ok(())
 }
 
+#[derive(Debug, Copy, Clone)]
+pub(crate) enum OperatorWithNumber {
+    Eq(i32),
+    Neq(i32),
+    Gt(i32),
+    Gte(i32),
+    Lt(i32),
+    Lte(i32),
+}
+
+// Parse operators with number
+pub(crate) fn parse_operators_with_number(s: &str) -> crate::error::Result<OperatorWithNumber> {
+    fn parse_i32(s: &str) -> crate::error::Result<i32> {
+        s.parse::<i32>().map_err(|e| {
+            Error::ApiError(crate::error::ApiError::InvalidRequest(format!(
+                "Failed to parse number from {s}: {e}"
+            )))
+        })
+    }
+    match s {
+        s if s.starts_with(">=") => Ok(OperatorWithNumber::Gte(parse_i32(&s[2..])?)),
+        s if s.starts_with("<=") => Ok(OperatorWithNumber::Lte(parse_i32(&s[2..])?)),
+        s if s.starts_with("!=") => Ok(OperatorWithNumber::Neq(parse_i32(&s[2..])?)),
+        s if s.starts_with('>') => Ok(OperatorWithNumber::Gt(parse_i32(&s[1..])?)),
+        s if s.starts_with('<') => Ok(OperatorWithNumber::Lt(parse_i32(&s[1..])?)),
+        s if s.starts_with('=') => Ok(OperatorWithNumber::Eq(parse_i32(&s[1..])?)),
+        s => Ok(OperatorWithNumber::Eq(parse_i32(s)?)),
+    }
+}
+
 pub async fn query_task_list(
     user_id: i64,
     pool: &InfraPool,
     mut query: TasksQueryReq,
-) -> crate::error::Result<Vec<TaskQueryInfo>> {
+) -> crate::error::Result<TasksQueryResp> {
     check_task_list_query(user_id, pool, &mut query).await?;
     let mut active_stmt = Query::select();
+    if query.count {
+        active_stmt.expr(Expr::col((ActiveTask::Entity, ActiveTask::Column::Uuid)).count());
+    } else {
+        active_stmt
+            .columns([
+                (ActiveTask::Entity, ActiveTask::Column::Uuid),
+                (ActiveTask::Entity, ActiveTask::Column::TaskId),
+                (ActiveTask::Entity, ActiveTask::Column::Tags),
+                (ActiveTask::Entity, ActiveTask::Column::Labels),
+                (ActiveTask::Entity, ActiveTask::Column::CreatedAt),
+                (ActiveTask::Entity, ActiveTask::Column::UpdatedAt),
+                (ActiveTask::Entity, ActiveTask::Column::State),
+                (ActiveTask::Entity, ActiveTask::Column::Timeout),
+                (ActiveTask::Entity, ActiveTask::Column::Priority),
+                (ActiveTask::Entity, ActiveTask::Column::Spec),
+                (ActiveTask::Entity, ActiveTask::Column::Result),
+            ])
+            .expr_as(
+                Expr::col((User::Entity, User::Column::Username)),
+                Alias::new("creator_username"),
+            )
+            .expr_as(
+                Expr::col((Group::Entity, Group::Column::GroupName)),
+                Alias::new("group_name"),
+            );
+    }
     active_stmt
-        .columns([
-            (ActiveTask::Entity, ActiveTask::Column::Uuid),
-            (ActiveTask::Entity, ActiveTask::Column::TaskId),
-            (ActiveTask::Entity, ActiveTask::Column::Tags),
-            (ActiveTask::Entity, ActiveTask::Column::Labels),
-            (ActiveTask::Entity, ActiveTask::Column::CreatedAt),
-            (ActiveTask::Entity, ActiveTask::Column::UpdatedAt),
-            (ActiveTask::Entity, ActiveTask::Column::State),
-            (ActiveTask::Entity, ActiveTask::Column::Timeout),
-            (ActiveTask::Entity, ActiveTask::Column::Priority),
-            (ActiveTask::Entity, ActiveTask::Column::Spec),
-            (ActiveTask::Entity, ActiveTask::Column::Result),
-        ])
-        .expr_as(
-            Expr::col((User::Entity, User::Column::Username)),
-            Alias::new("creator_username"),
-        )
-        .expr_as(
-            Expr::col((Group::Entity, Group::Column::GroupName)),
-            Alias::new("group_name"),
-        )
         .from(ActiveTask::Entity)
         .join(
             sea_orm::JoinType::Join,
@@ -605,28 +655,33 @@ pub async fn query_task_list(
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
         );
     let mut archive_stmt = Query::select();
+    if query.count {
+        archive_stmt.expr(Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Uuid)).count());
+    } else {
+        archive_stmt
+            .columns([
+                (ArchivedTasks::Entity, ArchivedTasks::Column::Uuid),
+                (ArchivedTasks::Entity, ArchivedTasks::Column::TaskId),
+                (ArchivedTasks::Entity, ArchivedTasks::Column::Tags),
+                (ArchivedTasks::Entity, ArchivedTasks::Column::Labels),
+                (ArchivedTasks::Entity, ArchivedTasks::Column::CreatedAt),
+                (ArchivedTasks::Entity, ArchivedTasks::Column::UpdatedAt),
+                (ArchivedTasks::Entity, ArchivedTasks::Column::State),
+                (ArchivedTasks::Entity, ArchivedTasks::Column::Timeout),
+                (ArchivedTasks::Entity, ArchivedTasks::Column::Priority),
+                (ArchivedTasks::Entity, ArchivedTasks::Column::Spec),
+                (ArchivedTasks::Entity, ArchivedTasks::Column::Result),
+            ])
+            .expr_as(
+                Expr::col((User::Entity, User::Column::Username)),
+                Alias::new("creator_username"),
+            )
+            .expr_as(
+                Expr::col((Group::Entity, Group::Column::GroupName)),
+                Alias::new("group_name"),
+            );
+    }
     archive_stmt
-        .columns([
-            (ArchivedTasks::Entity, ArchivedTasks::Column::Uuid),
-            (ArchivedTasks::Entity, ArchivedTasks::Column::TaskId),
-            (ArchivedTasks::Entity, ArchivedTasks::Column::Tags),
-            (ArchivedTasks::Entity, ArchivedTasks::Column::Labels),
-            (ArchivedTasks::Entity, ArchivedTasks::Column::CreatedAt),
-            (ArchivedTasks::Entity, ArchivedTasks::Column::UpdatedAt),
-            (ArchivedTasks::Entity, ArchivedTasks::Column::State),
-            (ArchivedTasks::Entity, ArchivedTasks::Column::Timeout),
-            (ArchivedTasks::Entity, ArchivedTasks::Column::Priority),
-            (ArchivedTasks::Entity, ArchivedTasks::Column::Spec),
-            (ArchivedTasks::Entity, ArchivedTasks::Column::Result),
-        ])
-        .expr_as(
-            Expr::col((User::Entity, User::Column::Username)),
-            Alias::new("creator_username"),
-        )
-        .expr_as(
-            Expr::col((Group::Entity, Group::Column::GroupName)),
-            Alias::new("group_name"),
-        )
         .from(ArchivedTasks::Entity)
         .join(
             sea_orm::JoinType::Join,
@@ -642,17 +697,21 @@ pub async fn query_task_list(
             Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
         );
-    if let Some(creator_username) = query.creator_username {
+    if let Some(creator_usernames) = query.creator_usernames {
+        let creator_usernames = Vec::from_iter(creator_usernames);
         active_stmt.and_where(
-            Expr::col((User::Entity, User::Column::Username)).eq(creator_username.clone()),
+            Expr::col((User::Entity, User::Column::Username))
+                .eq(PgFunc::any(creator_usernames.clone())),
         );
-        archive_stmt
-            .and_where(Expr::col((User::Entity, User::Column::Username)).eq(creator_username));
+        archive_stmt.and_where(
+            Expr::col((User::Entity, User::Column::Username)).eq(PgFunc::any(creator_usernames)),
+        );
     }
-    if let Some(group_name) = query.group_name {
+    if let Some(ref group_name) = query.group_name {
         active_stmt
             .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()));
-        archive_stmt.and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name));
+        archive_stmt
+            .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()));
     }
     if let Some(tags) = query.tags {
         let tags = Vec::from_iter(tags);
@@ -672,10 +731,142 @@ pub async fn query_task_list(
             Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Labels)).contains(labels),
         );
     }
-    if let Some(state) = query.state {
-        active_stmt.and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::State)).eq(state));
-        archive_stmt
-            .and_where(Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::State)).eq(state));
+    if let Some(states) = query.states {
+        let states = Vec::from_iter(states);
+        active_stmt.and_where(
+            Expr::col((ActiveTask::Entity, ActiveTask::Column::State))
+                .eq(PgFunc::any(states.clone())),
+        );
+        archive_stmt.and_where(
+            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::State))
+                .eq(PgFunc::any(states)),
+        );
+    }
+    if let Some(exit_status) = query.exit_status {
+        let op = parse_operators_with_number(&exit_status)?;
+        match op {
+            OperatorWithNumber::Eq(e) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Result))
+                        .cast_json_field("exit_status")
+                        .eq(e.to_string()),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .eq(e.to_string()),
+                );
+            }
+            OperatorWithNumber::Neq(e) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Result))
+                        .cast_json_field("exit_status")
+                        .ne(e.to_string()),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .ne(e.to_string()),
+                );
+            }
+            OperatorWithNumber::Gt(e) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Result))
+                        .cast_json_field("exit_status")
+                        .gt(e.to_string()),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .gt(e.to_string()),
+                );
+            }
+            OperatorWithNumber::Gte(e) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Result))
+                        .cast_json_field("exit_status")
+                        .gte(e.to_string()),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .gte(e.to_string()),
+                );
+            }
+            OperatorWithNumber::Lt(e) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Result))
+                        .cast_json_field("exit_status")
+                        .lt(e.to_string()),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .lt(e.to_string()),
+                );
+            }
+            OperatorWithNumber::Lte(e) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Result))
+                        .cast_json_field("exit_status")
+                        .lte(e.to_string()),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .lte(e.to_string()),
+                );
+            }
+        }
+    }
+    if let Some(priority) = query.priority {
+        let op = parse_operators_with_number(&priority)?;
+        match op {
+            OperatorWithNumber::Eq(p) => {
+                active_stmt
+                    .and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::Priority)).eq(p));
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).eq(p),
+                );
+            }
+            OperatorWithNumber::Neq(p) => {
+                active_stmt
+                    .and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::Priority)).ne(p));
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).ne(p),
+                );
+            }
+            OperatorWithNumber::Gt(p) => {
+                active_stmt
+                    .and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::Priority)).gt(p));
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).gt(p),
+                );
+            }
+            OperatorWithNumber::Gte(p) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Priority)).gte(p),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).gte(p),
+                );
+            }
+            OperatorWithNumber::Lt(p) => {
+                active_stmt
+                    .and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::Priority)).lt(p));
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).lt(p),
+                );
+            }
+            OperatorWithNumber::Lte(p) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Priority)).lte(p),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).lte(p),
+                );
+            }
+        }
     }
     if let Some(limit) = query.limit {
         active_stmt.limit(limit);
@@ -686,14 +877,37 @@ pub async fn query_task_list(
         archive_stmt.offset(offset);
     }
     let builder = pool.db.get_database_backend();
-    let mut active_info = TaskQueryInfo::find_by_statement(builder.build(&active_stmt))
-        .all(&pool.db)
-        .await?;
-    let mut archive_info = TaskQueryInfo::find_by_statement(builder.build(&archive_stmt))
-        .all(&pool.db)
-        .await?;
-    active_info.append(&mut archive_info);
-    Ok(active_info)
+    let resp = if query.count {
+        let active_count = CountQuery::find_by_statement(builder.build(&active_stmt))
+            .one(&pool.db)
+            .await?
+            .map(|c| c.count)
+            .unwrap_or(0) as u64;
+        let archive_count = CountQuery::find_by_statement(builder.build(&archive_stmt))
+            .one(&pool.db)
+            .await?
+            .map(|c| c.count)
+            .unwrap_or(0) as u64;
+        TasksQueryResp {
+            count: active_count + archive_count,
+            tasks: vec![],
+            group_name: query.group_name.unwrap_or_default(),
+        }
+    } else {
+        let mut active_info = TaskQueryInfo::find_by_statement(builder.build(&active_stmt))
+            .all(&pool.db)
+            .await?;
+        let mut archive_info = TaskQueryInfo::find_by_statement(builder.build(&archive_stmt))
+            .all(&pool.db)
+            .await?;
+        active_info.append(&mut archive_info);
+        TasksQueryResp {
+            count: active_info.len() as u64,
+            tasks: active_info,
+            group_name: query.group_name.unwrap_or_default(),
+        }
+    };
+    Ok(resp)
 }
 
 #[derive(Debug, Clone, FromQueryResult)]

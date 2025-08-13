@@ -838,10 +838,7 @@ impl MitoClient {
         }
     }
 
-    pub async fn get_tasks(
-        &mut self,
-        args: TasksQueryReq,
-    ) -> crate::error::Result<Vec<TaskQueryInfo>> {
+    pub async fn get_tasks(&mut self, args: TasksQueryReq) -> crate::error::Result<TasksQueryResp> {
         self.url.set_path("user/filters/tasks");
         let resp = self
             .http_client
@@ -853,7 +850,7 @@ impl MitoClient {
             .map_err(map_reqwest_err)?;
         if resp.status().is_success() {
             let resp = resp
-                .json::<Vec<TaskQueryInfo>>()
+                .json::<TasksQueryResp>()
                 .await
                 .map_err(RequestError::from)?;
             Ok(resp)
@@ -1439,15 +1436,19 @@ impl MitoClient {
                 }
                 GetCommands::Tasks(args) => {
                     let verbose = args.verbose;
+                    let counted = args.count;
                     match self.get_tasks(args.into()).await {
-                        Ok(tasks) => {
-                            if verbose {
-                                for task in tasks {
-                                    output_task_info(&task);
-                                }
-                            } else {
-                                for task in tasks {
-                                    tracing::info!("{}", task.uuid);
+                        Ok(resp) => {
+                            tracing::info!("Found {} tasks", resp.count);
+                            if !counted {
+                                if verbose {
+                                    for task in resp.tasks {
+                                        output_task_info(&task);
+                                    }
+                                } else {
+                                    for task in resp.tasks {
+                                        tracing::info!("{}", task.uuid);
+                                    }
                                 }
                             }
                         }

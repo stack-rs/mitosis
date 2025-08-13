@@ -372,8 +372,8 @@ pub struct GetArtifactCmdArgs {
 #[derive(Serialize, Debug, Deserialize, Args)]
 pub struct GetTasksArgs {
     /// The username of the creator who submitted the tasks
-    #[arg(short, long)]
-    pub creator: Option<String>,
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub creators: Vec<String>,
     /// The name of the group the tasks belong to
     #[arg(short, long)]
     pub group: Option<String>,
@@ -384,8 +384,14 @@ pub struct GetTasksArgs {
     #[arg(short, long, num_args = 0.., value_delimiter = ',')]
     pub labels: Vec<String>,
     /// The state of the tasks
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub state: Vec<TaskState>,
+    /// The exit status of the tasks, support operators like `=`(default), `!=`, `<`, `<=`, `>`, `>=`
     #[arg(short, long)]
-    pub state: Option<TaskState>,
+    pub exit_status: Option<String>,
+    /// The priority of the tasks, support operators like `=`(default), `!=`, `<`, `<=`, `>`, `>=`
+    #[arg(short, long)]
+    pub priority: Option<String>,
     /// The limit of the tasks to query
     #[arg(long)]
     pub limit: Option<u64>,
@@ -395,6 +401,9 @@ pub struct GetTasksArgs {
     /// Whether to output the verbose information of workers
     #[arg(short, long)]
     pub verbose: bool,
+    /// Only count the number of workers
+    #[arg(long)]
+    pub count: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize)]
@@ -994,7 +1003,11 @@ impl From<ChangeTaskArgs> for ChangeTaskReq {
 impl From<GetTasksArgs> for TasksQueryReq {
     fn from(args: GetTasksArgs) -> Self {
         Self {
-            creator_username: args.creator,
+            creator_usernames: if args.creators.is_empty() {
+                None
+            } else {
+                Some(args.creators.into_iter().collect())
+            },
             group_name: args.group,
             tags: if args.tags.is_empty() {
                 None
@@ -1006,9 +1019,16 @@ impl From<GetTasksArgs> for TasksQueryReq {
             } else {
                 Some(args.labels.into_iter().collect())
             },
-            state: args.state,
+            states: if args.state.is_empty() {
+                None
+            } else {
+                Some(args.state.into_iter().collect())
+            },
+            exit_status: args.exit_status,
+            priority: args.priority,
             limit: args.limit,
             offset: args.offset,
+            count: args.count,
         }
     }
 }

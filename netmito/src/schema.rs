@@ -266,19 +266,29 @@ pub struct ParsedTaskQueryInfo {
 /// The relationship between the fields is AND.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TasksQueryReq {
-    pub creator_username: Option<String>,
+    pub creator_usernames: Option<HashSet<String>>,
     pub group_name: Option<String>,
     pub tags: Option<HashSet<String>>,
     pub labels: Option<HashSet<String>>,
-    pub state: Option<TaskState>,
+    pub states: Option<HashSet<TaskState>>,
+    pub exit_status: Option<String>,
+    pub priority: Option<String>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
+    pub count: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TaskQueryResp {
     pub info: ParsedTaskQueryInfo,
     pub artifacts: Vec<ArtifactQueryResp>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TasksQueryResp {
+    pub count: u64,
+    pub tasks: Vec<TaskQueryInfo>,
+    pub group_name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

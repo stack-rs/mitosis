@@ -206,7 +206,7 @@ pub async fn query_tasks(
     Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
     Json(req): Json<TasksQueryReq>,
-) -> Result<Json<Vec<TaskQueryInfo>>, ApiError> {
+) -> Result<Json<TasksQueryResp>, ApiError> {
     let tasks = query_task_list(u.id, &pool, req)
         .await
         .map_err(|e| match e {

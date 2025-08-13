@@ -45,7 +45,17 @@ impl Display for GroupState {
 }
 
 #[derive(
-    EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy, ValueEnum,
+    EnumIter,
+    DeriveActiveEnum,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Copy,
+    ValueEnum,
+    Hash,
 )]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum TaskState {

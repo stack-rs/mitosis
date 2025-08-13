@@ -530,6 +530,8 @@ pub struct UploadAttachmentArgs {
     /// The path of the local file to upload
     pub local_file: PathBuf,
     /// The key of the attachment uploaded to. If not specified, the filename will be used.
+    /// If the key specified is a directory (ends with '/'),
+    /// the filename (final component of local file) will be appended to it.
     pub key: Option<String>,
     /// Whether to show progress bar when downloading
     #[arg(long)]

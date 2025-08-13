@@ -1043,16 +1043,6 @@ impl MitoClient {
         args: UploadAttachmentArgs,
     ) -> crate::error::Result<()> {
         self.url.set_path("user/attachments");
-        let key = match args.key {
-            Some(k) => k,
-            None => args
-                .local_file
-                .file_name()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_string())
-                .ok_or(crate::error::Error::Custom("Key is required".to_string()))?,
-        };
-        let key = path_clean::clean(key).display().to_string();
         let metadata = args
             .local_file
             .metadata()
@@ -1062,6 +1052,30 @@ impl MitoClient {
                 "Currently we do not support uploading a directory".to_string(),
             ));
         }
+        let key = match args.key {
+            Some(k) => {
+                if k.ends_with('/') {
+                    let file_name = args
+                        .local_file
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
+                        .ok_or(crate::error::Error::Custom(
+                            "Complete key is not provided or local file is invalid".to_string(),
+                        ))?;
+                    k + &file_name
+                } else {
+                    k
+                }
+            }
+            None => args
+                .local_file
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .ok_or(crate::error::Error::Custom("Key is required".to_string()))?,
+        };
+        let key = path_clean::clean(key).display().to_string();
         let content_length = metadata.len();
         let req = UploadAttachmentReq {
             group_name: args.group_name.unwrap_or(self.username.clone()),

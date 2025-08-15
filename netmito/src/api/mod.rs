@@ -71,6 +71,13 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
     {
         Router::new()
             .route(
+                "/auth",
+                get(user::auth_user).layer(middleware::from_fn_with_state(
+                    st.clone(),
+                    user_auth_with_name_middleware,
+                )),
+            )
+            .route(
                 "/health",
                 get(|| async { (StatusCode::OK, Json(json!({"status": "ok"}))) }),
             )

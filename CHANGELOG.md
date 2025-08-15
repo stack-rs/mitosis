@@ -2,6 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0](https://github.com/stack-rs/mitosis/compare/mito-v0.4.0...mito-v0.5.0) - 2025-08-15
+
+### Features
+
+- *(api)* Support admin change group storage quota - ([1551880](https://github.com/stack-rs/mitosis/commit/1551880572c8ed14bc919ed850204fc2fbd836be))
+- *(api)* Support change password - ([9a52468](https://github.com/stack-rs/mitosis/commit/9a524680ab1b038f220ee51fa98904f1f413b900))
+- *(api)* Return username for auth interface - ([2bb8999](https://github.com/stack-rs/mitosis/commit/2bb899949b1b88186571486d1056c3e482c8e8d9))
+- *(api)* Support delete artifact and attachment - ([332998f](https://github.com/stack-rs/mitosis/commit/332998ff002e052c76c7561b5799d391f1389952))
+- *(api)* Support complex query for tasks - ([7c0564d](https://github.com/stack-rs/mitosis/commit/7c0564df838bc98edb12b61a8fdfd73f9699d36d))
+- *(api)* Support query counts only for attachments - ([520aca7](https://github.com/stack-rs/mitosis/commit/520aca76afb3fc55ab82104834ea5ed44329faf7))
+- *(api)* Support query counts only for workers - ([5ae022b](https://github.com/stack-rs/mitosis/commit/5ae022b0bc37c67a9888ea7e7d7584ede18dd597))
+- *(api)* Allow CORS - ([2caf034](https://github.com/stack-rs/mitosis/commit/2caf034119d640de31fecff4d80e08933cbb99a5))
+- *(auth)* Allow user to retain previous login - ([6593fe4](https://github.com/stack-rs/mitosis/commit/6593fe488a78d1ec5b57bbdf83760d961e7803af))
+- *(conf)* Support read global config file - ([bc552dd](https://github.com/stack-rs/mitosis/commit/bc552ddc4e53971837c7fd89df56750b44967157))
+- *(s3)* Allow more time for uploading - ([75fd9ea](https://github.com/stack-rs/mitosis/commit/75fd9ea3d589f1b66961f186e7eaad9d5b99b637))
+- *(sdk)* Support progress bar for file operation - ([65dcd81](https://github.com/stack-rs/mitosis/commit/65dcd812916f1638d486f11128be6ee0d0299eb5))
+- *(sdk)* Auto-fill the omitted file name on uploading - ([679d833](https://github.com/stack-rs/mitosis/commit/679d833faf863e66df2c09834742defeede56f68))
+- *(sdk)* Support directly run external commands - ([e917fad](https://github.com/stack-rs/mitosis/commit/e917fad2611df93a2ded8136386b83b5164aff16))
+
+### Bug Fixes
+
+- Sync routes in different feature flags - ([f5e0625](https://github.com/stack-rs/mitosis/commit/f5e062504c2b868ed8fffb7c3fb01a4f839151eb))
+
+### Refactor
+
+- *(task)* Get group name before permission check - ([34b5376](https://github.com/stack-rs/mitosis/commit/34b53764796044c43d7246d7786425adf44e3c91))
+
+### Documentation
+
+- Fix wrong comments - ([de8e713](https://github.com/stack-rs/mitosis/commit/de8e7137fb7a8b0e019e30064ce17667d769577b))
+
+### Styling
+
+- Fix clippy warnings - ([f2f5342](https://github.com/stack-rs/mitosis/commit/f2f53429312e78fa562c726d7d38e20bf35e6845))
+
+### Miscellaneous Tasks
+
+- Allow build CI to run from fork's PR - ([0601b0c](https://github.com/stack-rs/mitosis/commit/0601b0c4457924a7d3b6ccc0f4d92382cdf26eae))
+- Replace latest version on docs build - ([2f74600](https://github.com/stack-rs/mitosis/commit/2f74600706de46e7d8a518d280b30f73863a5e38))
+
 ## [0.4.0](https://github.com/stack-rs/mitosis/compare/mito-v0.3.2...mito-v0.4.0) - 2025-07-22
 
 ### Features

@@ -3,7 +3,8 @@ use std::string::FromUtf8Error;
 use aws_sdk_s3::{
     error::SdkError,
     operation::{
-        create_bucket::CreateBucketError, get_object::GetObjectError, put_object::PutObjectError,
+        create_bucket::CreateBucketError, delete_object::DeleteObjectError,
+        delete_objects::DeleteObjectsError, get_object::GetObjectError, put_object::PutObjectError,
     },
     presigning::PresigningConfigError,
 };
@@ -82,7 +83,13 @@ pub enum S3Error {
     #[error(transparent)]
     GetObjectError(#[from] SdkError<GetObjectError>),
     #[error(transparent)]
+    DeleteObjectError(#[from] SdkError<DeleteObjectError>),
+    #[error(transparent)]
+    DeleteObjectsError(#[from] SdkError<DeleteObjectsError>),
+    #[error(transparent)]
     PresigningConfigError(#[from] PresigningConfigError),
+    #[error("{0}")]
+    BuildError(String),
     #[error("Invalid content length {0}")]
     InvalidContentLength(i64),
     #[error("{0}")]

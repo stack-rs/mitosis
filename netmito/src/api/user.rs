@@ -18,8 +18,9 @@ use crate::{
         auth::{user_auth_middleware, user_login, AuthUser},
         group::query_user_groups,
         s3::{
-            get_artifact, query_attachment_list, user_get_attachment, user_get_attachment_db,
-            user_upload_artifact, user_upload_attachment,
+            get_artifact, query_attachment_list, user_delete_artifact, user_delete_attachment,
+            user_get_attachment, user_get_attachment_db, user_upload_artifact,
+            user_upload_attachment,
         },
         task::{
             get_task, query_task_list, user_cancel_task, user_change_task, user_change_task_labels,
@@ -42,9 +43,15 @@ pub fn user_router(st: InfraPool) -> Router<InfraPool> {
             get(query_task).put(change_task).delete(cancel_task),
         )
         .route("/tasks/{uuid}/labels", put(change_task_labels))
-        .route("/artifacts/{uuid}/{content_type}", get(download_artifact))
+        .route(
+            "/artifacts/{uuid}/{content_type}",
+            get(download_artifact).delete(delete_artifact),
+        )
         .route("/artifacts", post(upload_artifact))
-        .route("/attachments/{group_name}/{*key}", get(download_attachment))
+        .route(
+            "/attachments/{group_name}/{*key}",
+            get(download_attachment).delete(delete_attachment),
+        )
         .route(
             "/attachments/meta/{group_name}/{*key}",
             get(get_attachment_metadata),
@@ -256,6 +263,24 @@ pub async fn download_artifact(
     Ok(Json(artifact))
 }
 
+pub async fn delete_artifact(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path((uuid, content_type)): Path<(Uuid, ArtifactContentType)>,
+) -> Result<(), ApiError> {
+    user_delete_artifact(&pool, u.id, uuid, content_type)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
+}
+
 pub async fn upload_attachment(
     Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
@@ -290,6 +315,24 @@ pub async fn download_attachment(
             }
         })?;
     Ok(Json(attachment))
+}
+
+pub async fn delete_attachment(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path((group_name, key)): Path<(String, String)>,
+) -> Result<(), ApiError> {
+    user_delete_attachment(&pool, u.id, group_name, key)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
 }
 
 pub async fn get_attachment_metadata(

@@ -36,6 +36,8 @@ use crate::{
     schema::{AttachmentQueryInfo, AttachmentsQueryReq},
 };
 
+pub(crate) const UPLOAD_VALID_SECS: u64 = 3600;
+
 pub async fn create_bucket(client: &Client, bucket_name: &str) -> Result<(), S3Error> {
     match client.create_bucket().bucket(bucket_name).send().await {
         Ok(_) => {
@@ -62,7 +64,7 @@ pub async fn get_presigned_upload_link<T: Into<String>>(
         return Err(S3Error::InvalidContentLength(length));
     }
     // Restrict the link to be valid for at most 60 minutes
-    let expires = Duration::from_secs(3600);
+    let expires = Duration::from_secs(UPLOAD_VALID_SECS);
     let resp = client
         .put_object()
         .bucket(bucket)
@@ -90,6 +92,54 @@ pub async fn get_presigned_download_link<T: Into<String>>(
     Ok(resp.uri().to_string())
 }
 
+pub async fn delete_object<T: Into<String>>(
+    client: &Client,
+    bucket: &str,
+    key: T,
+) -> Result<(), S3Error> {
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .map(|_| ())
+        .map_err(S3Error::DeleteObjectError)
+}
+
+pub async fn delete_objects<T: Into<String>>(
+    client: &Client,
+    bucket: &str,
+    objects_to_delete: Vec<T>,
+) -> Result<(), S3Error> {
+    // Push into a mut vector to use `?` early return errors while building object keys.
+    let mut delete_object_ids: Vec<aws_sdk_s3::types::ObjectIdentifier> = vec![];
+    for obj in objects_to_delete {
+        let obj_id = aws_sdk_s3::types::ObjectIdentifier::builder()
+            .key(obj)
+            .build()
+            .map_err(|err| {
+                S3Error::BuildError(format!("Failed to build key for delete_object: {err:?}"))
+            })?;
+        delete_object_ids.push(obj_id);
+    }
+
+    client
+        .delete_objects()
+        .bucket(bucket)
+        .delete(
+            aws_sdk_s3::types::Delete::builder()
+                .set_objects(Some(delete_object_ids))
+                .build()
+                .map_err(|err| {
+                    S3Error::BuildError(format!("Failed to build delete_object input {err:?}"))
+                })?,
+        )
+        .send()
+        .await?;
+    Ok(())
+}
+
 pub async fn get_artifact(
     pool: &InfraPool,
     uuid: Uuid,
@@ -110,6 +160,117 @@ pub async fn get_artifact(
         url,
         size: artifact.size,
     })
+}
+
+async fn find_task_by_uuid(
+    pool: &InfraPool,
+    uuid: Uuid,
+) -> Result<(i64, StoredTaskModel), crate::error::Error> {
+    // Find the task and group
+    let res = match ActiveTask::Entity::find()
+        .filter(ActiveTask::Column::Uuid.eq(uuid))
+        .one(&pool.db)
+        .await?
+    {
+        Some(task) => (task.group_id, StoredTaskModel::Active(task)),
+        None => {
+            let task = ArchivedTask::Entity::find()
+                .filter(ArchivedTask::Column::Uuid.eq(uuid))
+                .one(&pool.db)
+                .await?
+                .ok_or(ApiError::NotFound(format!("Task {uuid} not found")))?;
+            (task.group_id, StoredTaskModel::Archived(task))
+        }
+    };
+    Ok(res)
+}
+
+async fn delete_artifact(
+    pool: &InfraPool,
+    task: StoredTaskModel,
+    content_type: ArtifactContentType,
+    admin: bool,
+) -> Result<(), crate::error::Error> {
+    let (uuid, group_id) = match task {
+        StoredTaskModel::Active(ref task) => (task.uuid, task.group_id),
+        StoredTaskModel::Archived(ref task) => (task.uuid, task.group_id),
+    };
+    let artifact = Artifact::Entity::find()
+        .filter(Artifact::Column::TaskId.eq(uuid))
+        .filter(Artifact::Column::ContentType.eq(content_type))
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::NotFound(format!(
+            "Artifact with uuid {uuid} and content type {content_type} not found"
+        )))?;
+    if !admin
+        && artifact.updated_at
+            > TimeDateTimeWithTimeZone::now_utc() - Duration::from_secs(UPLOAD_VALID_SECS)
+    {
+        return Err(crate::error::ApiError::InvalidRequest(
+            "Cannot delete artifact that has been updated in the last hour".to_string(),
+        )
+        .into());
+    }
+    let s3_key = format!("{uuid}/{content_type}");
+    let s3_client = pool.s3.clone();
+    pool.db
+        .transaction::<_, (), crate::error::Error>(|txn| {
+            Box::pin(async move {
+                delete_object(&s3_client, "mitosis-artifacts", s3_key)
+                    .await
+                    .inspect_err(|e| tracing::debug!("delete object error: {}", e))?;
+                let group = Group::Entity::find_by_id(group_id).one(txn).await?.ok_or(
+                    ApiError::InvalidRequest("Group for the artifact not found".to_string()),
+                )?;
+                let new_storage_used = group.storage_used.saturating_sub(artifact.size);
+                let group = Group::ActiveModel {
+                    id: Set(group.id),
+                    storage_used: Set(new_storage_used),
+                    updated_at: Set(TimeDateTimeWithTimeZone::now_utc()),
+                    ..Default::default()
+                };
+                group.update(txn).await?;
+                artifact.delete(txn).await?;
+                Ok(())
+            })
+        })
+        .await?;
+    Ok(())
+}
+
+pub async fn user_delete_artifact(
+    pool: &InfraPool,
+    user_id: i64,
+    uuid: Uuid,
+    content_type: ArtifactContentType,
+) -> Result<(), crate::error::Error> {
+    // Find the task and group
+    let (group_id, task) = find_task_by_uuid(pool, uuid).await?;
+    // Check if user has permission to upload artifact to the task
+    let user_group = UserGroup::Entity::find()
+        .filter(UserGroup::Column::UserId.eq(user_id))
+        .filter(UserGroup::Column::GroupId.eq(group_id))
+        .one(&pool.db)
+        .await?
+        .ok_or(AuthError::PermissionDenied)?;
+    if user_group.role == UserGroupRole::Read {
+        return Err(AuthError::PermissionDenied.into());
+    }
+    delete_artifact(pool, task, content_type, false).await?;
+    Ok(())
+}
+
+pub async fn admin_delete_artifact(
+    pool: &InfraPool,
+    uuid: Uuid,
+    content_type: ArtifactContentType,
+) -> Result<(), crate::error::Error> {
+    // Find the task and group
+    let (_, task) = find_task_by_uuid(pool, uuid).await?;
+    // Check if user has permission to upload artifact to the task
+    delete_artifact(pool, task, content_type, true).await?;
+    Ok(())
 }
 
 pub(crate) async fn group_upload_artifact(
@@ -243,21 +404,7 @@ pub async fn user_upload_artifact(
     content_length: u64,
 ) -> Result<String, crate::error::Error> {
     // Find the task and group
-    let (group_id, task) = match ActiveTask::Entity::find()
-        .filter(ActiveTask::Column::Uuid.eq(uuid))
-        .one(&pool.db)
-        .await?
-    {
-        Some(task) => (task.group_id, StoredTaskModel::Active(task)),
-        None => {
-            let task = ArchivedTask::Entity::find()
-                .filter(ArchivedTask::Column::Uuid.eq(uuid))
-                .one(&pool.db)
-                .await?
-                .ok_or(ApiError::NotFound(format!("Task {uuid} not found")))?;
-            (task.group_id, StoredTaskModel::Archived(task))
-        }
-    };
+    let (group_id, task) = find_task_by_uuid(pool, uuid).await?;
     // Check if user has permission to upload artifact to the task
     let user_group = UserGroup::Entity::find()
         .filter(UserGroup::Column::UserId.eq(user_id))
@@ -383,12 +530,14 @@ pub async fn user_get_attachment_db(
     })
 }
 
-pub async fn user_get_attachment(
+async fn get_attachment_from_db(
     pool: &InfraPool,
     user_id: i64,
     group_name: String,
     key: String,
-) -> Result<RemoteResourceDownloadResp, crate::error::Error> {
+    write: bool,
+    admin: bool,
+) -> Result<Attachment::Model, crate::error::Error> {
     let group_id = Group::Entity::find()
         .filter(Group::Column::GroupName.eq(group_name.clone()))
         .one(&pool.db)
@@ -397,12 +546,17 @@ pub async fn user_get_attachment(
             "Attachment of group {group_name} and key {key}"
         )))?
         .id;
-    UserGroup::Entity::find()
-        .filter(UserGroup::Column::UserId.eq(user_id))
-        .filter(UserGroup::Column::GroupId.eq(group_id))
-        .one(&pool.db)
-        .await?
-        .ok_or(AuthError::PermissionDenied)?;
+    if !admin {
+        let user_group = UserGroup::Entity::find()
+            .filter(UserGroup::Column::UserId.eq(user_id))
+            .filter(UserGroup::Column::GroupId.eq(group_id))
+            .one(&pool.db)
+            .await?
+            .ok_or(AuthError::PermissionDenied)?;
+        if write && user_group.role == UserGroupRole::Read {
+            return Err(AuthError::PermissionDenied.into());
+        }
+    }
     let attachment = Attachment::Entity::find()
         .filter(Attachment::Column::GroupId.eq(group_id))
         .filter(Attachment::Column::Key.eq(key.clone()))
@@ -411,6 +565,18 @@ pub async fn user_get_attachment(
         .ok_or(crate::error::ApiError::NotFound(format!(
             "Attachment of group {group_name} and key {key}"
         )))?;
+    Ok(attachment)
+}
+
+pub async fn user_get_attachment(
+    pool: &InfraPool,
+    user_id: i64,
+    group_name: String,
+    key: String,
+) -> Result<RemoteResourceDownloadResp, crate::error::Error> {
+    let attachment =
+        get_attachment_from_db(pool, user_id, group_name.clone(), key.clone(), false, false)
+            .await?;
     let s3_key = format!("{group_name}/{key}");
     let url = get_presigned_download_link(&pool.s3, "mitosis-attachments", s3_key, attachment.size)
         .await?;
@@ -418,6 +584,77 @@ pub async fn user_get_attachment(
         url,
         size: attachment.size,
     })
+}
+
+async fn delete_attachment(
+    pool: &InfraPool,
+    attachment: Attachment::Model,
+    group_name: String,
+    key: String,
+) -> Result<(), crate::error::Error> {
+    let s3_client = pool.s3.clone();
+    pool.db
+        .transaction::<_, (), crate::error::Error>(|txn| {
+            Box::pin(async move {
+                delete_object(
+                    &s3_client,
+                    "mitosis-attachments",
+                    format!("{group_name}/{key}"),
+                )
+                .await
+                .inspect_err(|e| tracing::debug!("delete object error: {}", e))?;
+                let group = Group::Entity::find_by_id(attachment.group_id)
+                    .one(txn)
+                    .await?
+                    .ok_or(ApiError::InvalidRequest(
+                        "Group for the attachment not found".to_string(),
+                    ))?;
+                let new_storage_used = group.storage_used.saturating_sub(attachment.size);
+                let group = Group::ActiveModel {
+                    id: Set(group.id),
+                    storage_used: Set(new_storage_used),
+                    updated_at: Set(TimeDateTimeWithTimeZone::now_utc()),
+                    ..Default::default()
+                };
+                group.update(txn).await?;
+                attachment.delete(txn).await?;
+                Ok(())
+            })
+        })
+        .await?;
+    Ok(())
+}
+
+pub async fn user_delete_attachment(
+    pool: &InfraPool,
+    user_id: i64,
+    group_name: String,
+    key: String,
+) -> Result<(), crate::error::Error> {
+    let attachment =
+        get_attachment_from_db(pool, user_id, group_name.clone(), key.clone(), true, false).await?;
+    if attachment.updated_at
+        > TimeDateTimeWithTimeZone::now_utc() - Duration::from_secs(UPLOAD_VALID_SECS)
+    {
+        Err(crate::error::ApiError::InvalidRequest(
+            "Cannot delete attachment that has been updated in the last hour".to_string(),
+        )
+        .into())
+    } else {
+        delete_attachment(pool, attachment, group_name, key).await?;
+        Ok(())
+    }
+}
+
+pub async fn admin_delete_attachment(
+    pool: &InfraPool,
+    group_name: String,
+    key: String,
+) -> Result<(), crate::error::Error> {
+    let attachment =
+        get_attachment_from_db(pool, 0, group_name.clone(), key.clone(), true, true).await?;
+    delete_attachment(pool, attachment, group_name, key).await?;
+    Ok(())
 }
 
 fn check_attachment_key(key: &str) -> bool {

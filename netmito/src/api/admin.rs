@@ -10,13 +10,14 @@ use uuid::Uuid;
 
 use crate::{
     config::{self, InfraPool},
-    entity::state::UserState,
+    entity::{content::ArtifactContentType, state::UserState},
     error::{ApiError, ApiResult, Error},
     schema::*,
     service::{
         self,
         auth::{admin_auth_middleware, AuthAdminUser},
         name_validator,
+        s3::{admin_delete_artifact, admin_delete_attachment},
         worker::remove_worker_by_uuid,
     },
 };
@@ -27,6 +28,11 @@ pub fn admin_router(st: InfraPool, cancel_token: CancellationToken) -> Router<In
         .route("/password", post(change_password))
         .route("/user/state", post(change_user_state))
         .route("/workers/{uuid}/", delete(shutdown_worker))
+        .route(
+            "/attachments/{group_name}/{*key}",
+            delete(delete_attachment),
+        )
+        .route("/artifacts/{uuid}/{content_type}", delete(delete_artifact))
         .route(
             "/shutdown",
             post(shutdown_coordinator).with_state(cancel_token),
@@ -86,6 +92,42 @@ pub async fn delete_user(
         }
         _ => Err(ApiError::InternalServerError),
     }
+}
+
+pub async fn delete_attachment(
+    Extension(_): Extension<AuthAdminUser>,
+    State(pool): State<InfraPool>,
+    Path((group_name, key)): Path<(String, String)>,
+) -> Result<(), ApiError> {
+    admin_delete_attachment(&pool, group_name, key)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
+}
+
+pub async fn delete_artifact(
+    Extension(_): Extension<AuthAdminUser>,
+    State(pool): State<InfraPool>,
+    Path((uuid, content_type)): Path<(Uuid, ArtifactContentType)>,
+) -> Result<(), ApiError> {
+    admin_delete_artifact(&pool, uuid, content_type)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
 }
 
 pub async fn change_password(

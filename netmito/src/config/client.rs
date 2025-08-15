@@ -100,8 +100,24 @@ pub enum ClientCommand {
     Upload(UploadArgs),
     /// Manage a task, a user, a group or a worker
     Manage(ManageArgs),
+    /// Query, upload, download or delete an artifact
+    Artifact(ArtifactArgs),
+    /// Query, upload, download or delete an attachment
+    Attachment(AttachmentArgs),
     /// Quit the client's interactive mode
     Quit,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct ArtifactArgs {
+    #[command(subcommand)]
+    pub command: ArtifactCommands,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct AttachmentArgs {
+    #[command(subcommand)]
+    pub command: AttachmentCommands,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -161,11 +177,42 @@ pub struct ShutdownArgs {
 }
 
 #[derive(Subcommand, Serialize, Debug, Deserialize)]
+pub enum ArtifactCommands {
+    Delete(DeleteArtifactArgs),
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct DeleteArtifactArgs {
+    /// The UUID of the artifact
+    pub uuid: Uuid,
+    /// The content type of the artifact
+    #[arg(value_enum)]
+    pub content_type: ArtifactContentType,
+}
+
+#[derive(Subcommand, Serialize, Debug, Deserialize)]
+pub enum AttachmentCommands {
+    Delete(DeleteAttachmentArgs),
+}
+
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct DeleteAttachmentArgs {
+    /// The group of the attachment belongs to
+    pub group_name: String,
+    /// The key of the attachment
+    pub key: String,
+}
+
+#[derive(Subcommand, Serialize, Debug, Deserialize)]
 pub enum AdminCommands {
     /// Change the password of a user
     Password(ChangePasswordArgs),
     /// Shutdown the coordinator
     Shutdown(ShutdownArgs),
+    /// Delete an artifact
+    Artifact(ArtifactArgs),
+    /// Delete an attachment
+    Attachment(AttachmentArgs),
 }
 
 #[derive(Subcommand, Serialize, Debug, Deserialize)]

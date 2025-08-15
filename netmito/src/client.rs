@@ -721,6 +721,50 @@ impl MitoClient {
             Err(get_error_from_resp(resp).await.into())
         }
     }
+    pub async fn delete_artifact(&mut self, args: DeleteArtifactArgs) -> crate::error::Result<()> {
+        let content_serde_val = serde_json::to_value(args.content_type)?;
+        let content_serde_str = content_serde_val.as_str().unwrap_or("result");
+        self.url.set_path(&format!(
+            "user/artifacts/{}/{}",
+            args.uuid, content_serde_str
+        ));
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn admin_delete_artifact(
+        &mut self,
+        args: DeleteArtifactArgs,
+    ) -> crate::error::Result<()> {
+        let content_serde_val = serde_json::to_value(args.content_type)?;
+        let content_serde_str = content_serde_val.as_str().unwrap_or("result");
+        self.url.set_path(&format!(
+            "admin/artifacts/{}/{}",
+            args.uuid, content_serde_str
+        ));
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
 
     pub async fn get_artifact_url(
         &mut self,
@@ -781,6 +825,50 @@ impl MitoClient {
                 size: download_resp.size,
                 local_path: args.output_path,
             })
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn delete_attachment(
+        &mut self,
+        args: DeleteAttachmentArgs,
+    ) -> crate::error::Result<()> {
+        self.url.set_path(&format!(
+            "user/attachments/{}/{}",
+            args.group_name, args.key
+        ));
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn admin_delete_attachment(
+        &mut self,
+        args: DeleteAttachmentArgs,
+    ) -> crate::error::Result<()> {
+        self.url.set_path(&format!(
+            "admin/attachments/{}/{}",
+            args.group_name, args.key
+        ));
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
         } else {
             Err(get_error_from_resp(resp).await.into())
         }
@@ -1347,6 +1435,30 @@ impl MitoClient {
                         }
                     }
                 }
+                AdminCommands::Artifact(args) => match args.command {
+                    ArtifactCommands::Delete(args) => {
+                        match self.admin_delete_artifact(args).await {
+                            Ok(_) => {
+                                tracing::info!("Successfully deleted artifact");
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        }
+                    }
+                },
+                AdminCommands::Attachment(args) => match args.command {
+                    AttachmentCommands::Delete(args) => {
+                        match self.admin_delete_attachment(args).await {
+                            Ok(_) => {
+                                tracing::info!("Successfully deleted attachment");
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        }
+                    }
+                },
             },
             ClientCommand::Auth(args) => {
                 match fill_user_auth(args.username, args.password, args.retain) {
@@ -1363,6 +1475,26 @@ impl MitoClient {
                     }
                 }
             }
+            ClientCommand::Artifact(args) => match args.command {
+                ArtifactCommands::Delete(args) => match self.delete_artifact(args).await {
+                    Ok(_) => {
+                        tracing::info!("Successfully deleted artifact");
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+            },
+            ClientCommand::Attachment(args) => match args.command {
+                AttachmentCommands::Delete(args) => match self.delete_attachment(args).await {
+                    Ok(_) => {
+                        tracing::info!("Successfully deleted attachment");
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+            },
             ClientCommand::Create(create_args) => match create_args.command {
                 CreateCommands::User(args) => match self.create_user(args).await {
                     Ok(_) => {

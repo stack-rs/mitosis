@@ -176,6 +176,12 @@ pub struct ShutdownArgs {
     pub secret: String,
 }
 
+#[derive(Serialize, Debug, Deserialize, Args)]
+pub struct UpdateGroupStorageQuotaArgs {
+    pub group_name: String,
+    pub storage_quota: String,
+}
+
 #[derive(Subcommand, Serialize, Debug, Deserialize)]
 pub enum ArtifactCommands {
     Delete(DeleteArtifactArgs),
@@ -213,6 +219,8 @@ pub enum AdminCommands {
     Artifact(ArtifactArgs),
     /// Delete an attachment
     Attachment(AttachmentArgs),
+    /// Update storage quota of a group
+    GroupStorageQuota(UpdateGroupStorageQuotaArgs),
 }
 
 #[derive(Subcommand, Serialize, Debug, Deserialize)]

@@ -194,6 +194,7 @@ where
                     let group = Group::ActiveModel {
                         id: Set(group.id),
                         state: Set(state),
+                        updated_at: Set(TimeDateTimeWithTimeZone::now_utc()),
                         ..Default::default()
                     };
                     let g = group.update(txn).await?;
@@ -335,4 +336,73 @@ pub async fn query_user_groups(
         .map(|r| (r.group_name, r.role))
         .collect();
     Ok(group_relations)
+}
+
+enum StorageQuotaOp {
+    Increase(i64),
+    Decrease(i64),
+    Set(i64),
+}
+
+fn parse_storage_quota(quota: &str) -> crate::error::Result<StorageQuotaOp> {
+    fn parse_bytesize(s: &str) -> crate::error::Result<i64> {
+        let u = parse_size::parse_size(s)?;
+        Ok(u as i64)
+    }
+    match quota {
+        s if s.starts_with('+') => {
+            let v = parse_bytesize(&s[1..])?;
+            Ok(StorageQuotaOp::Increase(v))
+        }
+        s if s.starts_with('-') => {
+            let v = parse_bytesize(&s[1..])?;
+            Ok(StorageQuotaOp::Decrease(v))
+        }
+        s if s.starts_with('=') => {
+            let v = parse_bytesize(&s[1..])?;
+            Ok(StorageQuotaOp::Set(v))
+        }
+        s => {
+            let v = parse_bytesize(s)?;
+            Ok(StorageQuotaOp::Set(v))
+        }
+    }
+}
+
+pub async fn change_group_storage_quota(
+    pool: &InfraPool,
+    group_name: String,
+    storage_quota: String,
+) -> crate::error::Result<i64> {
+    let quota_op = parse_storage_quota(&storage_quota)?;
+    let updated_quota = pool
+        .db
+        .transaction::<_, i64, Error>(|txn| {
+            Box::pin(async move {
+                let group = Group::Entity::find()
+                    .filter(Group::Column::GroupName.eq(&group_name))
+                    .one(txn)
+                    .await?;
+                if let Some(group) = group {
+                    // change state to the new state
+                    let new_quota = match quota_op {
+                        StorageQuotaOp::Increase(v) => group.storage_quota.saturating_add(v),
+                        StorageQuotaOp::Decrease(v) => group.storage_quota.saturating_sub(v),
+                        StorageQuotaOp::Set(v) => v,
+                    };
+                    let group = Group::ActiveModel {
+                        id: Set(group.id),
+                        storage_quota: Set(new_quota),
+                        updated_at: Set(TimeDateTimeWithTimeZone::now_utc()),
+                        ..Default::default()
+                    };
+                    let g = group.update(txn).await?;
+                    Ok(g.storage_quota)
+                } else {
+                    Err(DbErr::RecordNotUpdated.into())
+                }
+            })
+        })
+        .await?;
+    Ok(updated_quota)
 }

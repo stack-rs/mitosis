@@ -27,6 +27,7 @@ pub fn admin_router(st: InfraPool, cancel_token: CancellationToken) -> Router<In
         .route("/user", post(create_user).delete(delete_user))
         .route("/password", post(change_password))
         .route("/user/state", post(change_user_state))
+        .route("/group/storage_quota", post(change_group_storage_quota))
         .route("/workers/{uuid}/", delete(shutdown_worker))
         .route(
             "/attachments/{group_name}/{*key}",
@@ -164,6 +165,25 @@ pub async fn change_user_state(
             Err(ApiError::InternalServerError)
         }
     }
+}
+
+pub async fn change_group_storage_quota(
+    Extension(_): Extension<AuthAdminUser>,
+    State(pool): State<InfraPool>,
+    Json(req): Json<ChangeGroupStorageQuotaReq>,
+) -> ApiResult<Json<GroupStorageQuotaResp>> {
+    let storage_quota =
+        service::group::change_group_storage_quota(&pool, req.group_name, req.storage_quota)
+            .await
+            .map_err(|e| match e {
+                crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+                crate::error::Error::ApiError(e) => e,
+                _ => {
+                    tracing::error!("{}", e);
+                    ApiError::InternalServerError
+                }
+            })?;
+    Ok(Json(GroupStorageQuotaResp { storage_quota }))
 }
 
 pub async fn shutdown_worker(

@@ -532,44 +532,40 @@ async fn check_task_list_query(
             )));
         }
     }
-    match query.group_name {
-        Some(ref group_name) => {
-            let builder = pool.db.get_database_backend();
-            let role_stmt = Query::select()
-                .column((UserGroup::Entity, UserGroup::Column::Role))
-                .from(UserGroup::Entity)
-                .join(
-                    sea_orm::JoinType::Join,
-                    Group::Entity,
-                    Expr::col((Group::Entity, Group::Column::Id))
-                        .eq(Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))),
-                )
-                .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
-                .and_where(
-                    Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()),
-                )
-                .to_owned();
-            let role = UserGroupRoleQueryRes::find_by_statement(builder.build(&role_stmt))
-                .one(&pool.db)
-                .await?
-                .map(|r| r.role);
-            if role.is_none() {
-                return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
-                    format!("Group with name {group_name} not found or user is not in the group"),
-                )));
-            }
-        }
-        None => {
-            let username = User::Entity::find()
-                .filter(User::Column::Id.eq(user_id))
-                .one(&pool.db)
-                .await?
-                .ok_or(Error::ApiError(crate::error::ApiError::NotFound(
-                    "User".to_string(),
-                )))?
-                .username;
-            tracing::debug!("No group name specified, use username {} instead", username);
-            query.group_name = Some(username);
+    if query.group_name.is_none() {
+        let username = User::Entity::find()
+            .filter(User::Column::Id.eq(user_id))
+            .one(&pool.db)
+            .await?
+            .ok_or(Error::ApiError(crate::error::ApiError::NotFound(
+                "User".to_string(),
+            )))?
+            .username;
+        tracing::debug!("No group name specified, use username {} instead", username);
+        query.group_name = Some(username);
+    }
+    if let Some(ref group_name) = query.group_name {
+        let builder = pool.db.get_database_backend();
+        let role_stmt = Query::select()
+            .column((UserGroup::Entity, UserGroup::Column::Role))
+            .from(UserGroup::Entity)
+            .join(
+                sea_orm::JoinType::Join,
+                Group::Entity,
+                Expr::col((Group::Entity, Group::Column::Id))
+                    .eq(Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))),
+            )
+            .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+            .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()))
+            .to_owned();
+        let role = UserGroupRoleQueryRes::find_by_statement(builder.build(&role_stmt))
+            .one(&pool.db)
+            .await?
+            .map(|r| r.role);
+        if role.is_none() {
+            return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                format!("Group with name {group_name} not found or user is not in the group"),
+            )));
         }
     }
     Ok(())

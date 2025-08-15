@@ -2,7 +2,6 @@ use std::net::SocketAddr;
 
 use axum::{
     extract::{ConnectInfo, Path, Query, State},
-    http::StatusCode,
     middleware,
     routing::{get, post, put},
     Extension, Json, Router,
@@ -15,7 +14,7 @@ use crate::{
     error::ApiError,
     schema::*,
     service::{
-        auth::{user_auth_middleware, user_login, AuthUser},
+        auth::{user_auth_middleware, user_login, AuthUser, AuthUserWithName},
         group::query_user_groups,
         s3::{
             get_artifact, query_attachment_list, user_delete_artifact, user_delete_attachment,
@@ -35,7 +34,6 @@ use crate::{
 
 pub fn user_router(st: InfraPool) -> Router<InfraPool> {
     Router::new()
-        .route("/auth", get(auth_user))
         .route("/password", post(change_password))
         .route("/tasks", post(submit_task))
         .route(
@@ -96,8 +94,8 @@ pub async fn login_user(
     Ok(Json(UserLoginResp { token }))
 }
 
-pub async fn auth_user(Extension(_): Extension<AuthUser>) -> StatusCode {
-    StatusCode::OK
+pub async fn auth_user(Extension(u): Extension<AuthUserWithName>) -> String {
+    u.username
 }
 
 pub async fn change_password(

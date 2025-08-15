@@ -25,12 +25,22 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 
-use crate::{config::InfraPool, service::auth::user_auth_middleware};
+use crate::{
+    config::InfraPool,
+    service::auth::{user_auth_middleware, user_auth_with_name_middleware},
+};
 
 pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
     #[cfg(not(feature = "debugging"))]
     {
         Router::new()
+            .route(
+                "/auth",
+                get(user::auth_user).layer(middleware::from_fn_with_state(
+                    st.clone(),
+                    user_auth_with_name_middleware,
+                )),
+            )
             .route(
                 "/health",
                 get(|| async { (StatusCode::OK, Json(json!({"status": "ok"}))) }),

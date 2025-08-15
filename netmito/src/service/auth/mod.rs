@@ -29,6 +29,12 @@ pub struct AuthUser {
 }
 
 #[derive(Debug, Clone)]
+pub struct AuthUserWithName {
+    pub id: i64,
+    pub username: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct AuthAdminUser {
     pub id: i64,
 }
@@ -238,11 +244,25 @@ pub async fn user_auth_middleware(
     next: Next,
 ) -> Result<impl IntoResponse, ApiError> {
     let auth_user = user_auth(&pool.db, &bearer).await?;
-    req.extensions_mut().insert(auth_user);
+    req.extensions_mut().insert(AuthUser { id: auth_user.id });
     Ok(next.run(req).await)
 }
 
-async fn user_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<AuthUser, AuthError> {
+pub async fn user_auth_with_name_middleware(
+    State(pool): State<InfraPool>,
+    TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
+    mut req: Request<Body>,
+    next: Next,
+) -> Result<impl IntoResponse, ApiError> {
+    let auth_user = user_auth(&pool.db, &bearer).await?;
+    req.extensions_mut().insert(AuthUserWithName {
+        id: auth_user.id,
+        username: auth_user.username,
+    });
+    Ok(next.run(req).await)
+}
+
+async fn user_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<User::Model, AuthError> {
     let token = bearer.token();
     let claims = verify_token(token).map_err(|_| AuthError::InvalidToken)?;
     let now = TimeDateTimeWithTimeZone::now_utc();
@@ -262,7 +282,7 @@ async fn user_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<AuthUser,
     } else if user.auth_signature != Some(claims.sign) {
         Err(AuthError::WrongCredentials)
     } else {
-        Ok(AuthUser { id: user.id })
+        Ok(user)
     }
 }
 

@@ -166,7 +166,7 @@ pub async fn get_user_credential(
     if cred_path.exists() {
         if let Ok(mut lines) = read_lines(&cred_path).await {
             if let Some((username, cred)) = extract_credential(user.as_ref(), &mut lines).await? {
-                url.set_path("user/auth");
+                url.set_path("auth");
                 let resp = client
                     .get(url.as_str())
                     .bearer_auth(&cred)
@@ -181,7 +181,10 @@ pub async fn get_user_credential(
                         }
                     })?;
                 if resp.status().is_success() {
-                    return Ok((username, cred));
+                    let resp_name = resp.text().await.map_err(RequestError::from)?;
+                    if resp_name == username {
+                        return Ok((username, cred));
+                    }
                 } else if resp.status().is_server_error() {
                     return Err(ApiError::InternalServerError.into());
                 }

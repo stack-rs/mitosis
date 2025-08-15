@@ -874,6 +874,34 @@ impl MitoClient {
         }
     }
 
+    pub async fn admin_update_group_storage_quota(
+        &mut self,
+        args: UpdateGroupStorageQuotaArgs,
+    ) -> crate::error::Result<GroupStorageQuotaResp> {
+        self.url.set_path("admin/group/storage_quota");
+        let req = ChangeGroupStorageQuotaReq {
+            group_name: args.group_name,
+            storage_quota: args.storage_quota,
+        };
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .json(&req)
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let update_resp = resp
+                .json::<GroupStorageQuotaResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(update_resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn get_attachment_url(
         &mut self,
         args: GetAttachmentArgs,
@@ -1459,6 +1487,19 @@ impl MitoClient {
                         }
                     }
                 },
+                AdminCommands::GroupStorageQuota(args) => {
+                    match self.admin_update_group_storage_quota(args).await {
+                        Ok(resp) => {
+                            tracing::info!(
+                                "Successfully updated group storage quota to {}",
+                                format_size(resp.storage_quota.max(0) as u64, DECIMAL)
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    }
+                }
             },
             ClientCommand::Auth(args) => {
                 match fill_user_auth(args.username, args.password, args.retain) {

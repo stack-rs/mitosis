@@ -52,6 +52,8 @@ pub enum Error {
     RedisError(#[from] redis::RedisError),
     #[error("Parse xml error: {0}")]
     ParseXmlError(#[from] roxmltree::Error),
+    #[error("Parse bytesize error: {0}")]
+    ParseSizeError(#[from] parse_size::Error),
 }
 
 #[derive(thiserror::Error, Debug)]

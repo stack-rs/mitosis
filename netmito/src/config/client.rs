@@ -252,7 +252,7 @@ pub enum GetCommands {
     /// Download an artifact of a task
     Artifact(GetArtifactCmdArgs),
     /// Download an attachment of a group
-    Attachment(GetAttachmentCmdArgs),
+    Attachment(GetAttachmentArgs),
 }
 
 #[derive(Subcommand, Serialize, Debug, Deserialize)]
@@ -474,9 +474,10 @@ pub struct GetArtifactArgs {
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
-pub struct GetAttachmentCmdArgs {
+pub struct GetAttachmentArgs {
     /// The group of the attachment belongs to
-    pub group_name: String,
+    #[arg(short, long = "group")]
+    pub group_name: Option<String>,
     /// The key of the attachment
     pub key: String,
     /// Specify the path to download the artifact
@@ -488,18 +489,22 @@ pub struct GetAttachmentCmdArgs {
     /// Whether to show progress bar when downloading
     #[arg(long)]
     pub pb: bool,
+    /// Try to use file name (last path component) of key
+    /// as part of the output path
+    #[arg(short, long)]
+    pub smart: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize)]
-pub struct GetAttachmentArgs {
+pub(crate) struct InnerGetAttachmentArgs {
     /// The group of the attachment belongs to
-    pub group_name: String,
+    pub(crate) group_name: String,
     /// The key of the attachment
-    pub key: String,
+    pub(crate) key: String,
     /// Specify the path to download the artifact
-    pub output_path: PathBuf,
+    pub(crate) output_path: PathBuf,
     /// Whether to show progress bar when downloading
-    pub show_pb: bool,
+    pub(crate) show_pb: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -565,13 +570,13 @@ pub struct GetGroupArgs {
 
 #[derive(Serialize, Debug, Deserialize, Args)]
 pub struct UploadArtifactArgs {
+    /// The path of the local file to upload
+    pub local_file: PathBuf,
     /// The UUID of the artifact
     pub uuid: Uuid,
     /// The content type of the artifact
     #[arg(value_enum)]
     pub content_type: ArtifactContentType,
-    /// The path of the local file to upload
-    pub local_file: PathBuf,
     /// Whether to show progress bar when downloading
     #[arg(long)]
     pub pb: bool,
@@ -579,11 +584,11 @@ pub struct UploadArtifactArgs {
 
 #[derive(Serialize, Debug, Deserialize, Args)]
 pub struct UploadAttachmentArgs {
+    /// The path of the local file to upload
+    pub local_file: PathBuf,
     /// The group of the attachment uploaded to
     #[arg(short = 'g', long = "group")]
     pub group_name: Option<String>,
-    /// The path of the local file to upload
-    pub local_file: PathBuf,
     /// The key of the attachment uploaded to. If not specified, the filename will be used.
     /// If the key specified is a directory (ends with '/'),
     /// the filename (final component of local file) will be appended to it.
@@ -591,6 +596,10 @@ pub struct UploadAttachmentArgs {
     /// Whether to show progress bar when downloading
     #[arg(long)]
     pub pb: bool,
+    /// Parse the command with smart mode. Will try parse the first component before first `/` in
+    /// key (if specified) as group-name (if not specified)
+    #[arg(short, long)]
+    pub smart: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args)]
@@ -945,49 +954,23 @@ impl From<GetArtifactCmdArgs> for GetArtifactArgs {
     }
 }
 
-impl From<GetAttachmentCmdArgs> for GetCommands {
-    fn from(args: GetAttachmentCmdArgs) -> Self {
+impl From<GetAttachmentArgs> for GetCommands {
+    fn from(args: GetAttachmentArgs) -> Self {
         Self::Attachment(args)
     }
 }
 
-impl From<GetAttachmentCmdArgs> for GetArgs {
-    fn from(args: GetAttachmentCmdArgs) -> Self {
+impl From<GetAttachmentArgs> for GetArgs {
+    fn from(args: GetAttachmentArgs) -> Self {
         Self {
             command: GetCommands::Attachment(args),
         }
     }
 }
 
-impl From<GetAttachmentCmdArgs> for ClientCommand {
-    fn from(args: GetAttachmentCmdArgs) -> Self {
+impl From<GetAttachmentArgs> for ClientCommand {
+    fn from(args: GetAttachmentArgs) -> Self {
         Self::Get(args.into())
-    }
-}
-
-impl From<GetAttachmentCmdArgs> for GetAttachmentArgs {
-    fn from(args: GetAttachmentCmdArgs) -> Self {
-        let output_path = args
-            .output_path
-            .map(|dir| {
-                let dir = Path::new(&dir);
-                if dir.is_dir() {
-                    let file_name = args.key.clone();
-                    dir.join(file_name)
-                } else {
-                    dir.to_path_buf()
-                }
-            })
-            .unwrap_or_else(|| {
-                let file_name = args.key.clone();
-                Path::new("").join(file_name)
-            });
-        Self {
-            group_name: args.group_name,
-            key: args.key,
-            output_path,
-            show_pb: args.pb,
-        }
     }
 }
 

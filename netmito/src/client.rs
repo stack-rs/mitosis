@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     config::{client::*, ClientConfig, ClientConfigCli},
-    entity::{role::GroupWorkerRole, state::TaskExecState},
+    entity::{content::ArtifactContentType, role::GroupWorkerRole, state::TaskExecState},
     error::{get_error_from_resp, map_reqwest_err, RequestError},
     schema::*,
     service::{
@@ -684,16 +684,15 @@ impl MitoClient {
         }
     }
 
-    pub async fn get_artifact(
+    async fn get_artifact_download_resp(
         &mut self,
-        args: GetArtifactArgs,
-    ) -> crate::error::Result<ResourceDownloadInfo> {
-        let content_serde_val = serde_json::to_value(args.content_type)?;
+        uuid: Uuid,
+        content_type: ArtifactContentType,
+    ) -> crate::error::Result<RemoteResourceDownloadResp> {
+        let content_serde_val = serde_json::to_value(content_type)?;
         let content_serde_str = content_serde_val.as_str().unwrap_or("result");
-        self.url.set_path(&format!(
-            "user/artifacts/{}/{}",
-            args.uuid, content_serde_str
-        ));
+        self.url
+            .set_path(&format!("user/artifacts/{uuid}/{content_serde_str}"));
         let resp = self
             .http_client
             .get(self.url.as_str())
@@ -702,80 +701,99 @@ impl MitoClient {
             .await
             .map_err(map_reqwest_err)?;
         if resp.status().is_success() {
-            let download_resp = resp
+            let r = resp
                 .json::<RemoteResourceDownloadResp>()
                 .await
                 .map_err(RequestError::from)?;
-            download_file(
-                &self.http_client,
-                &download_resp,
-                &args.output_path,
-                args.show_pb,
-            )
-            .await?;
-            Ok(ResourceDownloadInfo {
-                size: download_resp.size,
-                local_path: args.output_path,
-            })
-        } else {
-            Err(get_error_from_resp(resp).await.into())
-        }
-    }
-    pub async fn delete_artifact(&mut self, args: DeleteArtifactArgs) -> crate::error::Result<()> {
-        let content_serde_val = serde_json::to_value(args.content_type)?;
-        let content_serde_str = content_serde_val.as_str().unwrap_or("result");
-        self.url.set_path(&format!(
-            "user/artifacts/{}/{}",
-            args.uuid, content_serde_str
-        ));
-        let resp = self
-            .http_client
-            .delete(self.url.as_str())
-            .bearer_auth(&self.credential)
-            .send()
-            .await
-            .map_err(map_reqwest_err)?;
-        if resp.status().is_success() {
-            Ok(())
+            Ok(r)
         } else {
             Err(get_error_from_resp(resp).await.into())
         }
     }
 
-    pub async fn admin_delete_artifact(
+    pub async fn get_artifact(
         &mut self,
-        args: DeleteArtifactArgs,
-    ) -> crate::error::Result<()> {
-        let content_serde_val = serde_json::to_value(args.content_type)?;
-        let content_serde_str = content_serde_val.as_str().unwrap_or("result");
-        self.url.set_path(&format!(
-            "admin/artifacts/{}/{}",
-            args.uuid, content_serde_str
-        ));
-        let resp = self
-            .http_client
-            .delete(self.url.as_str())
-            .bearer_auth(&self.credential)
-            .send()
-            .await
-            .map_err(map_reqwest_err)?;
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            Err(get_error_from_resp(resp).await.into())
-        }
+        args: GetArtifactArgs,
+    ) -> crate::error::Result<ResourceDownloadInfo> {
+        let download_resp = self
+            .get_artifact_download_resp(args.uuid, args.content_type)
+            .await?;
+        download_file(
+            &self.http_client,
+            &download_resp,
+            &args.output_path,
+            args.show_pb,
+        )
+        .await?;
+        Ok(ResourceDownloadInfo {
+            size: download_resp.size,
+            local_path: args.output_path,
+        })
     }
 
     pub async fn get_artifact_url(
         &mut self,
         args: GetArtifactArgs,
     ) -> crate::error::Result<String> {
+        let resp = self
+            .get_artifact_download_resp(args.uuid, args.content_type)
+            .await?;
+        Ok(resp.url)
+    }
+
+    async fn delete_artifact(
+        &mut self,
+        args: DeleteArtifactArgs,
+        admin: bool,
+    ) -> crate::error::Result<()> {
         let content_serde_val = serde_json::to_value(args.content_type)?;
         let content_serde_str = content_serde_val.as_str().unwrap_or("result");
-        self.url.set_path(&format!(
-            "user/artifacts/{}/{}",
-            args.uuid, content_serde_str
-        ));
+        if admin {
+            self.url.set_path(&format!(
+                "admin/artifacts/{}/{}",
+                args.uuid, content_serde_str
+            ));
+        } else {
+            self.url.set_path(&format!(
+                "user/artifacts/{}/{}",
+                args.uuid, content_serde_str
+            ));
+        }
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn user_delete_artifact(
+        &mut self,
+        args: DeleteArtifactArgs,
+    ) -> crate::error::Result<()> {
+        self.delete_artifact(args, false).await
+    }
+
+    pub async fn admin_delete_artifact(
+        &mut self,
+        args: DeleteArtifactArgs,
+    ) -> crate::error::Result<()> {
+        self.delete_artifact(args, true).await
+    }
+
+    async fn get_attachment_download_resp(
+        &mut self,
+        group_name: &str,
+        key: &str,
+    ) -> crate::error::Result<RemoteResourceDownloadResp> {
+        self.url
+            .set_path(&format!("user/attachments/{group_name}/{key}"));
         let resp = self
             .http_client
             .get(self.url.as_str())
@@ -784,13 +802,62 @@ impl MitoClient {
             .await
             .map_err(map_reqwest_err)?;
         if resp.status().is_success() {
-            let download_resp = resp
+            let r = resp
                 .json::<RemoteResourceDownloadResp>()
                 .await
                 .map_err(RequestError::from)?;
-            Ok(download_resp.url)
+            Ok(r)
         } else {
             Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    async fn parse_download_attachment_args(
+        &self,
+        args: GetAttachmentArgs,
+    ) -> InnerGetAttachmentArgs {
+        fn get_fname(key: String) -> String {
+            let p = std::path::Path::new(&key);
+            let fname = p
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or(key);
+            fname
+        }
+        let parse_key = |key: String, smart: bool| if smart { get_fname(key) } else { key };
+        let group_key_parser = || match args.group_name {
+            Some(g) => (args.key, g),
+            None => {
+                if args.smart {
+                    if let Some((g, key)) = args.key.split_once('/') {
+                        return (key.to_string(), g.to_string());
+                    }
+                }
+                (args.key, self.username.clone())
+            }
+        };
+        let (key, group_name) = group_key_parser();
+        let output_path = args
+            .output_path
+            .map(|dir| {
+                let dir = std::path::Path::new(&dir);
+                if dir.is_dir() {
+                    let file_name = parse_key(key.clone(), args.smart);
+                    dir.join(file_name)
+                } else {
+                    dir.to_path_buf()
+                }
+            })
+            .unwrap_or_else(|| {
+                let file_name = parse_key(key.clone(), args.smart);
+                std::path::Path::new("").join(file_name)
+            });
+        InnerGetAttachmentArgs {
+            group_name,
+            key,
+            output_path,
+            show_pb: args.pb,
         }
     }
 
@@ -798,8 +865,40 @@ impl MitoClient {
         &mut self,
         args: GetAttachmentArgs,
     ) -> crate::error::Result<ResourceDownloadInfo> {
+        let args = self.parse_download_attachment_args(args).await;
+        let download_resp = self
+            .get_attachment_download_resp(&args.group_name, &args.key)
+            .await?;
+        download_file(
+            &self.http_client,
+            &download_resp,
+            &args.output_path,
+            args.show_pb,
+        )
+        .await?;
+        Ok(ResourceDownloadInfo {
+            size: download_resp.size,
+            local_path: args.output_path,
+        })
+    }
+
+    pub async fn get_attachment_url(
+        &mut self,
+        args: GetAttachmentArgs,
+    ) -> crate::error::Result<String> {
+        let args = self.parse_download_attachment_args(args).await;
+        let resp = self
+            .get_attachment_download_resp(&args.group_name, &args.key)
+            .await?;
+        Ok(resp.url)
+    }
+
+    pub async fn get_attachment_meta(
+        &mut self,
+        args: GetAttachmentMetaArgs,
+    ) -> crate::error::Result<AttachmentMetadata> {
         self.url.set_path(&format!(
-            "user/attachments/{}/{}",
+            "user/attachments/meta/{}/{}",
             args.group_name, args.key
         ));
         let resp = self
@@ -810,34 +909,32 @@ impl MitoClient {
             .await
             .map_err(map_reqwest_err)?;
         if resp.status().is_success() {
-            let download_resp = resp
-                .json::<RemoteResourceDownloadResp>()
+            let meta = resp
+                .json::<AttachmentMetadata>()
                 .await
                 .map_err(RequestError::from)?;
-            download_file(
-                &self.http_client,
-                &download_resp,
-                &args.output_path,
-                args.show_pb,
-            )
-            .await?;
-            Ok(ResourceDownloadInfo {
-                size: download_resp.size,
-                local_path: args.output_path,
-            })
+            Ok(meta)
         } else {
             Err(get_error_from_resp(resp).await.into())
         }
     }
 
-    pub async fn delete_attachment(
+    async fn delete_attachment(
         &mut self,
         args: DeleteAttachmentArgs,
+        admin: bool,
     ) -> crate::error::Result<()> {
-        self.url.set_path(&format!(
-            "user/attachments/{}/{}",
-            args.group_name, args.key
-        ));
+        if admin {
+            self.url.set_path(&format!(
+                "admin/attachments/{}/{}",
+                args.group_name, args.key
+            ));
+        } else {
+            self.url.set_path(&format!(
+                "user/attachments/{}/{}",
+                args.group_name, args.key
+            ));
+        }
         let resp = self
             .http_client
             .delete(self.url.as_str())
@@ -850,28 +947,20 @@ impl MitoClient {
         } else {
             Err(get_error_from_resp(resp).await.into())
         }
+    }
+
+    pub async fn user_delete_attachment(
+        &mut self,
+        args: DeleteAttachmentArgs,
+    ) -> crate::error::Result<()> {
+        self.delete_attachment(args, false).await
     }
 
     pub async fn admin_delete_attachment(
         &mut self,
         args: DeleteAttachmentArgs,
     ) -> crate::error::Result<()> {
-        self.url.set_path(&format!(
-            "admin/attachments/{}/{}",
-            args.group_name, args.key
-        ));
-        let resp = self
-            .http_client
-            .delete(self.url.as_str())
-            .bearer_auth(&self.credential)
-            .send()
-            .await
-            .map_err(map_reqwest_err)?;
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            Err(get_error_from_resp(resp).await.into())
-        }
+        self.delete_attachment(args, true).await
     }
 
     pub async fn admin_update_group_storage_quota(
@@ -897,58 +986,6 @@ impl MitoClient {
                 .await
                 .map_err(RequestError::from)?;
             Ok(update_resp)
-        } else {
-            Err(get_error_from_resp(resp).await.into())
-        }
-    }
-
-    pub async fn get_attachment_url(
-        &mut self,
-        args: GetAttachmentArgs,
-    ) -> crate::error::Result<String> {
-        self.url.set_path(&format!(
-            "user/attachments/{}/{}",
-            args.group_name, args.key
-        ));
-        let resp = self
-            .http_client
-            .get(self.url.as_str())
-            .bearer_auth(&self.credential)
-            .send()
-            .await
-            .map_err(map_reqwest_err)?;
-        if resp.status().is_success() {
-            let download_resp = resp
-                .json::<RemoteResourceDownloadResp>()
-                .await
-                .map_err(RequestError::from)?;
-            Ok(download_resp.url)
-        } else {
-            Err(get_error_from_resp(resp).await.into())
-        }
-    }
-
-    pub async fn get_attachment_meta(
-        &mut self,
-        args: GetAttachmentMetaArgs,
-    ) -> crate::error::Result<AttachmentMetadata> {
-        self.url.set_path(&format!(
-            "user/attachments/meta/{}/{}",
-            args.group_name, args.key
-        ));
-        let resp = self
-            .http_client
-            .get(self.url.as_str())
-            .bearer_auth(&self.credential)
-            .send()
-            .await
-            .map_err(map_reqwest_err)?;
-        if resp.status().is_success() {
-            let meta = resp
-                .json::<AttachmentMetadata>()
-                .await
-                .map_err(RequestError::from)?;
-            Ok(meta)
         } else {
             Err(get_error_from_resp(resp).await.into())
         }
@@ -1158,6 +1195,17 @@ impl MitoClient {
         &mut self,
         args: UploadAttachmentArgs,
     ) -> crate::error::Result<()> {
+        fn get_fname<P: AsRef<std::path::Path>>(p: P) -> crate::error::Result<String> {
+            let fname = p
+                .as_ref()
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .ok_or(crate::error::Error::Custom(
+                    "Complete key is not provided or local file is invalid".to_string(),
+                ))?;
+            Ok(fname)
+        }
         self.url.set_path("user/attachments");
         let metadata = args
             .local_file
@@ -1168,33 +1216,40 @@ impl MitoClient {
                 "Currently we do not support uploading a directory".to_string(),
             ));
         }
-        let key = match args.key {
+        let group_key_parser = || match args.group_name {
+            Some(g) => (args.key, g),
+            None => {
+                if args.smart {
+                    if let Some(k) = args.key {
+                        match k.split_once('/') {
+                            Some((g, key)) => {
+                                return (Some(key.to_string()), g.to_string());
+                            }
+                            None => return (None, k),
+                        }
+                    }
+                }
+                (args.key, self.username.clone())
+            }
+        };
+        let (key, group_name) = group_key_parser();
+        let key = match key {
             Some(k) => {
                 if k.ends_with('/') {
-                    let file_name = args
-                        .local_file
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_string())
-                        .ok_or(crate::error::Error::Custom(
-                            "Complete key is not provided or local file is invalid".to_string(),
-                        ))?;
+                    let file_name = get_fname(&args.local_file)?;
                     k + &file_name
+                } else if k.is_empty() {
+                    get_fname(&args.local_file)?
                 } else {
                     k
                 }
             }
-            None => args
-                .local_file
-                .file_name()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_string())
-                .ok_or(crate::error::Error::Custom("Key is required".to_string()))?,
+            None => get_fname(&args.local_file)?,
         };
         let key = path_clean::clean(key).display().to_string();
         let content_length = metadata.len();
         let req = UploadAttachmentReq {
-            group_name: args.group_name.unwrap_or(self.username.clone()),
+            group_name,
             key,
             content_length,
         };
@@ -1517,7 +1572,7 @@ impl MitoClient {
                 }
             }
             ClientCommand::Artifact(args) => match args.command {
-                ArtifactCommands::Delete(args) => match self.delete_artifact(args).await {
+                ArtifactCommands::Delete(args) => match self.user_delete_artifact(args).await {
                     Ok(_) => {
                         tracing::info!("Successfully deleted artifact");
                     }
@@ -1527,7 +1582,7 @@ impl MitoClient {
                 },
             },
             ClientCommand::Attachment(args) => match args.command {
-                AttachmentCommands::Delete(args) => match self.delete_attachment(args).await {
+                AttachmentCommands::Delete(args) => match self.user_delete_attachment(args).await {
                     Ok(_) => {
                         tracing::info!("Successfully deleted attachment");
                     }
@@ -1646,7 +1701,7 @@ impl MitoClient {
                 }
                 GetCommands::Attachment(args) => {
                     if args.no_download {
-                        match self.get_attachment_url(args.into()).await {
+                        match self.get_attachment_url(args).await {
                             Ok(url) => {
                                 tracing::info!("Attachment URL: {}", url);
                             }
@@ -1655,7 +1710,7 @@ impl MitoClient {
                             }
                         }
                     } else {
-                        match self.get_attachment(args.into()).await {
+                        match self.get_attachment(args).await {
                             Ok(info) => {
                                 tracing::info!(
                                     "Attachment of size {}B downloaded to {}",

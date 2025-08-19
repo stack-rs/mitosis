@@ -382,14 +382,71 @@ pub async fn user_remove_worker_by_uuid(
     Ok(())
 }
 
+fn is_retryable_error(error: &crate::error::Error) -> bool {
+    if let crate::error::Error::DbError(DbErr::Query(sea_orm::error::RuntimeErr::SqlxError(
+        sea_orm::sqlx::Error::Database(db_err),
+    ))) = error
+    {
+        // Check for specific SQL error codes that indicate a retryable error
+        if let Some(code) = db_err.code() {
+            return matches!(code.as_ref(), "40001" | "40P01" | "25P02");
+            // Example codes for serialization failure or deadlock
+        }
+    }
+    false
+}
+
+async fn update_worker_with_transaction(
+    worker_id: i64,
+    db: &DatabaseConnection,
+) -> crate::error::Result<Worker::Model> {
+    let now = TimeDateTimeWithTimeZone::now_utc();
+    let mut cnt = 0;
+    while cnt < 3 {
+        let worker = Worker::ActiveModel {
+            id: Set(worker_id),
+            last_heartbeat: Set(now),
+            ..Default::default()
+        };
+        cnt += 1;
+        match db
+            .transaction::<_, Worker::Model, crate::error::Error>(|txn| {
+                Box::pin(async move {
+                    let updated_worker = worker.update(txn).await?;
+                    Ok(updated_worker)
+                })
+            })
+            .await
+        {
+            Ok(updated_worker) => {
+                // Successfully updated the worker
+                return Ok(updated_worker);
+            }
+            Err(e) => {
+                let err = e.into();
+                tracing::error!(
+                    "Failed to update worker {}: {:?}, retrying... (attempt {}/{})",
+                    worker_id,
+                    err,
+                    cnt,
+                    3
+                );
+                if !is_retryable_error(&err) || cnt >= 3 {
+                    return Err(err);
+                }
+            }
+        }
+    }
+    Err(crate::error::Error::Custom(
+        "Retry limit reached for updating worker".to_string(),
+    ))
+}
+
 pub async fn heartbeat(worker_id: i64, pool: &InfraPool) -> crate::error::Result<()> {
-    let worker = Worker::ActiveModel {
-        id: Set(worker_id),
-        last_heartbeat: Set(TimeDateTimeWithTimeZone::now_utc()),
-        ..Default::default()
-    };
     // DONE: check if the task is already expired
-    let worker = worker.update(&pool.db).await?;
+    // Add retry logic for the update operation
+    let worker = update_worker_with_transaction(worker_id, &pool.db).await?;
+
     if let Some(task_id) = worker.assigned_task_id {
         if let Some(task) = ActiveTask::Entity::find_by_id(task_id)
             .one(&pool.db)

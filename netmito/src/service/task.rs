@@ -373,7 +373,7 @@ pub async fn user_cancel_task(
     Ok(())
 }
 
-pub async fn get_task(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<TaskQueryResp> {
+pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<TaskQueryResp> {
     let active_task_stmt = Query::select()
         .columns([
             (ActiveTask::Entity, ActiveTask::Column::Uuid),
@@ -601,7 +601,7 @@ pub(crate) fn parse_operators_with_number(s: &str) -> crate::error::Result<Opera
     }
 }
 
-pub async fn query_task_list(
+pub async fn query_tasks_by_filter(
     user_id: i64,
     pool: &InfraPool,
     mut query: TasksQueryReq,

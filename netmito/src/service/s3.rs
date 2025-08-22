@@ -26,7 +26,7 @@ use crate::{
     entity::{
         active_tasks as ActiveTask, archived_tasks as ArchivedTask, artifacts as Artifact,
         attachments as Attachment, content::ArtifactContentType, groups as Group,
-        role::UserGroupRole, user_group as UserGroup, users as User,
+        role::UserGroupRole, user_group as UserGroup,
     },
     error::AuthError,
 };
@@ -140,7 +140,7 @@ pub async fn delete_objects<T: Into<String>>(
     Ok(())
 }
 
-pub async fn get_artifact(
+pub async fn download_artifact_by_uuid(
     pool: &InfraPool,
     uuid: Uuid,
     content_type: ArtifactContentType,
@@ -424,7 +424,7 @@ struct GroupInfo {
     group_name: String,
 }
 
-pub async fn get_attachment(
+pub async fn worker_download_attachment(
     pool: &InfraPool,
     uuid: Uuid,
     key: String,
@@ -494,7 +494,7 @@ pub async fn get_attachment(
     })
 }
 
-pub async fn user_get_attachment_db(
+pub async fn user_query_attachment(
     pool: &InfraPool,
     user_id: i64,
     group_name: String,
@@ -912,59 +912,41 @@ struct UserGroupRoleQueryRes {
 async fn check_task_list_query(
     user_id: i64,
     pool: &InfraPool,
-    query: &mut AttachmentsQueryReq,
+    group_name: &str,
 ) -> crate::error::Result<()> {
-    match query.group_name {
-        Some(ref group_name) => {
-            let builder = pool.db.get_database_backend();
-            let role_stmt = Query::select()
-                .column((UserGroup::Entity, UserGroup::Column::Role))
-                .from(UserGroup::Entity)
-                .join(
-                    sea_orm::JoinType::Join,
-                    Group::Entity,
-                    Expr::col((Group::Entity, Group::Column::Id))
-                        .eq(Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))),
-                )
-                .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
-                .and_where(
-                    Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()),
-                )
-                .to_owned();
-            let role = UserGroupRoleQueryRes::find_by_statement(builder.build(&role_stmt))
-                .one(&pool.db)
-                .await?
-                .map(|r| r.role);
-            if role.is_none() {
-                return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
-                    format!("Group with name {group_name} not found or user is not in the group"),
-                )));
-            }
-        }
-        None => {
-            let username = User::Entity::find()
-                .filter(User::Column::Id.eq(user_id))
-                .one(&pool.db)
-                .await?
-                .ok_or(Error::ApiError(crate::error::ApiError::NotFound(
-                    "User".to_string(),
-                )))?
-                .username;
-            tracing::debug!("No group name specified, use username {} instead", username);
-            query.group_name = Some(username);
-        }
+    let builder = pool.db.get_database_backend();
+    let role_stmt = Query::select()
+        .column((UserGroup::Entity, UserGroup::Column::Role))
+        .from(UserGroup::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((Group::Entity, Group::Column::Id))
+                .eq(Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))),
+        )
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+        .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name))
+        .to_owned();
+    let role = UserGroupRoleQueryRes::find_by_statement(builder.build(&role_stmt))
+        .one(&pool.db)
+        .await?
+        .map(|r| r.role);
+    if role.is_none() {
+        return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+            format!("Group with name {group_name} not found or user is not in the group"),
+        )));
     }
     Ok(())
 }
 
-pub async fn query_attachment_list(
+pub async fn query_attachments_by_filter(
     user_id: i64,
     pool: &InfraPool,
+    group_name: String,
     mut query: AttachmentsQueryReq,
 ) -> Result<AttachmentsQueryResp, crate::error::Error> {
-    check_task_list_query(user_id, pool, &mut query).await?;
+    check_task_list_query(user_id, pool, &group_name).await?;
     let key_prefix = query.key_prefix.take().unwrap_or_default();
-    let group_name = query.group_name.unwrap();
     let mut attachment_stmt = Query::select();
     if query.count {
         attachment_stmt.expr(Expr::col((Attachment::Entity, Attachment::Column::Id)).count());

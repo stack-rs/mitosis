@@ -19,7 +19,7 @@ use crate::{
     config::InfraPool,
     entity::{state::UserState, users as User, workers as Worker},
     error::{ApiError, AuthError},
-    schema::{ChangePasswordReq, UserChangePasswordReq, UserLoginReq},
+    schema::{UserChangePasswordReq, UserLoginReq},
 };
 use token::{generate_token, verify_token};
 
@@ -80,7 +80,7 @@ pub(crate) fn get_and_prompt_password(
     Ok(md5_password)
 }
 
-pub(crate) fn fill_user_auth(
+pub(crate) fn fill_user_login(
     username: Option<String>,
     password: Option<String>,
     retain: bool,
@@ -128,7 +128,7 @@ pub async fn user_login(
                     user.auth_signature
                         .unwrap_or_else(|| StdRng::from_os_rng().next_u32() as i64)
                 } else {
-                    StdRng::from_os_rng().next_u32() as i64
+                    (1 + StdRng::from_os_rng().next_u32()) as i64
                 };
                 let token = generate_token(username, sign)?;
                 let now = TimeDateTimeWithTimeZone::now_utc();
@@ -157,13 +157,13 @@ pub async fn user_login(
     }
 }
 
-pub async fn change_password(
+pub async fn user_change_password(
     db: &DatabaseConnection,
     user_id: i64,
     ip: SocketAddr,
+    username: String,
     UserChangePasswordReq {
-        username,
-        old_md5_password: orig_md5_password,
+        old_md5_password,
         new_md5_password,
     }: UserChangePasswordReq,
 ) -> crate::error::Result<String> {
@@ -179,7 +179,7 @@ pub async fn change_password(
     }
     let parsed_hash = PasswordHash::new(&user.encrypted_password)?;
     if Argon2::default()
-        .verify_password(&orig_md5_password, &parsed_hash)
+        .verify_password(&old_md5_password, &parsed_hash)
         .is_ok()
     {
         let salt = SaltString::generate(&mut OsRng);
@@ -210,10 +210,8 @@ pub async fn change_password(
 
 pub async fn admin_change_password(
     db: &DatabaseConnection,
-    ChangePasswordReq {
-        username,
-        new_md5_password,
-    }: ChangePasswordReq,
+    username: String,
+    new_md5_password: [u8; 16],
 ) -> crate::error::Result<()> {
     let user = User::Entity::find()
         .filter(User::Column::Username.eq(&username))

@@ -677,7 +677,7 @@ struct PartialGroupWorkerRole {
     group_name: String,
 }
 
-pub async fn get_worker(
+pub async fn get_worker_by_uuid(
     pool: &InfraPool,
     worker_id: Uuid,
 ) -> crate::error::Result<WorkerQueryResp> {
@@ -756,7 +756,7 @@ pub(crate) struct PartialUserGroupRole {
     pub(crate) group_name: String,
 }
 
-pub async fn query_worker_list(
+pub async fn query_workers_by_filter(
     user_id: i64,
     pool: &InfraPool,
     query: WorkersQueryReq,

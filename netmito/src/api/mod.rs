@@ -1,7 +1,8 @@
 pub mod admin;
-pub mod group;
-pub mod user;
-pub mod worker;
+pub mod groups;
+pub mod tasks;
+pub mod users;
+pub mod workers;
 
 #[cfg(feature = "debugging")]
 use std::net::SocketAddr;
@@ -17,7 +18,7 @@ use axum::{
     http::StatusCode,
     middleware,
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 #[cfg(feature = "debugging")]
 use http_body_util::BodyExt;
@@ -26,8 +27,10 @@ use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 
 use crate::{
-    config::InfraPool,
-    service::auth::{user_auth_middleware, user_auth_with_name_middleware},
+    config::{InfraPool, REDIS_CONNECTION_INFO},
+    error::ApiError,
+    schema::RedisConnectionInfo,
+    service::auth::{user_auth_with_name_middleware, AuthUser},
 };
 
 pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
@@ -36,7 +39,7 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
         Router::new()
             .route(
                 "/auth",
-                get(user::auth_user).layer(middleware::from_fn_with_state(
+                get(users::user_auth).layer(middleware::from_fn_with_state(
                     st.clone(),
                     user_auth_with_name_middleware,
                 )),
@@ -45,25 +48,13 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
                 "/health",
                 get(|| async { (StatusCode::OK, Json(json!({"status": "ok"}))) }),
             )
-            .route("/login", post(user::login_user))
-            .nest("/user", user::user_router(st.clone()))
+            .route("/login", post(users::user_login))
+            .route("/redis", get(query_redis_connection_info))
+            .nest("/users", users::users_router(st.clone()))
             .nest("/admin", admin::admin_router(st.clone(), cancel_token))
-            .nest("/groups", group::group_router(st.clone()))
-            // .route(
-            //     "/group",
-            //     post(group::create_group).layer(middleware::from_fn_with_state(
-            //         st.clone(),
-            //         user_auth_middleware,
-            //     )),
-            // )
-            .route(
-                "/worker",
-                post(worker::register).layer(middleware::from_fn_with_state(
-                    st.clone(),
-                    user_auth_middleware,
-                )),
-            )
-            .nest("/worker", worker::worker_router(st.clone()))
+            .nest("/groups", groups::groups_router(st.clone()))
+            .nest("/workers", workers::workers_router(st.clone()))
+            .nest("/tasks", tasks::tasks_router(st.clone()))
             .with_state(st)
             .layer(CorsLayer::permissive())
     }
@@ -72,7 +63,7 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
         Router::new()
             .route(
                 "/auth",
-                get(user::auth_user).layer(middleware::from_fn_with_state(
+                get(users::user_auth).layer(middleware::from_fn_with_state(
                     st.clone(),
                     user_auth_with_name_middleware,
                 )),
@@ -81,30 +72,25 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
                 "/health",
                 get(|| async { (StatusCode::OK, Json(json!({"status": "ok"}))) }),
             )
-            .route("/login", post(user::login_user))
-            .nest("/user", user::user_router(st.clone()))
+            .route("/login", post(users::user_login))
+            .route("/redis", get(query_redis_connection_info))
+            .nest("/users", users::users_router(st.clone()))
             .nest("/admin", admin::admin_router(st.clone(), cancel_token))
-            .nest("/groups", group::group_router(st.clone()))
-            // .route(
-            //     "/group",
-            //     post(group::create_group).layer(middleware::from_fn_with_state(
-            //         st.clone(),
-            //         user_auth_middleware,
-            //     )),
-            // )
-            .route(
-                "/worker",
-                post(worker::register).layer(middleware::from_fn_with_state(
-                    st.clone(),
-                    user_auth_middleware,
-                )),
-            )
-            .nest("/worker", worker::worker_router(st.clone()))
+            .nest("/groups", groups::groups_router(st.clone()))
+            .nest("/workers", workers::workers_router(st.clone()))
+            .nest("/tasks", tasks::tasks_router(st.clone()))
             .with_state(st)
             .layer(CorsLayer::permissive())
             .layer(middleware::from_fn(print_request_addr))
             .layer(middleware::from_fn(print_request_response))
     }
+}
+
+pub async fn query_redis_connection_info(
+    Extension(_): Extension<AuthUser>,
+) -> Result<Json<RedisConnectionInfo>, ApiError> {
+    let url = REDIS_CONNECTION_INFO.get().map(|info| info.client_url());
+    Ok(Json(RedisConnectionInfo { url }))
 }
 
 #[cfg(feature = "debugging")]

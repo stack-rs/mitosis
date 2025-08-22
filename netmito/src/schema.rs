@@ -36,7 +36,6 @@ pub struct UserLoginResp {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserChangePasswordReq {
-    pub username: String,
     pub old_md5_password: [u8; 16],
     pub new_md5_password: [u8; 16],
 }
@@ -47,8 +46,7 @@ pub struct UserChangePasswordResp {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ChangePasswordReq {
-    pub username: String,
+pub struct AdminChangePasswordReq {
     pub new_md5_password: [u8; 16],
 }
 
@@ -59,7 +57,6 @@ pub struct DeleteUserReq {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChangeUserStateReq {
-    pub username: String,
     pub state: UserState,
 }
 
@@ -70,7 +67,6 @@ pub struct UserStateResp {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChangeGroupStorageQuotaReq {
-    pub group_name: String,
     pub storage_quota: String,
 }
 
@@ -159,7 +155,6 @@ pub struct ReportTaskResp {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UploadAttachmentReq {
-    pub group_name: String,
     pub key: String,
     pub content_length: u64,
 }
@@ -171,7 +166,6 @@ pub struct UploadAttachmentResp {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UploadArtifactReq {
-    pub uuid: Uuid,
     pub content_type: ArtifactContentType,
     pub content_length: u64,
 }
@@ -312,7 +306,6 @@ pub struct AttachmentMetadata {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AttachmentsQueryReq {
-    pub group_name: Option<String>,
     pub key_prefix: Option<String>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,

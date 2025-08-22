@@ -137,7 +137,7 @@ impl TaskExecutor {
                             }
                         }
                         self.task_url
-                            .set_path(format!("worker/tasks/{uuid}").as_str());
+                            .set_path(format!("workers/tasks/{uuid}").as_str());
                         let resp = self
                             .task_client
                             .get(self.task_url.as_str())
@@ -177,7 +177,7 @@ impl TaskExecutor {
                     }
                 }
                 self.task_url
-                    .set_path(format!("worker/tasks/{uuid}").as_str());
+                    .set_path(format!("workers/tasks/{uuid}").as_str());
                 let resp = self
                     .task_client
                     .get(self.task_url.as_str())
@@ -261,7 +261,7 @@ impl MitoWorker {
         )
         .await?;
         let mut url = config.coordinator_addr.clone();
-        url.set_path("worker");
+        url.set_path("workers");
         let req = RegisterWorkerReq {
             tags: config.tags.clone(),
             groups: config.groups.clone(),
@@ -354,7 +354,7 @@ impl MitoWorker {
     pub async fn run(&mut self) -> crate::error::Result<()> {
         tracing::info!("Worker is running");
         let mut heartbeat_url = self.config.coordinator_addr.clone();
-        heartbeat_url.set_path("worker/heartbeat");
+        heartbeat_url.set_path("workers/heartbeat");
         let heartbeat_client = self.http_client.clone();
         let heartbeat_credential = self.credential.clone();
         let heartbeat_cancel_token = self.cancel_token.clone();
@@ -413,7 +413,7 @@ impl MitoWorker {
                 if task_executor.task_cancel_token.is_cancelled() {
                     break;
                 }
-                task_executor.task_url.set_path("worker/tasks");
+                task_executor.task_url.set_path("workers/tasks");
                 let resp = task_executor
                     .task_client
                     .get(task_executor.task_url.as_str())
@@ -515,7 +515,7 @@ impl MitoWorker {
     pub async fn cleanup(&self) {
         tracing::debug!("Worker is cleaning up.");
         let mut url = self.config.coordinator_addr.clone();
-        url.set_path("worker");
+        url.set_path("workers");
         let _ = self
             .http_client
             .delete(url.as_str())
@@ -583,14 +583,15 @@ async fn execute_task(
             RemoteResource::Artifact { uuid, content_type } => {
                 let content_serde_val = serde_json::to_value(content_type)?;
                 let content_serde_str = content_serde_val.as_str().unwrap_or("result");
-                task_executor
-                    .task_url
-                    .set_path(&format!("worker/artifacts/{uuid}/{content_serde_str}"));
+                task_executor.task_url.set_path(&format!(
+                    "workers/tasks/{uuid}/artifacts/{content_serde_str}"
+                ));
             }
             RemoteResource::Attachment { key } => {
+                let uuid = task.uuid;
                 task_executor
                     .task_url
-                    .set_path(&format!("worker/attachments/{}/{}", task.uuid, key));
+                    .set_path(&format!("workers/tasks/{uuid}/attachments/{key}"));
             }
         };
         let resp = loop {
@@ -1218,7 +1219,7 @@ async fn process_task_result(
                     content_length,
                 },
             };
-            task_executor.task_url.set_path("worker/tasks");
+            task_executor.task_url.set_path("workers/tasks");
             let resp = loop {
                 let resp = task_executor
                     .task_client
@@ -1416,7 +1417,7 @@ async fn report_task(
     task_executor: &mut TaskExecutor,
     req: ReportTaskReq,
 ) -> crate::error::Result<()> {
-    task_executor.task_url.set_path("worker/tasks");
+    task_executor.task_url.set_path("workers/tasks");
     loop {
         let resp = task_executor
             .task_client

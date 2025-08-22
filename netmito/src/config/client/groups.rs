@@ -5,13 +5,13 @@ use crate::entity::role::UserGroupRole;
 
 use super::{parse_key_val_colon, AttachmentsArgs};
 
-#[derive(Serialize, Debug, Deserialize, Args, derive_more::From)]
+#[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
 pub struct GroupsArgs {
     #[command(subcommand)]
     pub command: GroupsCommands,
 }
 
-#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From)]
+#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From, Clone)]
 pub enum GroupsCommands {
     /// Create a new group
     Create(CreateGroupArgs),
@@ -25,19 +25,19 @@ pub enum GroupsCommands {
     Attachments(AttachmentsArgs),
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct CreateGroupArgs {
     /// The name of the group
     pub group: String,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct GetGroupArgs {
     /// The name of the group
     pub group: String,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct UpdateUserGroupArgs {
     /// The name of the group
     pub group: String,
@@ -46,7 +46,7 @@ pub struct UpdateUserGroupArgs {
     pub roles: Vec<(String, UserGroupRole)>,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct RemoveUserGroupArgs {
     /// The name of the group
     pub group: String,

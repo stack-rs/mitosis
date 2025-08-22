@@ -3,13 +3,13 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Debug, Deserialize, Args, derive_more::From)]
+#[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
 pub struct AttachmentsArgs {
     #[command(subcommand)]
     pub command: AttachmentsCommands,
 }
 
-#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From)]
+#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From, Clone)]
 pub enum AttachmentsCommands {
     /// Delete an attachment from a group
     Delete(DeleteAttachmentArgs),
@@ -23,7 +23,7 @@ pub enum AttachmentsCommands {
     Query(QueryAttachmentsArgs),
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct DeleteAttachmentArgs {
     /// The group of the attachment belongs to
     pub group_name: String,
@@ -31,7 +31,7 @@ pub struct DeleteAttachmentArgs {
     pub key: String,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct UploadAttachmentArgs {
     /// The path of the local file to upload
     pub local_file: PathBuf,
@@ -51,7 +51,7 @@ pub struct UploadAttachmentArgs {
     pub smart: bool,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct DownloadAttachmentArgs {
     /// The group of the attachment belongs to
     #[arg(short, long = "group")]
@@ -73,7 +73,7 @@ pub struct DownloadAttachmentArgs {
     pub smart: bool,
 }
 
-#[derive(Serialize, Debug, Deserialize)]
+#[derive(Serialize, Debug, Deserialize, Clone)]
 pub(crate) struct InnerDownloadAttachmentArgs {
     /// The group of the attachment belongs to
     pub(crate) group_name: String,
@@ -85,7 +85,7 @@ pub(crate) struct InnerDownloadAttachmentArgs {
     pub(crate) show_pb: bool,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct QueryAttachmentsArgs {
     /// The name of the group the attachments belong to
     #[arg(short, long)]
@@ -104,7 +104,7 @@ pub struct QueryAttachmentsArgs {
     pub count: bool,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct GetAttachmentMetaArgs {
     /// The group of the attachment belongs to
     pub group_name: String,

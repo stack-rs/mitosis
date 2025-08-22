@@ -9,13 +9,13 @@ use crate::{
 
 use super::{parse_key_val, parse_watch_task, ArtifactsArgs};
 
-#[derive(Serialize, Debug, Deserialize, Args, derive_more::From)]
+#[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
 pub struct TasksArgs {
     #[command(subcommand)]
     pub command: TasksCommands,
 }
 
-#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From)]
+#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From, Clone)]
 pub enum TasksCommands {
     /// Submit a task
     Submit(SubmitTaskArgs),
@@ -33,7 +33,7 @@ pub enum TasksCommands {
     Artifacts(ArtifactsArgs),
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct SubmitTaskArgs {
     /// The name of the group this task is submitted to
     #[arg(short = 'g', long = "group")]
@@ -67,13 +67,13 @@ pub struct SubmitTaskArgs {
     pub watch: Option<(Uuid, TaskExecState)>,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct GetTaskArgs {
     /// The UUID of the task
     pub uuid: Uuid,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct QueryTasksArgs {
     /// The username of the creator who submitted the tasks
     #[arg(short, long, num_args = 0.., value_delimiter = ',')]
@@ -110,13 +110,13 @@ pub struct QueryTasksArgs {
     pub count: bool,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct CancelTaskArgs {
     /// The UUID of the task
     pub uuid: Uuid,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct UpdateTaskLabelsArgs {
     /// The UUID of the task
     pub uuid: Uuid,
@@ -125,7 +125,7 @@ pub struct UpdateTaskLabelsArgs {
     pub labels: Vec<String>,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct ChangeTaskArgs {
     /// The UUID of the task
     pub uuid: Uuid,

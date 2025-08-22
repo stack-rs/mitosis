@@ -11,13 +11,13 @@ use crate::{
 
 use super::parse_key_val_colon;
 
-#[derive(Serialize, Debug, Deserialize, Args, derive_more::From)]
+#[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
 pub struct WorkersArgs {
     #[command(subcommand)]
     pub command: WorkersCommands,
 }
 
-#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From)]
+#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From, Clone)]
 pub enum WorkersCommands {
     /// Cancel a worker
     Cancel(CancelWorkerArgs),
@@ -33,7 +33,7 @@ pub enum WorkersCommands {
     Query(QueryWorkersArgs),
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct CancelWorkerArgs {
     /// The UUID of the worker
     pub uuid: Uuid,
@@ -43,7 +43,7 @@ pub struct CancelWorkerArgs {
     pub force: bool,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct ReplaceWorkerTagsArgs {
     /// The UUID of the worker
     pub uuid: Uuid,
@@ -52,7 +52,7 @@ pub struct ReplaceWorkerTagsArgs {
     pub tags: Vec<String>,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct UpdateWorkerGroupArgs {
     /// The UUID of the worker
     pub uuid: Uuid,
@@ -61,7 +61,7 @@ pub struct UpdateWorkerGroupArgs {
     pub roles: Vec<(String, GroupWorkerRole)>,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct RemoveWorkerGroupArgs {
     /// The UUID of the worker
     pub uuid: Uuid,
@@ -70,13 +70,13 @@ pub struct RemoveWorkerGroupArgs {
     pub groups: Vec<String>,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct GetWorkerArgs {
     /// The UUID of the worker
     pub uuid: Uuid,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct QueryWorkersArgs {
     /// The name of the group has access to the workers
     #[arg(short, long)]

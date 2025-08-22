@@ -6,13 +6,13 @@ use uuid::Uuid;
 
 use crate::entity::content::ArtifactContentType;
 
-#[derive(Serialize, Debug, Deserialize, Args, derive_more::From)]
+#[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
 pub struct ArtifactsArgs {
     #[command(subcommand)]
     pub command: ArtifactsCommands,
 }
 
-#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From)]
+#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From, Clone)]
 pub enum ArtifactsCommands {
     /// Delete an artifact of a task
     Delete(DeleteArtifactArgs),
@@ -22,7 +22,7 @@ pub enum ArtifactsCommands {
     Download(DownloadArtifactArgs),
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct DeleteArtifactArgs {
     /// The UUID of the artifact
     pub uuid: Uuid,
@@ -31,7 +31,7 @@ pub struct DeleteArtifactArgs {
     pub content_type: ArtifactContentType,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct UploadArtifactArgs {
     /// The path of the local file to upload
     pub local_file: PathBuf,
@@ -45,7 +45,7 @@ pub struct UploadArtifactArgs {
     pub pb: bool,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct DownloadArtifactArgs {
     /// The UUID of the artifact
     pub uuid: Uuid,

@@ -5,13 +5,13 @@ use crate::schema::DeleteUserReq;
 
 use super::{CancelWorkerArgs, DeleteArtifactArgs, DeleteAttachmentArgs};
 
-#[derive(Serialize, Debug, Deserialize, Args, derive_more::From)]
+#[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
 pub struct AdminArgs {
     #[command(subcommand)]
     pub command: AdminCommands,
 }
 
-#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From)]
+#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From, Clone)]
 pub enum AdminCommands {
     /// Manage users
     Users(AdminUsersArgs),
@@ -25,13 +25,13 @@ pub enum AdminCommands {
     Workers(AdminWorkersArgs),
 }
 
-#[derive(Serialize, Debug, Deserialize, Args, derive_more::From)]
+#[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
 pub struct AdminUsersArgs {
     #[command(subcommand)]
     pub command: AdminUsersCommands,
 }
 
-#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From)]
+#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From, Clone)]
 pub enum AdminUsersCommands {
     /// Create a new user
     Create(AdminCreateUserArgs),
@@ -41,7 +41,7 @@ pub enum AdminUsersCommands {
     ChangePassword(ChangePasswordArgs),
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct AdminCreateUserArgs {
     /// The username of the user
     pub username: Option<String>,
@@ -52,13 +52,13 @@ pub struct AdminCreateUserArgs {
     pub admin: bool,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct AdminDeleteUserArgs {
     /// The username of the user
     pub username: String,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct ChangePasswordArgs {
     /// The name of the user
     pub username: Option<String>,
@@ -66,18 +66,18 @@ pub struct ChangePasswordArgs {
     pub new_password: Option<String>,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args, derive_more::From)]
+#[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
 pub struct ShutdownArgs {
     pub secret: String,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args, derive_more::From)]
+#[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
 pub struct AdminGroupsArgs {
     #[command(subcommand)]
     pub command: AdminGroupsCommands,
 }
 
-#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From)]
+#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From, Clone)]
 pub enum AdminGroupsCommands {
     /// Update storage quota of a group
     StorageQuota(AdminUpdateGroupStorageQuotaArgs),
@@ -85,52 +85,52 @@ pub enum AdminGroupsCommands {
     Attachments(AdminAttachmentsArgs),
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct AdminUpdateGroupStorageQuotaArgs {
     pub group_name: String,
     pub storage_quota: String,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args, derive_more::From)]
+#[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
 pub struct AdminAttachmentsArgs {
     #[command(subcommand)]
     pub command: AdminAttachmentsCommands,
 }
 
-#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From)]
+#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From, Clone)]
 pub enum AdminAttachmentsCommands {
     Delete(DeleteAttachmentArgs),
 }
 
-#[derive(Serialize, Debug, Deserialize, Args, derive_more::From)]
+#[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
 pub struct AdminTasksArgs {
     #[command(subcommand)]
     pub command: AdminTasksCommands,
 }
 
-#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From)]
+#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From, Clone)]
 pub enum AdminTasksCommands {
     Artifacts(AdminArtifactsArgs),
 }
 
-#[derive(Serialize, Debug, Deserialize, Args, derive_more::From)]
+#[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
 pub struct AdminArtifactsArgs {
     #[command(subcommand)]
     pub command: AdminArtifactsCommands,
 }
 
-#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From)]
+#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From, Clone)]
 pub enum AdminArtifactsCommands {
     Delete(DeleteArtifactArgs),
 }
 
-#[derive(Serialize, Debug, Deserialize, Args, derive_more::From)]
+#[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
 pub struct AdminWorkersArgs {
     #[command(subcommand)]
     pub command: AdminWorkersCommands,
 }
 
-#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From)]
+#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From, Clone)]
 pub enum AdminWorkersCommands {
     /// Cancel a worker
     Cancel(CancelWorkerArgs),

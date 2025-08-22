@@ -24,7 +24,7 @@ pub use tasks::*;
 pub use users::*;
 pub use workers::*;
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct ClientConfig {
     pub coordinator_addr: Url,
     pub credential_path: Option<RelativePathBuf>,
@@ -33,7 +33,7 @@ pub struct ClientConfig {
     pub retain: bool,
 }
 
-#[derive(Args, Debug, Serialize, Default)]
+#[derive(Args, Debug, Serialize, Default, Clone)]
 #[command(rename_all = "kebab-case")]
 pub struct ClientConfigCli {
     /// The path of the config file
@@ -68,14 +68,14 @@ pub struct ClientConfigCli {
     pub command: Option<ClientCommand>,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(name = "")]
 pub struct ClientInteractiveShell {
     #[command(subcommand)]
     pub(crate) command: ClientCommand,
 }
 
-#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From)]
+#[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From, Clone)]
 pub enum ClientCommand {
     /// Admin operations, including shutdown the coordinator, chaning user password, etc.
     Admin(AdminArgs),
@@ -98,7 +98,7 @@ pub enum ClientCommand {
     Quit,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct LoginArgs {
     /// The username of the user
     pub username: Option<String>,
@@ -109,7 +109,7 @@ pub struct LoginArgs {
     pub retain: bool,
 }
 
-#[derive(Serialize, Debug, Deserialize, Args)]
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct CmdArgs {
     /// Do not merge the command into one string
     #[arg(short, long)]

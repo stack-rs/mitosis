@@ -30,6 +30,7 @@ pub struct ClientConfig {
     pub credential_path: Option<RelativePathBuf>,
     pub user: Option<String>,
     pub password: Option<String>,
+    #[serde(default)]
     pub retain: bool,
 }
 

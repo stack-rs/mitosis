@@ -30,7 +30,7 @@ use crate::{
     config::{InfraPool, REDIS_CONNECTION_INFO},
     error::ApiError,
     schema::RedisConnectionInfo,
-    service::auth::{user_auth_with_name_middleware, AuthUser},
+    service::auth::{user_auth_middleware, user_auth_with_name_middleware, AuthUser},
 };
 
 pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
@@ -49,7 +49,13 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
                 get(|| async { (StatusCode::OK, Json(json!({"status": "ok"}))) }),
             )
             .route("/login", post(users::user_login))
-            .route("/redis", get(query_redis_connection_info))
+            .route(
+                "/redis",
+                get(query_redis_connection_info).layer(middleware::from_fn_with_state(
+                    st.clone(),
+                    user_auth_middleware,
+                )),
+            )
             .nest("/users", users::users_router(st.clone()))
             .nest("/admin", admin::admin_router(st.clone(), cancel_token))
             .nest("/groups", groups::groups_router(st.clone()))
@@ -73,7 +79,13 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
                 get(|| async { (StatusCode::OK, Json(json!({"status": "ok"}))) }),
             )
             .route("/login", post(users::user_login))
-            .route("/redis", get(query_redis_connection_info))
+            .route(
+                "/redis",
+                get(query_redis_connection_info).layer(middleware::from_fn_with_state(
+                    st.clone(),
+                    user_auth_middleware,
+                )),
+            )
             .nest("/users", users::users_router(st.clone()))
             .nest("/admin", admin::admin_router(st.clone(), cancel_token))
             .nest("/groups", groups::groups_router(st.clone()))

@@ -6,29 +6,29 @@ To use the SDK, add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-netmito = "0.1"
+netmito = "0.5"
 ```
 
 Here is a simple example of how to create a new user using the SDK:
 
 ```rust,ignore
 # use netmito::client::MitoClient;
-# use netmito::config::client::{ClientConfig, CreateUserArgs};
-# 
+# use netmito::config::client::{ClientConfig, AdminCreateUserArgs};
+#
 # #[tokio::main]
 # async fn main() {
 // Create a new client configuration
 let config = ClientConfig::default();
 // Setup the client
 let mut client = MitoClient::new(config);
-// Create arguments for creating a new user
-let args = CreateUserArgs {
-    username: "new_user".to_string(),
-    password: "new_password".to_string(),
+// Fill up arguments for creating a new user
+let args = AdminCreateUserArgs {
+    username: Some("new_user".to_string()),
+    password: Some("new_password".to_string()),
     admin: false,
 };
 // Create a new user
-client.create_user(args).await.unwrap();
+client.admin_create_user(args).await.unwrap();
 # }
 ```
 

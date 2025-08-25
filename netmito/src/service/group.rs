@@ -15,7 +15,7 @@ use crate::{
 
 use super::worker::PartialUserGroupRole;
 
-pub async fn create_group<C>(
+pub async fn user_create_group<C>(
     db: &C,
     user_id: i64,
     group_name: String,
@@ -103,7 +103,7 @@ struct UserInGroup {
     role: UserGroupRole,
 }
 
-pub async fn get_group(
+pub async fn user_get_group_by_name(
     user_id: i64,
     group_name: String,
     pool: &InfraPool,

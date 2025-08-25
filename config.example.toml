@@ -31,7 +31,7 @@ lifetime = "7d"
 # tags are not set
 file_log = false
 # log_path is not set. It will use the default rolling log file path if file_log is set to true
-# lifetime is not set, default to the coordinator's setting
+# retain is not set, default to false
 
 [client]
 # user = "mitosis_admin"

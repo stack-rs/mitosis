@@ -17,26 +17,33 @@ use crate::{
         self,
         auth::{admin_auth_middleware, AuthAdminUser},
         name_validator,
-        s3::{admin_delete_artifact, admin_delete_attachment},
-        worker::remove_worker_by_uuid,
     },
 };
 
 pub fn admin_router(st: InfraPool, cancel_token: CancellationToken) -> Router<InfraPool> {
     Router::new()
-        .route("/user", post(create_user).delete(delete_user))
-        .route("/password", post(change_password))
-        .route("/user/state", post(change_user_state))
-        .route("/group/storage_quota", post(change_group_storage_quota))
-        .route("/workers/{uuid}/", delete(shutdown_worker))
+        .route("/users", post(admin_create_user).delete(admin_delete_user))
         .route(
-            "/attachments/{group_name}/{*key}",
-            delete(delete_attachment),
+            "/users/{username}/password",
+            post(admin_change_user_password),
         )
-        .route("/artifacts/{uuid}/{content_type}", delete(delete_artifact))
+        .route("/users/{username}/state", post(admin_change_user_state))
+        .route(
+            "/groups/{group_name}/storage-quota",
+            post(admin_change_group_storage_quota),
+        )
+        .route("/workers/{uuid}/", delete(admin_shutdown_worker))
+        .route(
+            "/groups/{group_name}/attachments/{*key}",
+            delete(admin_delete_attachment),
+        )
+        .route(
+            "/tasks/{uuid}/artifacts/{content_type}",
+            delete(admin_delete_artifact),
+        )
         .route(
             "/shutdown",
-            post(shutdown_coordinator).with_state(cancel_token),
+            post(admin_shutdown_coordinator).with_state(cancel_token),
         )
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
@@ -45,7 +52,7 @@ pub fn admin_router(st: InfraPool, cancel_token: CancellationToken) -> Router<In
         .with_state(st)
 }
 
-pub async fn create_user(
+pub async fn admin_create_user(
     Extension(_): Extension<AuthAdminUser>,
     State(pool): State<InfraPool>,
     Json(CreateUserReq {
@@ -73,7 +80,7 @@ pub async fn create_user(
     }
 }
 
-pub async fn delete_user(
+pub async fn admin_delete_user(
     Extension(_): Extension<AuthAdminUser>,
     State(pool): State<InfraPool>,
     Json(req): Json<DeleteUserReq>,
@@ -95,12 +102,12 @@ pub async fn delete_user(
     }
 }
 
-pub async fn delete_attachment(
+pub async fn admin_delete_attachment(
     Extension(_): Extension<AuthAdminUser>,
     State(pool): State<InfraPool>,
     Path((group_name, key)): Path<(String, String)>,
 ) -> Result<(), ApiError> {
-    admin_delete_attachment(&pool, group_name, key)
+    service::s3::admin_delete_attachment(&pool, group_name, key)
         .await
         .map_err(|e| match e {
             crate::error::Error::AuthError(err) => ApiError::AuthError(err),
@@ -113,12 +120,12 @@ pub async fn delete_attachment(
     Ok(())
 }
 
-pub async fn delete_artifact(
+pub async fn admin_delete_artifact(
     Extension(_): Extension<AuthAdminUser>,
     State(pool): State<InfraPool>,
     Path((uuid, content_type)): Path<(Uuid, ArtifactContentType)>,
 ) -> Result<(), ApiError> {
-    admin_delete_artifact(&pool, uuid, content_type)
+    service::s3::admin_delete_artifact(&pool, uuid, content_type)
         .await
         .map_err(|e| match e {
             crate::error::Error::AuthError(err) => ApiError::AuthError(err),
@@ -131,12 +138,13 @@ pub async fn delete_artifact(
     Ok(())
 }
 
-pub async fn change_password(
+pub async fn admin_change_user_password(
     Extension(_): Extension<AuthAdminUser>,
     State(pool): State<InfraPool>,
-    Json(req): Json<ChangePasswordReq>,
+    Path(username): Path<String>,
+    Json(req): Json<AdminChangePasswordReq>,
 ) -> ApiResult<()> {
-    crate::service::auth::admin_change_password(&pool.db, req)
+    service::auth::admin_change_password(&pool.db, username, req.new_md5_password)
         .await
         .map_err(|e| match e {
             crate::error::Error::AuthError(err) => ApiError::AuthError(err),
@@ -149,16 +157,16 @@ pub async fn change_password(
     Ok(())
 }
 
-pub async fn change_user_state(
+pub async fn admin_change_user_state(
     Extension(_): Extension<AuthAdminUser>,
     State(pool): State<InfraPool>,
+    Path(username): Path<String>,
     Json(req): Json<ChangeUserStateReq>,
 ) -> ApiResult<Json<UserStateResp>> {
-    match service::user::change_user_state(&pool.db, req.username.clone(), req.state).await {
+    match service::user::change_user_state(&pool.db, username.clone(), req.state).await {
         Ok(state) => Ok(Json(UserStateResp { state })),
         Err(Error::DbError(DbErr::RecordNotUpdated)) => Err(ApiError::NotFound(format!(
-            "User or group with name {}",
-            req.username
+            "User or group with name {username}"
         ))),
         Err(e) => {
             tracing::error!("{}", e);
@@ -167,13 +175,14 @@ pub async fn change_user_state(
     }
 }
 
-pub async fn change_group_storage_quota(
+pub async fn admin_change_group_storage_quota(
     Extension(_): Extension<AuthAdminUser>,
     State(pool): State<InfraPool>,
+    Path(group_name): Path<String>,
     Json(req): Json<ChangeGroupStorageQuotaReq>,
 ) -> ApiResult<Json<GroupStorageQuotaResp>> {
     let storage_quota =
-        service::group::change_group_storage_quota(&pool, req.group_name, req.storage_quota)
+        service::group::change_group_storage_quota(&pool, group_name, req.storage_quota)
             .await
             .map_err(|e| match e {
                 crate::error::Error::AuthError(err) => ApiError::AuthError(err),
@@ -186,7 +195,7 @@ pub async fn change_group_storage_quota(
     Ok(Json(GroupStorageQuotaResp { storage_quota }))
 }
 
-pub async fn shutdown_worker(
+pub async fn admin_shutdown_worker(
     Extension(_): Extension<AuthAdminUser>,
     State(pool): State<InfraPool>,
     Path(uuid): Path<Uuid>,
@@ -194,7 +203,7 @@ pub async fn shutdown_worker(
 ) -> Result<(), ApiError> {
     let op = op.op.unwrap_or_default();
     tracing::debug!("Shutdown worker {} with op {:?}", uuid, op);
-    remove_worker_by_uuid(uuid, op, &pool)
+    service::worker::remove_worker_by_uuid(uuid, op, &pool)
         .await
         .map_err(|e| match e {
             crate::error::Error::AuthError(err) => ApiError::AuthError(err),
@@ -208,14 +217,15 @@ pub async fn shutdown_worker(
     Ok(())
 }
 
-pub async fn shutdown_coordinator(
+pub async fn admin_shutdown_coordinator(
     Extension(_): Extension<AuthAdminUser>,
     State(cancel_token): State<CancellationToken>,
     Json(req): Json<ShutdownReq>,
 ) -> Result<(), ApiError> {
-    tracing::debug!("Shutdown coordinator");
+    tracing::info!("Coordinator is requested to shutdown");
     if let Some(secret) = config::SHUTDOWN_SECRET.get() {
         if *secret == req.secret {
+            tracing::info!("Coordinator shutdown initiated");
             cancel_token.cancel();
             Ok(())
         } else {

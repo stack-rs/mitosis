@@ -88,7 +88,7 @@ impl TaskDispatcher {
     }
 
     fn fetch_task(&mut self, worker_id: i64) -> Option<i64> {
-        tracing::debug!("Fetch task from worker {}", worker_id);
+        tracing::trace!("Fetch task from worker {}", worker_id);
         if let Some(worker) = self.workers.get_mut(&worker_id) {
             worker.pop().map(|(task_id, _)| task_id)
         } else {

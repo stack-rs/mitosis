@@ -10,6 +10,18 @@ To start a Worker, you need to provide a TOML file that configures the Worker.
 The TOML file specifies the Worker's configuration, such as the polling (fetching) interval, the URL of the Coordinator, and the the groups allowed to submit tasks to it.
 All configuration options are optional and have default values.
 
+The Worker will merge the configuration from the file and the command-line arguments according to the following order (the latter overrides the former):
+
+```md
+DEFAULT <- `$CONFIG_DIR`/mitosis/config.toml <- config file specified by `cli.config` or loal `config.toml` <- env prefixed by `MITO_` <- cli arguments
+
+`$CONFIG_DIR` will be different on different platforms:
+
+- Linux: `$XDG_CONFIG_HOME` or `$HOME`/.config
+- macOS: `$HOME`/Library/Application Support
+- Windows: {FOLDERID_RoamingAppData}
+```
+
 Here is an example of a Worker configuration file (you can also refer to `config.example.toml` in the repository):
 
 ```toml

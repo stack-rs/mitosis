@@ -9,7 +9,7 @@ use url::Url;
 use crate::{
     error::{ApiError, Error, ErrorMsg, RequestError},
     schema::UserLoginReq,
-    service::auth::fill_user_auth,
+    service::auth::fill_user_login,
 };
 
 macro_rules! expect_two {
@@ -193,7 +193,7 @@ pub async fn get_user_credential(
     }
     // Local credential not found or invalid, need to login
     tracing::warn!("Local credential not found or invalid, need to login");
-    let req = fill_user_auth(user, password, retain)?;
+    let req = fill_user_login(user, password, retain)?;
     url.set_path("login");
     let resp = client
         .post(url.as_str())
@@ -225,6 +225,7 @@ pub async fn get_user_credential(
     }
 }
 
+// This function is currently nowhere used, but it is kept for future potential use
 pub async fn refresh_user_credential<T>(
     cred_path: Option<&T>,
     client: &Client,

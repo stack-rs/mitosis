@@ -209,6 +209,15 @@ openssl pkey -in private.pem -pubout -out public.pem
 <p>To start a Coordinator, you need to provide a TOML file that configures the Coordinator.
 The TOML file specifies the Coordinator's configuration, such as the address it binds to, the URL of the postgres database, and token expiry settings.
 All configuration options are optional and have default values.</p>
+<p>The Coordinator will merge the configuration from the file and the command-line arguments according to the following order (the latter overrides the former):</p>
+<pre><code class="language-md">DEFAULT &lt;- `$CONFIG_DIR`/mitosis/config.toml &lt;- config file specified by `cli.config` or loal `config.toml` &lt;- env prefixed by `MITO_` &lt;- cli arguments
+
+`$CONFIG_DIR` will be different on different platforms:
+
+- Linux: `$XDG_CONFIG_HOME` or `$HOME`/.config
+- macOS: `$HOME`/Library/Application Support
+- Windows: {FOLDERID_RoamingAppData}
+</code></pre>
 <p>Here is an example of a Coordinator configuration file (you can also refer to <code>config.example.toml</code> in the repository):</p>
 <pre><code class="language-toml">[coordinator]
 bind = "127.0.0.1:5000"

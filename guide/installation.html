@@ -181,7 +181,8 @@
                     <main>
                         <h1 id="installation"><a class="header" href="#installation">Installation</a></h1>
 <p>The Mitosis project contains a CLI tool (named <code>mito</code>) that you can use to directly start a distributed platform,
-and a SDK library (named <code>netmito</code>) that you can use to create your own client.</p>
+and a SDK library (named <code>netmito</code>) that you can use to create your own client.
+We currently only support Rust for the SDK library. Python SDK is coming soon.</p>
 <p>There are multiple ways to install the Mitosis CLI tool.
 Choose any one of the methods below that best suit your needs.</p>
 <h2 id="pre-compiled-binaries"><a class="header" href="#pre-compiled-binaries">Pre-compiled binaries</a></h2>
@@ -227,6 +228,7 @@ cd mitosis
 cargo build --release
 </code></pre>
 <p>Then you can find the binary in <code>target/release/mito</code> and install or run it as you like.</p>
+<h3 id="common-building-errors"><a class="header" href="#common-building-errors">Common building errors</a></h3>
 <p>If you encounter compilation errors on rustls or aws-lc-sys in older Linux distributions, check gcc version and consider updating it.
 For example:</p>
 <pre><code class="language-bash">sudo apt update -y

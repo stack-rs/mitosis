@@ -183,11 +183,11 @@
 <p>The Mitosis project contains a SDK library (named <code>netmito</code>) that you can use to create your own client programmatically.</p>
 <p>To use the SDK, add the following to your <code>Cargo.toml</code>:</p>
 <pre><code class="language-toml">[dependencies]
-netmito = "0.1"
+netmito = "0.5"
 </code></pre>
 <p>Here is a simple example of how to create a new user using the SDK:</p>
 <pre><code class="language-rust ignore"><span class="boring">use netmito::client::MitoClient;
-</span><span class="boring">use netmito::config::client::{ClientConfig, CreateUserArgs};
+</span><span class="boring">use netmito::config::client::{ClientConfig, AdminCreateUserArgs};
 </span><span class="boring">
 </span><span class="boring">#[tokio::main]
 </span><span class="boring">async fn main() {
@@ -195,14 +195,14 @@ netmito = "0.1"
 let config = ClientConfig::default();
 // Setup the client
 let mut client = MitoClient::new(config);
-// Create arguments for creating a new user
-let args = CreateUserArgs {
-    username: "new_user".to_string(),
-    password: "new_password".to_string(),
+// Fill up arguments for creating a new user
+let args = AdminCreateUserArgs {
+    username: Some("new_user".to_string()),
+    password: Some("new_password".to_string()),
     admin: false,
 };
 // Create a new user
-client.create_user(args).await.unwrap();
+client.admin_create_user(args).await.unwrap();
 <span class="boring">}</span></code></pre>
 <p>For more details, please refer to the <a href="https://docs.rs/netmito">API documentation</a>.</p>
 

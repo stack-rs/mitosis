@@ -2,6 +2,62 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0](https://github.com/stack-rs/mitosis/compare/mito-v0.4.0...mito-v0.5.0) - 2025-08-26
+
+### Features
+
+- *(api)* Support admin change group storage quota - ([c7c8d60](https://github.com/stack-rs/mitosis/commit/c7c8d60aa8c13eb80c8c3d08c482381f7231c4a2))
+- *(api)* Support change password - ([9a52468](https://github.com/stack-rs/mitosis/commit/9a524680ab1b038f220ee51fa98904f1f413b900))
+- *(api)* Return username for auth interface - ([2bb8999](https://github.com/stack-rs/mitosis/commit/2bb899949b1b88186571486d1056c3e482c8e8d9))
+- *(api)* Support delete artifact and attachment - ([332998f](https://github.com/stack-rs/mitosis/commit/332998ff002e052c76c7561b5799d391f1389952))
+- *(api)* Support complex query for tasks - ([7c0564d](https://github.com/stack-rs/mitosis/commit/7c0564df838bc98edb12b61a8fdfd73f9699d36d))
+- *(api)* Support query counts only for attachments - ([520aca7](https://github.com/stack-rs/mitosis/commit/520aca76afb3fc55ab82104834ea5ed44329faf7))
+- *(api)* Support query counts only for workers - ([5ae022b](https://github.com/stack-rs/mitosis/commit/5ae022b0bc37c67a9888ea7e7d7584ede18dd597))
+- *(api)* Allow CORS - ([2caf034](https://github.com/stack-rs/mitosis/commit/2caf034119d640de31fecff4d80e08933cbb99a5))
+- *(auth)* Allow user to retain previous login - ([6593fe4](https://github.com/stack-rs/mitosis/commit/6593fe488a78d1ec5b57bbdf83760d961e7803af))
+- *(conf)* Add default value for ClientConfig - ([7e4a247](https://github.com/stack-rs/mitosis/commit/7e4a247f79bc53e2e24b3a5cbee64b1a5066a639))
+- *(conf)* Support read global config file - ([bc552dd](https://github.com/stack-rs/mitosis/commit/bc552ddc4e53971837c7fd89df56750b44967157))
+- *(s3)* Allow more time for uploading - ([75fd9ea](https://github.com/stack-rs/mitosis/commit/75fd9ea3d589f1b66961f186e7eaad9d5b99b637))
+- *(sdk)* Support progress bar for file operation - ([65dcd81](https://github.com/stack-rs/mitosis/commit/65dcd812916f1638d486f11128be6ee0d0299eb5))
+- *(sdk)* Add smart parse for file path arguments - ([ed07a62](https://github.com/stack-rs/mitosis/commit/ed07a62a65626367abc43744aa06d212bf3b2498))
+- *(sdk)* Auto-fill the omitted file name on uploading - ([679d833](https://github.com/stack-rs/mitosis/commit/679d833faf863e66df2c09834742defeede56f68))
+- *(sdk)* Support directly run external commands - ([e917fad](https://github.com/stack-rs/mitosis/commit/e917fad2611df93a2ded8136386b83b5164aff16))
+
+### Bug Fixes
+
+- *(api)* Add middleware to redis interface - ([a6bfc7f](https://github.com/stack-rs/mitosis/commit/a6bfc7f370fc61213783a40457941b18909c44b1))
+- *(worker)* Try to mitigate heartbeat update deadlock - ([0e7116c](https://github.com/stack-rs/mitosis/commit/0e7116c7c4be82a6507fd3dc948d19eac0010154))
+- Sync routes in different feature flags - ([32ffc7e](https://github.com/stack-rs/mitosis/commit/32ffc7e70e6771dfba3c34055bd88fb428b395a2))
+
+### Refactor
+
+- *(task)* Get group name before permission check - ([c1b1c05](https://github.com/stack-rs/mitosis/commit/c1b1c059f9f4ce892803a9b996e7ee6b7a6058c9))
+- [**breaking**] Reorganize api interfaces and client sdk - ([4725e24](https://github.com/stack-rs/mitosis/commit/4725e2417d64c1eb286eb9483f3ec2852608a863))
+
+### Documentation
+
+- *(example)* Add retain option to example config - ([56b1219](https://github.com/stack-rs/mitosis/commit/56b1219a7efb5f4d38bd1e7241aeefc57548c8d8))
+- *(guide)* Update usage guidance - ([046bff2](https://github.com/stack-rs/mitosis/commit/046bff234440a54ea276a347e10acc44169d73cc))
+- Fix wrong comments - ([de8e713](https://github.com/stack-rs/mitosis/commit/de8e7137fb7a8b0e019e30064ce17667d769577b))
+
+### Styling
+
+- Format docker-compose.yml - ([4798760](https://github.com/stack-rs/mitosis/commit/4798760544970f81470598204f47309f65f919b1))
+- Fix clippy warnings - ([f2f5342](https://github.com/stack-rs/mitosis/commit/f2f53429312e78fa562c726d7d38e20bf35e6845))
+
+### Miscellaneous Tasks
+
+- Allow build CI to run from fork's PR - ([0601b0c](https://github.com/stack-rs/mitosis/commit/0601b0c4457924a7d3b6ccc0f4d92382cdf26eae))
+- Replace latest version on docs build - ([2f74600](https://github.com/stack-rs/mitosis/commit/2f74600706de46e7d8a518d280b30f73863a5e38))
+- Downgrade fetch task tracing level - ([94797a9](https://github.com/stack-rs/mitosis/commit/94797a905f9e2852fcf9e7cdc909fed16dec96cf))
+- Re-export some third-party libraries - ([634b3d6](https://github.com/stack-rs/mitosis/commit/634b3d600782e2a53a393c7092a8d8a8018610dd))
+- Impl clone trait for schema data structure - ([c1f3e3c](https://github.com/stack-rs/mitosis/commit/c1f3e3c285afd9c0ea245aa295018f055840036f))
+
+### Build
+
+- *(dist)* Replace native-tls with rustls - ([c36f5c8](https://github.com/stack-rs/mitosis/commit/c36f5c89d04dea67f411a22ab893668ed7b98a3e))
+- *(dist)* Add new target x86_64-unknown-linux-musl - ([48aab5e](https://github.com/stack-rs/mitosis/commit/48aab5e0d407c037ddfc8cd5d34a34b148a3d8a0))
+
 ## [0.4.0](https://github.com/stack-rs/mitosis/compare/mito-v0.3.2...mito-v0.4.0) - 2025-07-22
 
 ### Features

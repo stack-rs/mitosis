@@ -329,7 +329,7 @@ impl MitoClient {
         &mut self,
         args: AdminDeleteUserArgs,
     ) -> crate::error::Result<()> {
-        self.http_client.admin_delete_user(args.into()).await
+        self.http_client.admin_delete_user(args.username).await
     }
 
     pub async fn create_group(&mut self, args: CreateGroupArgs) -> crate::error::Result<()> {

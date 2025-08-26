@@ -51,11 +51,6 @@ pub struct AdminChangePasswordReq {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DeleteUserReq {
-    pub username: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChangeUserStateReq {
     pub state: UserState,
 }

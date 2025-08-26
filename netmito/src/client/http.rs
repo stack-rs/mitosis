@@ -218,13 +218,12 @@ impl MitoHttpClient {
         }
     }
 
-    pub async fn admin_delete_user(&mut self, req: DeleteUserReq) -> crate::error::Result<()> {
-        self.url.set_path("admin/users");
+    pub async fn admin_delete_user(&mut self, username: String) -> crate::error::Result<()> {
+        self.url.set_path(&format!("admin/users/{username}"));
         let resp = self
             .http_client
             .delete(self.url.as_str())
             .bearer_auth(&self.credential)
-            .json(&req)
             .send()
             .await
             .map_err(map_reqwest_err)?;

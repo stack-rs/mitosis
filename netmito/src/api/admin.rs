@@ -22,7 +22,8 @@ use crate::{
 
 pub fn admin_router(st: InfraPool, cancel_token: CancellationToken) -> Router<InfraPool> {
     Router::new()
-        .route("/users", post(admin_create_user).delete(admin_delete_user))
+        .route("/users", post(admin_create_user))
+        .route("/users/{username}", delete(admin_delete_user))
         .route(
             "/users/{username}/password",
             post(admin_change_user_password),
@@ -83,16 +84,15 @@ pub async fn admin_create_user(
 pub async fn admin_delete_user(
     Extension(_): Extension<AuthAdminUser>,
     State(pool): State<InfraPool>,
-    Json(req): Json<DeleteUserReq>,
+    Path(username): Path<String>,
 ) -> ApiResult<Json<UserStateResp>> {
-    match service::user::change_user_state(&pool.db, req.username.clone(), UserState::Deleted).await
-    {
+    match service::user::change_user_state(&pool.db, username.clone(), UserState::Deleted).await {
         Ok(UserState::Deleted) => Ok(Json(UserStateResp {
             state: UserState::Deleted,
         })),
         Err(Error::DbError(DbErr::RecordNotUpdated)) => Err(ApiError::NotFound(format!(
             "User or group with name {}",
-            req.username
+            username
         ))),
         Err(e) => {
             tracing::error!("{}", e);

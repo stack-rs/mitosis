@@ -1,8 +1,6 @@
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 
-use crate::schema::DeleteUserReq;
-
 use super::{CancelWorkerArgs, DeleteArtifactArgs, DeleteAttachmentArgs};
 
 #[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
@@ -134,12 +132,4 @@ pub struct AdminWorkersArgs {
 pub enum AdminWorkersCommands {
     /// Cancel a worker
     Cancel(CancelWorkerArgs),
-}
-
-impl From<AdminDeleteUserArgs> for DeleteUserReq {
-    fn from(args: AdminDeleteUserArgs) -> Self {
-        DeleteUserReq {
-            username: args.username,
-        }
-    }
 }

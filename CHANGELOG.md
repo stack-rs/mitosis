@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1](https://github.com/stack-rs/mitosis/compare/mito-v0.5.0...mito-v0.5.1) - 2025-08-26
+
+### Build
+
+- *(dist)* Add runner for x86_64-unknown-linux-musl - ([7ab5be7](https://github.com/stack-rs/mitosis/commit/7ab5be7ae98633f4e85869e4f7a085d00a76e53d))
+
 ## [0.5.0](https://github.com/stack-rs/mitosis/compare/mito-v0.4.0...mito-v0.5.0) - 2025-08-26
 
 ### Features

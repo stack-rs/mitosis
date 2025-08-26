@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.2](https://github.com/stack-rs/mitosis/compare/mito-v0.5.1...mito-v0.5.2) - 2025-08-26
+
+### Features
+
+- *(admin)* [**breaking**] Remove request body for user deletion - ([ddfaa05](https://github.com/stack-rs/mitosis/commit/ddfaa05a454ae79bd3e1d339e2768e533724a111))
+
 ## [0.5.1](https://github.com/stack-rs/mitosis/compare/mito-v0.5.0...mito-v0.5.1) - 2025-08-26
 
 ### Build

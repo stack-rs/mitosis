@@ -37,6 +37,30 @@ use crate::{
 };
 
 pub(crate) const UPLOAD_VALID_SECS: u64 = 3600;
+pub const ARTIFACTS_BUCKET: &str = "mitosis-artifacts";
+pub const ATTACHMENTS_BUCKET: &str = "mitosis-attachments";
+
+pub async fn setup_buckets(client: &Client, bucket_names: Vec<String>) -> Result<(), S3Error> {
+    match client.list_buckets().send().await {
+        Ok(v) => {
+            let names: Vec<String> = v
+                .buckets
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|b| b.name)
+                .collect();
+            for bucket_name in bucket_names {
+                if !names.contains(&bucket_name) {
+                    create_bucket(client, &bucket_name).await?;
+                } else {
+                    tracing::info!("Bucket {} already exists", bucket_name);
+                }
+            }
+            Ok(())
+        }
+        Err(e) => Err(S3Error::ListBucketsError(e)),
+    }
+}
 
 pub async fn create_bucket(client: &Client, bucket_name: &str) -> Result<(), S3Error> {
     match client.create_bucket().bucket(bucket_name).send().await {

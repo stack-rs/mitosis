@@ -37,6 +37,10 @@ pub struct CoordinatorConfig {
     pub(crate) s3_url: String,
     pub(crate) s3_access_key: String,
     pub(crate) s3_secret_key: String,
+    #[serde(default = "default_mitosis_region")]
+    pub(crate) s3_region: String,
+    #[serde(default)]
+    pub(crate) s3_force_path_style: bool,
     pub(crate) redis_url: Option<String>,
     pub(crate) redis_worker_password: Option<String>,
     pub(crate) redis_client_password: Option<String>,
@@ -50,6 +54,10 @@ pub struct CoordinatorConfig {
     pub(crate) heartbeat_timeout: std::time::Duration,
     pub(crate) log_path: Option<RelativePathBuf>,
     pub(crate) file_log: bool,
+}
+
+fn default_mitosis_region() -> String {
+    "mitosis".to_string()
 }
 
 #[derive(Args, Debug, Serialize, Default)]
@@ -79,6 +87,11 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub s3_secret_key: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub s3_region: Option<String>,
+    #[arg(long)]
+    pub s3_force_path_style: bool,
     /// The Redis URL
     #[arg(long = "redis")]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -136,6 +149,8 @@ impl Default for CoordinatorConfig {
             s3_url: "http://localhost:9000".to_string(),
             s3_access_key: "mitosis_access".to_string(),
             s3_secret_key: "mitosis_secret".to_string(),
+            s3_region: default_mitosis_region(),
+            s3_force_path_style: false,
             admin_user: "mitosis_admin".to_string(),
             admin_password: "mitosis_admin".to_string(),
             access_token_private_path: "private.pem".to_string().into(),
@@ -260,8 +275,8 @@ impl CoordinatorConfig {
         let config: aws_sdk_s3::Config = aws_sdk_s3::Config::builder()
             .credentials_provider(credential)
             .endpoint_url(self.s3_url.clone())
-            .region(Region::from_static("mitosis"))
-            .force_path_style(true)
+            .region(Region::new(self.s3_region.clone()))
+            .force_path_style(self.s3_force_path_style)
             .build();
         let s3 = S3Client::from_conf(config);
         Ok(InfraPool {

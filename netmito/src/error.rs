@@ -4,7 +4,8 @@ use aws_sdk_s3::{
     error::SdkError,
     operation::{
         create_bucket::CreateBucketError, delete_object::DeleteObjectError,
-        delete_objects::DeleteObjectsError, get_object::GetObjectError, put_object::PutObjectError,
+        delete_objects::DeleteObjectsError, get_object::GetObjectError,
+        list_buckets::ListBucketsError, put_object::PutObjectError,
     },
     presigning::PresigningConfigError,
 };
@@ -78,6 +79,8 @@ pub enum DecodeTokenError {
 
 #[derive(thiserror::Error, Debug)]
 pub enum S3Error {
+    #[error(transparent)]
+    ListBucketsError(#[from] SdkError<ListBucketsError>),
     #[error(transparent)]
     CreateBucketError(#[from] SdkError<CreateBucketError>),
     #[error(transparent)]

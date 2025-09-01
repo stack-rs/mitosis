@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::ops::Not;
 
 use aws_sdk_s3::{
     config::{Credentials, Region},
@@ -93,6 +94,7 @@ pub struct CoordinatorConfigCli {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub s3_region: Option<String>,
     #[arg(long)]
+    #[serde(skip_serializing_if = "<&bool>::not")]
     pub s3_force_path_style: bool,
     /// The Redis URL
     #[arg(long = "redis")]
@@ -108,6 +110,7 @@ pub struct CoordinatorConfigCli {
     pub redis_client_password: Option<String>,
     /// Skip setting Redis ACL rules
     #[arg(long)]
+    #[serde(skip_serializing_if = "<&bool>::not")]
     pub redis_skip_acl_rules: bool,
     /// The admin username
     #[arg(long)]
@@ -140,6 +143,7 @@ pub struct CoordinatorConfigCli {
     pub log_path: Option<String>,
     /// Enable logging to file
     #[arg(long)]
+    #[serde(skip_serializing_if = "<&bool>::not")]
     pub file_log: bool,
 }
 

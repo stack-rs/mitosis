@@ -5,6 +5,7 @@ use figment::{
     Figment,
 };
 use serde::{Deserialize, Serialize};
+use std::ops::Not;
 use url::Url;
 
 use super::coordinator::DEFAULT_COORDINATOR_ADDR;
@@ -62,6 +63,7 @@ pub struct ClientConfigCli {
     pub interactive: bool,
     /// Whether to retain the previous login state without refetching the credential
     #[arg(long)]
+    #[serde(skip_serializing_if = "<&bool>::not")]
     pub retain: bool,
     /// The command to run
     #[command(subcommand)]

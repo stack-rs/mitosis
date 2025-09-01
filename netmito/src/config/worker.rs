@@ -5,6 +5,7 @@ use figment::{
     Figment,
 };
 use serde::{Deserialize, Serialize};
+use std::ops::Not;
 use std::{collections::HashSet, time::Duration};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use url::Url;
@@ -86,6 +87,7 @@ pub struct WorkerConfigCli {
     pub lifetime: Option<String>,
     /// Whether to retain the previous login state without refetching the credential
     #[arg(long)]
+    #[serde(skip_serializing_if = "<&bool>::not")]
     pub retain: bool,
 }
 

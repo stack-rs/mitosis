@@ -31,6 +31,15 @@ cd mito-x86_64-unknown-linux-gnu
 sudo install -m 755 mito /usr/local/bin/mito
 ```
 
+If you are using older Linux distributions (with older glibc), you may need to install the musl-compiled releases:
+
+```bash
+wget https://github.com/stack-rs/mitosis/releases/download/mito-v0.4.0/mito-x86_64-unknown-linux-musl.tar.xz
+tar xf mito-x86_64-unknown-linux-musl.tar.xz
+cd mito-x86_64-unknown-linux-musl
+sudo install -m 755 mito /usr/local/bin/mito
+```
+
 [releases]: https://github.com/stack-rs/mitosis/releases
 
 ## Build from source using Rust

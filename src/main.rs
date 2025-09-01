@@ -1,3 +1,4 @@
+use crate::build::CLAP_LONG_VERSION;
 use clap::{Parser, Subcommand};
 use netmito::{
     client::MitoClient,
@@ -5,10 +6,13 @@ use netmito::{
     coordinator::MitoCoordinator,
     worker::MitoWorker,
 };
+use shadow_rs::shadow;
+
+shadow!(build);
 
 /// Main entry point for the mitosis command-line tool.
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(version, about, long_about = None, long_version = CLAP_LONG_VERSION)]
 #[command(propagate_version = true)]
 struct Arguments {
     #[command(subcommand)]

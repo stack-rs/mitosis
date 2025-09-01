@@ -207,14 +207,20 @@ Download the binary and extract the archive.
 The archive contains an <code>mito</code> executable which you can run to start your distributed platform.</p>
 <p>We have a installer script that you can use to install Mitosis (you may need to adjust the version number in the URL to the latest in the <a href="https://github.com/stack-rs/mitosis/releases">releases</a> page).
 You can also change the version number in the URL to install a specific version. This script will install the binary in the <code>$HOME/.cargo/bin</code> directory.</p>
-<pre><code class="language-bash">curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.4.0/mito-installer.sh | sh
+<pre><code class="language-bash">curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.5.2/mito-installer.sh | sh
 </code></pre>
 <p>You can also download the binary directly from the <a href="https://github.com/stack-rs/mitosis/releases">releases</a> page and install it manually.
 To make it easier to run, put the path to the binary into your <code>PATH</code> or install it in a directory that is already in your <code>PATH</code>.
 For example, do the following on Linux (you may need to adjust the version number to the latest in the URL):</p>
-<pre><code class="language-bash">wget https://github.com/stack-rs/mitosis/releases/download/mito-v0.4.0/mito-x86_64-unknown-linux-gnu.tar.xz
+<pre><code class="language-bash">wget https://github.com/stack-rs/mitosis/releases/download/mito-v0.5.2/mito-x86_64-unknown-linux-gnu.tar.xz
 tar xf mito-x86_64-unknown-linux-gnu.tar.xz
 cd mito-x86_64-unknown-linux-gnu
+sudo install -m 755 mito /usr/local/bin/mito
+</code></pre>
+<p>If you are using older Linux distributions (with older glibc), you may need to install the musl-compiled releases:</p>
+<pre><code class="language-bash">wget https://github.com/stack-rs/mitosis/releases/download/mito-v0.5.2/mito-x86_64-unknown-linux-musl.tar.xz
+tar xf mito-x86_64-unknown-linux-musl.tar.xz
+cd mito-x86_64-unknown-linux-musl
 sudo install -m 755 mito /usr/local/bin/mito
 </code></pre>
 <h2 id="build-from-source-using-rust"><a class="header" href="#build-from-source-using-rust">Build from source using Rust</a></h2>

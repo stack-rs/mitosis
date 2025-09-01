@@ -10,6 +10,7 @@ s3_secret_key = "mitosis_secret"
 # redis_url is not set. It should be in format like "redis://:mitosis@localhost"
 # redis_worker_password is not set by default and will be generated randomly
 # redis_client_password is not set by default and will be generated randomly
+# redis_skip_acl_rules is not set. Default to false, meaning ACL rules will be applied if redis_version >= 6.0
 # admin_user specifies the username of the admin user created on startup
 admin_user = "mitosis_admin"
 # admin_password specifies the password of the admin user created on startup

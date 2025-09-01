@@ -44,6 +44,8 @@ pub struct CoordinatorConfig {
     pub(crate) redis_url: Option<String>,
     pub(crate) redis_worker_password: Option<String>,
     pub(crate) redis_client_password: Option<String>,
+    #[serde(default)]
+    pub(crate) redis_skip_acl_rules: bool,
     pub(crate) admin_user: String,
     pub(crate) admin_password: String,
     pub(crate) access_token_private_path: RelativePathBuf,
@@ -104,6 +106,9 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub redis_client_password: Option<String>,
+    /// Skip setting Redis ACL rules
+    #[arg(long)]
+    pub redis_skip_acl_rules: bool,
     /// The admin username
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -146,6 +151,7 @@ impl Default for CoordinatorConfig {
             redis_url: None,
             redis_worker_password: None,
             redis_client_password: None,
+            redis_skip_acl_rules: false,
             s3_url: "http://localhost:9000".to_string(),
             s3_access_key: "mitosis_access".to_string(),
             s3_secret_key: "mitosis_secret".to_string(),
@@ -208,9 +214,6 @@ impl CoordinatorConfig {
             Some(ref redis_url) => {
                 let client = redis::Client::open(redis_url.clone())?;
                 let mut conn = client.get_multiplexed_tokio_connection().await?;
-                let rules = [Rule::Reset];
-                let _: String = conn.acl_setuser_rules("mitosis_worker", &rules).await?;
-                let _: String = conn.acl_setuser_rules("mitosis_client", &rules).await?;
                 let worker_pass = {
                     if let Some(worker_pass) = &self.redis_worker_password {
                         worker_pass.clone()
@@ -218,17 +221,6 @@ impl CoordinatorConfig {
                         conn.acl_genpass().await?
                     }
                 };
-                let rules = [
-                    Rule::On,
-                    Rule::AddPass(worker_pass.clone()),
-                    Rule::Pattern("task:*".to_string()),
-                    Rule::Other("&task:*".to_string()),
-                    Rule::AddCategory("read".to_string()),
-                    Rule::AddCategory("write".to_string()),
-                    Rule::AddCategory("connection".to_string()),
-                    Rule::AddCategory("pubsub".to_string()),
-                    Rule::RemoveCategory("dangerous".to_string()),
-                ];
                 let client_pass = {
                     if let Some(client_pass) = &self.redis_client_password {
                         client_pass.clone()
@@ -236,18 +228,34 @@ impl CoordinatorConfig {
                         conn.acl_genpass().await?
                     }
                 };
-                let _: String = conn.acl_setuser_rules("mitosis_worker", &rules).await?;
-                let rules = [
-                    Rule::On,
-                    Rule::AddPass(client_pass.clone()),
-                    Rule::Pattern("task:*".to_string()),
-                    Rule::Other("&task:*".to_string()),
-                    Rule::AddCategory("read".to_string()),
-                    Rule::AddCategory("pubsub".to_string()),
-                    Rule::AddCategory("connection".to_string()),
-                    Rule::RemoveCategory("dangerous".to_string()),
-                ];
-                let _: String = conn.acl_setuser_rules("mitosis_client", &rules).await?;
+                if !self.redis_skip_acl_rules {
+                    let rules = [Rule::Reset];
+                    let _: String = conn.acl_setuser_rules("mitosis_worker", &rules).await?;
+                    let _: String = conn.acl_setuser_rules("mitosis_client", &rules).await?;
+                    let rules = [
+                        Rule::On,
+                        Rule::AddPass(worker_pass.clone()),
+                        Rule::Pattern("task:*".to_string()),
+                        Rule::Other("&task:*".to_string()),
+                        Rule::AddCategory("read".to_string()),
+                        Rule::AddCategory("write".to_string()),
+                        Rule::AddCategory("connection".to_string()),
+                        Rule::AddCategory("pubsub".to_string()),
+                        Rule::RemoveCategory("dangerous".to_string()),
+                    ];
+                    let _: String = conn.acl_setuser_rules("mitosis_worker", &rules).await?;
+                    let rules = [
+                        Rule::On,
+                        Rule::AddPass(client_pass.clone()),
+                        Rule::Pattern("task:*".to_string()),
+                        Rule::Other("&task:*".to_string()),
+                        Rule::AddCategory("read".to_string()),
+                        Rule::AddCategory("pubsub".to_string()),
+                        Rule::AddCategory("connection".to_string()),
+                        Rule::RemoveCategory("dangerous".to_string()),
+                    ];
+                    let _: String = conn.acl_setuser_rules("mitosis_client", &rules).await?;
+                }
                 let conn_info = client.get_connection_info();
                 Ok(Some(RedisConnectionInfo::new(
                     conn_info.addr.clone(),

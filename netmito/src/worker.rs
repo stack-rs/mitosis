@@ -294,11 +294,15 @@ impl MitoWorker {
             tokio::fs::create_dir_all(&cache_path.join("resource")).await?;
             tokio::fs::create_dir_all(&log_dir).await?;
             let guards = config.setup_tracing_subscriber::<&uuid::Uuid, _>(&resp.worker_id)?;
-            let redis_client = resp.redis_url.and_then(|url| {
-                redis::Client::open(url)
-                    .inspect_err(|e| tracing::warn!("{}", e))
-                    .ok()
-            });
+            let redis_client = if config.skip_redis {
+                None
+            } else {
+                resp.redis_url.and_then(|url| {
+                    redis::Client::open(url)
+                        .inspect_err(|e| tracing::warn!("Worker cannot setup redis conn: {}", e))
+                        .ok()
+                })
+            };
             tracing::info!("Worker registered with ID: {}", resp.worker_id);
             Ok((
                 MitoWorker {

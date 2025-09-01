@@ -32,6 +32,8 @@ pub struct WorkerConfig {
     pub(crate) lifetime: Option<Duration>,
     #[serde(default)]
     pub(crate) retain: bool,
+    #[serde(default)]
+    pub(crate) skip_redis: bool,
 }
 
 #[derive(Args, Debug, Serialize, Default)]
@@ -80,6 +82,7 @@ pub struct WorkerConfigCli {
     pub log_path: Option<String>,
     /// Enable logging to file
     #[arg(long)]
+    #[serde(skip_serializing_if = "<&bool>::not")]
     pub file_log: bool,
     /// The lifetime of the worker to alive (e.g., 7d, 1year)
     #[arg(long)]
@@ -89,6 +92,10 @@ pub struct WorkerConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "<&bool>::not")]
     pub retain: bool,
+    /// Whether to skip connecting to Redis
+    #[arg(long)]
+    #[serde(skip_serializing_if = "<&bool>::not")]
+    pub skip_redis: bool,
 }
 
 impl Default for WorkerConfig {
@@ -106,6 +113,7 @@ impl Default for WorkerConfig {
             file_log: false,
             lifetime: None,
             retain: false,
+            skip_redis: false,
         }
     }
 }

@@ -52,7 +52,7 @@ reqwest = { version = "0.12.23", default-features = false, features = [
 ] }
 roxmltree = "0.20.0"
 rpassword = "7.4.0"
-sea-orm = { version = "1.1.14", default-features = false, features = [
+sea-orm = { version = "1.1.15", default-features = false, features = [
   "sqlx-postgres",
   "macros",
   "runtime-tokio-rustls",

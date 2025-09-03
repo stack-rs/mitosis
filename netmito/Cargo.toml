@@ -15,9 +15,9 @@ categories.workspace = true
 
 [dependencies]
 argon2 = { version = "0.5.3", features = ["std"] }
-async-compression = { version = "0.4.27", features = ["gzip", "tokio"] }
+async-compression = { version = "0.4.30", features = ["gzip", "tokio"] }
 async-stream = "0.3.6"
-aws-sdk-s3 = { version = "1.100", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.104", features = ["behavior-version-latest"] }
 axum = { version = "0.8.4", features = ["http2"] }
 axum-extra = { version = "0.10.1", features = ["typed-header"] }
 base64 = "0.22.1"
@@ -52,7 +52,7 @@ reqwest = { version = "0.12.23", default-features = false, features = [
 ] }
 roxmltree = "0.20.0"
 rpassword = "7.4.0"
-sea-orm = { version = "1.1.14", default-features = false, features = [
+sea-orm = { version = "1.1.15", default-features = false, features = [
   "sqlx-postgres",
   "macros",
   "runtime-tokio-rustls",
@@ -60,11 +60,11 @@ sea-orm = { version = "1.1.14", default-features = false, features = [
   "with-time",
   "with-uuid",
 ] }
-sea-orm-migration = "1.1.14"
+sea-orm-migration = "1.1.15"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2.0.16"
-time = { version = "0.3.41", features = ["serde-human-readable"] }
+time = { version = "0.3.43", features = ["serde-human-readable"] }
 tokio = { workspace = true }
 tokio-tar = "0.3.1"
 tokio-util = "0.7.16"
@@ -72,8 +72,8 @@ tower-http = { version = "0.6.6", features = ["cors"] }
 tracing = { workspace = true }
 tracing-appender = "0.2.3"
 tracing-subscriber = { workspace = true }
-url = { version = "2.5.6", features = ["serde"] }
-uuid = { version = "1.18.0", features = ["v4"] }
+url = { version = "2.5.7", features = ["serde"] }
+uuid = { version = "1.18", features = ["v4"] }
 
 [dev-dependencies]
 async-once-cell = "0.5.4"

@@ -343,7 +343,7 @@ impl MitoClient {
         self.http_client.get_task_by_uuid(args.uuid).await
     }
 
-    pub async fn get_artifact(
+    pub async fn download_artifact(
         &mut self,
         args: DownloadArtifactArgs,
     ) -> crate::error::Result<ResourceDownloadInfo> {
@@ -375,7 +375,7 @@ impl MitoClient {
         })
     }
 
-    pub async fn get_artifact_url(
+    pub async fn get_artifact_download_url(
         &mut self,
         args: DownloadArtifactArgs,
     ) -> crate::error::Result<String> {
@@ -453,7 +453,7 @@ impl MitoClient {
         }
     }
 
-    pub async fn get_attachment(
+    pub async fn download_attachment(
         &mut self,
         args: DownloadAttachmentArgs,
     ) -> crate::error::Result<ResourceDownloadInfo> {
@@ -471,7 +471,7 @@ impl MitoClient {
         })
     }
 
-    pub async fn get_attachment_url(
+    pub async fn get_attachment_download_url(
         &mut self,
         args: DownloadAttachmentArgs,
     ) -> crate::error::Result<String> {
@@ -1053,7 +1053,7 @@ impl MitoClient {
                     },
                     AttachmentsCommands::Download(args) => {
                         if args.no_download {
-                            match self.get_attachment_url(args).await {
+                            match self.get_attachment_download_url(args).await {
                                 Ok(url) => {
                                     tracing::info!("Attachment URL: {}", url);
                                 }
@@ -1062,7 +1062,7 @@ impl MitoClient {
                                 }
                             }
                         } else {
-                            match self.get_attachment(args).await {
+                            match self.download_attachment(args).await {
                                 Ok(info) => {
                                     tracing::info!(
                                         "Attachment of size {}B downloaded to {}",
@@ -1229,7 +1229,7 @@ impl MitoClient {
                     },
                     ArtifactsCommands::Download(args) => {
                         if args.no_download {
-                            match self.get_artifact_url(args).await {
+                            match self.get_artifact_download_url(args).await {
                                 Ok(url) => {
                                     tracing::info!("Artifact URL: {}", url);
                                 }
@@ -1238,7 +1238,7 @@ impl MitoClient {
                                 }
                             }
                         } else {
-                            match self.get_artifact(args).await {
+                            match self.download_artifact(args).await {
                                 Ok(info) => {
                                     tracing::info!(
                                         "Artifact of size {}B downloaded to {}",

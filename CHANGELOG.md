@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.3](https://github.com/stack-rs/mitosis/compare/mito-v0.5.2...mito-v0.5.3) - 2025-09-03
+
+### Features
+
+- *(conf)* Allow worker to skip redis - ([3c2484f](https://github.com/stack-rs/mitosis/commit/3c2484fe72645cb612dad253e8ddce9f3567423f))
+- *(redis)* Support skip setting ACL rules - ([ce09bd8](https://github.com/stack-rs/mitosis/commit/ce09bd861e0b97eb3b1449712c0c947aa8743ccd))
+- *(s3)* Support enterprise-level object storage - ([7fc4bde](https://github.com/stack-rs/mitosis/commit/7fc4bde5722baf5bab4085d71d95b3aaa7c33405))
+
+### Bug Fixes
+
+- *(conf)* Skip serializing false boolean fields - ([47a4564](https://github.com/stack-rs/mitosis/commit/47a4564ced6d6241eb64bf51308bba8edd6f7bb5))
+- *(s3)* Allow empty file with size 0 - ([ac6cb91](https://github.com/stack-rs/mitosis/commit/ac6cb9114e4a3527b7aa74ae946b7a026ff4456e))
+
+### Refactor
+
+- *(client)* [**breaking**] Rename downloading methods - ([5cc38d2](https://github.com/stack-rs/mitosis/commit/5cc38d224fe61cf8c8f8a5e4ec27a615897f7988))
+
+### Documentation
+
+- *(guide)* Add installation steps for musl release - ([9fc370a](https://github.com/stack-rs/mitosis/commit/9fc370a1d303653071b2a7c1660bfbc15485bf98))
+
+### Miscellaneous Tasks
+
+- Build gh-pages on release for version update - ([55a836a](https://github.com/stack-rs/mitosis/commit/55a836acb22eabfc71c36519e9cb35d5adcb686c))
+
+### Build
+
+- Add long version metadata - ([239612d](https://github.com/stack-rs/mitosis/commit/239612d8f86557ef177a130fc8f1d8c4e1e90141))
+
 ## [0.5.2](https://github.com/stack-rs/mitosis/compare/mito-v0.5.1...mito-v0.5.2) - 2025-08-26
 
 ### Features

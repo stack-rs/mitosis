@@ -84,7 +84,7 @@ pub async fn get_presigned_upload_link<T: Into<String>>(
     key: T,
     length: i64,
 ) -> Result<String, S3Error> {
-    if length <= 0 {
+    if length < 0 {
         return Err(S3Error::InvalidContentLength(length));
     }
     // Restrict the link to be valid for at most 60 minutes

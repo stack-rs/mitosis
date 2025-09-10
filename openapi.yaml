@@ -1,0 +1,2773 @@
+openapi: 3.0.0
+info:
+  title: Mitosis API
+  description: |
+    Mitosis is a unified distributed transport evaluation framework that provides REST API endpoints 
+    for managing users, groups, workers, and tasks in a distributed computing environment.
+
+    ## Authentication
+    Most endpoints require JWT bearer token authentication. Get a token by calling `/login` with 
+    valid credentials.
+
+    ## API Structure
+    - `/auth` - User authentication status
+    - `/login` - User login
+    - `/users` - User management
+    - `/groups` - Group management and file attachments
+    - `/workers` - Worker registration and management
+    - `/tasks` - Task submission and monitoring
+    - `/admin` - Administrative operations (admin users only)
+    - `/health` - Service health check
+    - `/redis` - Redis connection information
+  version: 0.5.3
+  contact:
+    name: Mitosis
+    url: https://github.com/stack-rs/mitosis
+  license:
+    name: Apache 2.0
+    url: https://github.com/stack-rs/mitosis/blob/main/LICENSE
+
+servers:
+  - url: http://localhost:5000
+    description: Local development server
+  - url: https://api.mitosis.example.com
+    description: Production server
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Check if the Mitosis coordinator is running and healthy
+      operationId: healthCheck
+      tags:
+        - Health
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /login:
+    post:
+      summary: User login
+      description: Authenticate user and receive JWT token
+      operationId: userLogin
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserLoginReq"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserLoginResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /auth:
+    get:
+      summary: Get current user
+      description: Get the username of the currently authenticated user
+      operationId: userAuth
+      tags:
+        - Authentication
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Username of authenticated user
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /redis:
+    get:
+      summary: Get Redis connection info
+      description: Get Redis connection URL for real-time task monitoring
+      operationId: getRedisConnectionInfo
+      tags:
+        - Pubsub
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Redis connection information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RedisConnectionInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /users/{username}/password:
+    post:
+      summary: Change user password
+      description: Change the password for a user (own account only unless admin)
+      operationId: changePassword
+      tags:
+        - Users
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+          example: johndoe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserChangePasswordReq"
+      responses:
+        "200":
+          description: Password changed successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserChangePasswordResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /users/groups:
+    get:
+      summary: Query user groups
+      description: Get all groups the authenticated user has access to
+      operationId: queryUserGroups
+      tags:
+        - Users
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: User groups with roles
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupsQueryResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /groups:
+    post:
+      summary: Create group
+      description: Create a new group (user becomes admin of the group)
+      operationId: createGroup
+      tags:
+        - Groups
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGroupReq"
+      responses:
+        "200":
+          description: Group created successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /groups/{group_name}:
+    get:
+      summary: Get group information
+      description: Get detailed information about a specific group
+      operationId: getGroup
+      tags:
+        - Groups
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: group_name
+          in: path
+          required: true
+          schema:
+            type: string
+          example: research-team
+      responses:
+        "200":
+          description: Group information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupQueryInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /groups/{group_name}/users:
+    put:
+      summary: Update user group roles
+      description: Add users to group or update their roles
+      operationId: updateUserGroup
+      tags:
+        - Groups
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: group_name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserGroupRoleReq"
+      responses:
+        "200":
+          description: User roles updated successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      summary: Remove users from group
+      description: Remove users from the group
+      operationId: removeUserGroup
+      tags:
+        - Groups
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: group_name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RemoveUserGroupRoleReq"
+      responses:
+        "200":
+          description: Users removed successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /groups/{group_name}/attachments:
+    post:
+      summary: Upload group attachment
+      description: Upload a file to the group's shared storage
+      operationId: uploadAttachment
+      tags:
+        - Groups
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: group_name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadAttachmentReq"
+      responses:
+        "200":
+          description: Upload URL generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadAttachmentResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /groups/{group_name}/attachments/query:
+    post:
+      summary: Query group attachments
+      description: List attachments in the group with optional filtering
+      operationId: queryAttachments
+      tags:
+        - Groups
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: group_name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttachmentsQueryReq"
+      responses:
+        "200":
+          description: List of attachments
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttachmentsQueryResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /groups/{group_name}/attachments/{key}:
+    get:
+      summary: Get attachment metadata
+      description: Get metadata for a specific attachment
+      operationId: queryAttachment
+      tags:
+        - Groups
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: group_name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+          style: simple
+          explode: false
+      responses:
+        "200":
+          description: Attachment metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttachmentMetadata"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      summary: Delete attachment
+      description: Delete a file from group's shared storage
+      operationId: deleteAttachment
+      tags:
+        - Groups
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: group_name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+          style: simple
+          explode: false
+      responses:
+        "200":
+          description: Attachment deleted successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /groups/{group_name}/download/attachments/{key}:
+    get:
+      summary: Download attachment
+      description: Get download URL for an attachment
+      operationId: downloadAttachment
+      tags:
+        - Groups
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: group_name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+          style: simple
+          explode: false
+      responses:
+        "302":
+          description: Redirect to download URL
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /workers:
+    post:
+      summary: Register worker
+      description: Register a new worker with the coordinator
+      operationId: registerWorker
+      tags:
+        - Workers
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterWorkerReq"
+      responses:
+        "200":
+          description: Worker registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterWorkerResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    delete:
+      summary: Unregister worker
+      description: Unregister worker (worker auth required)
+      operationId: unregisterWorker
+      tags:
+        - Workers
+      security:
+        - workerAuth: []
+      responses:
+        "200":
+          description: Worker unregistered successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /workers/query:
+    post:
+      summary: Query workers
+      description: List workers with optional filtering
+      operationId: queryWorkers
+      tags:
+        - Workers
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkersQueryReq"
+      responses:
+        "200":
+          description: List of workers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkersQueryResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /workers/{uuid}:
+    get:
+      summary: Get worker information
+      description: Get detailed information about a specific worker
+      operationId: getWorker
+      tags:
+        - Workers
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Worker information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkerQueryResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      summary: Shutdown worker
+      description: Request worker shutdown
+      operationId: shutdownWorker
+      tags:
+        - Workers
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkerShutdown"
+      responses:
+        "200":
+          description: Shutdown request sent
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /workers/{uuid}/tags:
+    put:
+      summary: Update worker tags
+      description: Replace worker's tags
+      operationId: updateWorkerTags
+      tags:
+        - Workers
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplaceWorkerTagsReq"
+      responses:
+        "200":
+          description: Tags updated successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /workers/{uuid}/groups:
+    put:
+      summary: Update worker group roles
+      description: Add groups to worker or update their roles
+      operationId: updateWorkerGroups
+      tags:
+        - Workers
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateGroupWorkerRoleReq"
+      responses:
+        "200":
+          description: Group roles updated successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      summary: Remove worker group roles
+      description: Remove groups from worker
+      operationId: removeWorkerGroups
+      tags:
+        - Workers
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RemoveGroupWorkerRoleReq"
+      responses:
+        "200":
+          description: Groups removed successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /workers/heartbeat:
+    post:
+      summary: Worker heartbeat
+      description: Worker sends heartbeat to coordinator
+      operationId: workerHeartbeat
+      tags:
+        - Workers
+      security:
+        - workerAuth: []
+      responses:
+        "200":
+          description: Heartbeat received
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /workers/tasks:
+    get:
+      summary: Fetch task for worker
+      description: Worker fetches next available task
+      operationId: fetchTask
+      tags:
+        - Workers
+      security:
+        - workerAuth: []
+      responses:
+        "200":
+          description: Task assigned to worker
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkerTaskResp"
+        "204":
+          description: No tasks available
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    post:
+      summary: Report task status
+      description: Worker reports task execution status
+      operationId: reportTask
+      tags:
+        - Workers
+      security:
+        - workerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportTaskReq"
+      responses:
+        "200":
+          description: Status reported successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportTaskResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /workers/tasks/{uuid}:
+    get:
+      summary: Get task details for worker
+      description: Worker queries task details
+      operationId: getTaskForWorker
+      tags:
+        - Workers
+      security:
+        - workerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Task details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkerTaskResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /workers/tasks/{uuid}/artifacts/{content_type}:
+    get:
+      summary: Download task artifact for worker
+      description: Worker downloads task artifacts
+      operationId: downloadTaskArtifactForWorker
+      tags:
+        - Workers
+      security:
+        - workerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: content_type
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/ArtifactContentType"
+      responses:
+        "302":
+          description: Redirect to download URL
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /workers/tasks/{uuid}/attachments/{key}:
+    get:
+      summary: Download attachment for worker
+      description: Worker downloads group attachments needed for task
+      operationId: downloadAttachmentForWorker
+      tags:
+        - Workers
+      security:
+        - workerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+          style: simple
+          explode: false
+      responses:
+        "302":
+          description: Redirect to download URL
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /tasks:
+    post:
+      summary: Submit task
+      description: Submit a new task for execution
+      operationId: submitTask
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitTaskReq"
+      responses:
+        "200":
+          description: Task submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmitTaskResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /tasks/query:
+    post:
+      summary: Query tasks
+      description: List tasks with optional filtering
+      operationId: queryTasks
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TasksQueryReq"
+      responses:
+        "200":
+          description: List of tasks
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TasksQueryResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /tasks/{uuid}:
+    get:
+      summary: Get task information
+      description: Get detailed information about a specific task
+      operationId: getTask
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Task information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskQueryResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      summary: Update task
+      description: Modify task configuration (only for pending tasks)
+      operationId: updateTask
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeTaskReq"
+      responses:
+        "200":
+          description: Task updated successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+    delete:
+      summary: Cancel task
+      description: Cancel a pending or running task
+      operationId: cancelTask
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Task cancelled successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /tasks/{uuid}/labels:
+    put:
+      summary: Update task labels
+      description: Replace task labels
+      operationId: updateTaskLabels
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTaskLabelsReq"
+      responses:
+        "200":
+          description: Labels updated successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /tasks/{uuid}/artifacts:
+    post:
+      summary: Upload task artifact
+      description: Get upload URL for task artifacts
+      operationId: uploadTaskArtifact
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadArtifactReq"
+      responses:
+        "200":
+          description: Upload URL generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadArtifactResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /tasks/{uuid}/artifacts/{content_type}:
+    delete:
+      summary: Delete task artifact
+      description: Delete a task artifact
+      operationId: deleteTaskArtifact
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: content_type
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/ArtifactContentType"
+      responses:
+        "200":
+          description: Artifact deleted successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /tasks/{uuid}/download/artifacts/{content_type}:
+    get:
+      summary: Download task artifact
+      description: Get download URL for task artifacts
+      operationId: downloadTaskArtifact
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: content_type
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/ArtifactContentType"
+      responses:
+        "302":
+          description: Redirect to download URL
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/users:
+    post:
+      summary: Create user (Admin)
+      description: Create a new user account (admin only)
+      operationId: adminCreateUser
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserReq"
+      responses:
+        "200":
+          description: User created successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /admin/users/{username}:
+    delete:
+      summary: Delete user (Admin)
+      description: Mark user as deleted (admin only)
+      operationId: adminDeleteUser
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: User deleted successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserStateResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/users/{username}/password:
+    post:
+      summary: Change user password (Admin)
+      description: Change password for any user (admin only)
+      operationId: adminChangeUserPassword
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminChangePasswordReq"
+      responses:
+        "200":
+          description: Password changed successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/users/{username}/state:
+    post:
+      summary: Change user state (Admin)
+      description: Change user state (active/locked/deleted) (admin only)
+      operationId: adminChangeUserState
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeUserStateReq"
+      responses:
+        "200":
+          description: User state changed successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserStateResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/groups/{group_name}/storage-quota:
+    post:
+      summary: Change group storage quota (Admin)
+      description: Update storage quota for a group (admin only)
+      operationId: adminChangeGroupStorageQuota
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: group_name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeGroupStorageQuotaReq"
+      responses:
+        "200":
+          description: Storage quota updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupStorageQuotaResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/workers/{uuid}/:
+    delete:
+      summary: Shutdown worker (Admin)
+      description: Force shutdown a worker (admin only)
+      operationId: adminShutdownWorker
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkerShutdown"
+      responses:
+        "200":
+          description: Worker shutdown initiated
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/groups/{group_name}/attachments/{key}:
+    delete:
+      summary: Delete group attachment (Admin)
+      description: Delete any group attachment (admin only)
+      operationId: adminDeleteAttachment
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: group_name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+          style: simple
+          explode: false
+      responses:
+        "200":
+          description: Attachment deleted successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/tasks/{uuid}/artifacts/{content_type}:
+    delete:
+      summary: Delete task artifact (Admin)
+      description: Delete any task artifact (admin only)
+      operationId: adminDeleteTaskArtifact
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: content_type
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/ArtifactContentType"
+      responses:
+        "200":
+          description: Artifact deleted successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/shutdown:
+    post:
+      summary: Shutdown coordinator (Admin)
+      description: Gracefully shutdown the entire coordinator service (admin only)
+      operationId: adminShutdownCoordinator
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShutdownReq"
+      responses:
+        "200":
+          description: Shutdown initiated
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained from /login endpoint
+    workerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained when registering worker
+
+  responses:
+    BadRequest:
+      description: Bad request - invalid input
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: Invalid request format
+
+    Unauthorized:
+      description: Unauthorized - invalid or missing authentication
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: Invalid or expired token
+
+    Forbidden:
+      description: Forbidden - insufficient permissions
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: Insufficient permissions
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: Resource not found
+
+    Conflict:
+      description: Conflict - resource already exists or state conflict
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: Resource already exists
+
+  schemas:
+    UserLoginReq:
+      type: object
+      required:
+        - username
+        - md5_password
+      properties:
+        username:
+          type: string
+          description: Username
+          example: johndoe
+        md5_password:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+            maximum: 255
+          minItems: 16
+          maxItems: 16
+          description: MD5 hash of password as byte array
+        retain:
+          type: boolean
+          default: false
+          description: Whether to retain existing login state
+
+    UserLoginResp:
+      type: object
+      required:
+        - token
+      properties:
+        token:
+          type: string
+          description: JWT authentication token
+          example: eyJ0eXAiOiJKV1QiLCJhbGciOiJFZDI1NTE5In0...
+
+    UserChangePasswordReq:
+      type: object
+      required:
+        - old_md5_password
+        - new_md5_password
+      properties:
+        old_md5_password:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+            maximum: 255
+          minItems: 16
+          maxItems: 16
+          description: MD5 hash of current password
+        new_md5_password:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+            maximum: 255
+          minItems: 16
+          maxItems: 16
+          description: MD5 hash of new password
+
+    UserChangePasswordResp:
+      type: object
+      required:
+        - token
+      properties:
+        token:
+          type: string
+          description: New JWT token (password change invalidates old tokens)
+
+    AdminChangePasswordReq:
+      type: object
+      required:
+        - new_md5_password
+      properties:
+        new_md5_password:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+            maximum: 255
+          minItems: 16
+          maxItems: 16
+          description: MD5 hash of new password
+
+    CreateUserReq:
+      type: object
+      required:
+        - username
+        - md5_password
+        - admin
+      properties:
+        username:
+          type: string
+          description: Username for the new user
+          example: johndoe
+        md5_password:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+            maximum: 255
+          minItems: 16
+          maxItems: 16
+          description: MD5 hash of password
+        admin:
+          type: boolean
+          description: Whether the user should have admin privileges
+          example: false
+
+    ChangeUserStateReq:
+      type: object
+      required:
+        - state
+      properties:
+        state:
+          $ref: "#/components/schemas/UserState"
+
+    UserStateResp:
+      type: object
+      required:
+        - state
+      properties:
+        state:
+          $ref: "#/components/schemas/UserState"
+
+    UserState:
+      type: string
+      enum:
+        - Active
+        - Locked
+        - Deleted
+      description: |
+        User account state:
+        - Active: User can log in and use the system
+        - Locked: User account is temporarily disabled
+        - Deleted: User account is marked for deletion
+
+    GroupState:
+      type: string
+      enum:
+        - Active
+        - Locked
+        - Deleted
+      description: |
+        Group state:
+        - Active: Group is active and can be used
+        - Locked: Group is temporarily disabled
+        - Deleted: Group is marked for deletion
+
+    TaskState:
+      type: string
+      enum:
+        - Pending
+        - Ready
+        - Running
+        - Finished
+        - Cancelled
+        - Unknown
+      description: |
+        Task execution state:
+        - Pending: Task is waiting to be processed
+        - Ready: Task is ready to be picked up by a worker
+        - Running: Task is currently being executed
+        - Finished: Task has completed execution
+        - Cancelled: Task was cancelled
+        - Unknown: Task state is unknown
+
+    TaskExecState:
+      type: string
+      enum:
+        - WorkerExited
+        - FetchResource
+        - FetchResourceFinished
+        - FetchResourceError
+        - FetchResourceTimeout
+        - FetchResourceNotFound
+        - FetchResourceForbidden
+        - Watch
+        - WatchFinished
+        - WatchTimeout
+        - ExecPending
+        - ExecSpawned
+        - ExecFinished
+        - ExecTimeout
+        - UploadResult
+        - UploadFinishedResult
+        - UploadCancelledResult
+        - UploadResultFinished
+        - UploadResultTimeout
+        - TaskCommitted
+        - Unknown
+      description: Detailed task execution state during worker processing
+
+    WorkerState:
+      type: string
+      enum:
+        - Normal
+        - GracefulShutdown
+      description: |
+        Worker state:
+        - Normal: Worker is operating normally
+        - GracefulShutdown: Worker is shutting down gracefully
+
+    UserGroupRole:
+      type: string
+      enum:
+        - Read
+        - Write
+        - Admin
+      description: |
+        User's role in a group:
+        - Read: Can view group information and tasks
+        - Write: Can submit tasks and create workers for the group
+        - Admin: Can manage group membership and settings
+
+    GroupWorkerRole:
+      type: string
+      enum:
+        - Read
+        - Write
+        - Admin
+      description: |
+        Group's role with a worker:
+        - Read: Reserved for future use
+        - Write: Can submit tasks to the worker
+        - Admin: Can manage worker ACL and settings
+
+    ArtifactContentType:
+      type: string
+      enum:
+        - result
+        - exec-log
+        - std-log
+      description: |
+        Type of task artifact:
+        - result: Task results from MITO_RESULT_DIR
+        - exec-log: Execution logs from MITO_EXEC_DIR
+        - std-log: Standard output and error logs
+
+    AttachmentContentType:
+      type: string
+      enum:
+        - application/octet-stream
+      description: MIME type of group attachment
+
+    RedisConnectionInfo:
+      type: object
+      properties:
+        url:
+          type: string
+          nullable: true
+          description: Redis connection URL for clients
+          example: redis://:password@localhost:6379
+
+    CreateGroupReq:
+      type: object
+      required:
+        - group_name
+      properties:
+        group_name:
+          type: string
+          description: Name of the new group
+          example: research-team
+
+    GroupQueryInfo:
+      type: object
+      required:
+        - group_name
+        - creator_username
+        - created_at
+        - updated_at
+        - state
+        - task_count
+        - storage_quota
+        - storage_used
+        - worker_count
+      properties:
+        group_name:
+          type: string
+          example: research-team
+        creator_username:
+          type: string
+          example: johndoe
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+        state:
+          $ref: "#/components/schemas/GroupState"
+        task_count:
+          type: integer
+          format: int64
+          description: Number of tasks in the group
+          example: 42
+        storage_quota:
+          type: integer
+          format: int64
+          description: Storage quota in bytes
+          example: 1073741824
+        storage_used:
+          type: integer
+          format: int64
+          description: Storage currently used in bytes
+          example: 536870912
+        worker_count:
+          type: integer
+          format: int64
+          description: Number of workers serving this group
+          example: 5
+        users_in_group:
+          type: object
+          nullable: true
+          additionalProperties:
+            $ref: "#/components/schemas/UserGroupRole"
+          description: Users in the group and their roles
+          example:
+            johndoe: Admin
+            janedoe: Write
+
+    GroupsQueryResp:
+      type: object
+      required:
+        - groups
+      properties:
+        groups:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/UserGroupRole"
+          description: Groups the user has access to and their role
+          example:
+            my-group: Admin
+            research-team: Write
+
+    UpdateUserGroupRoleReq:
+      type: object
+      required:
+        - relations
+      properties:
+        relations:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/UserGroupRole"
+          description: Username to role mapping
+          example:
+            johndoe: Admin
+            janedoe: Write
+
+    RemoveUserGroupRoleReq:
+      type: object
+      required:
+        - users
+      properties:
+        users:
+          type: array
+          items:
+            type: string
+          description: Usernames to remove from group
+          example:
+            - johndoe
+            - janedoe
+
+    ChangeGroupStorageQuotaReq:
+      type: object
+      required:
+        - storage_quota
+      properties:
+        storage_quota:
+          type: string
+          description: New storage quota (supports units like 1GB, 500MB)
+          example: 2GB
+
+    GroupStorageQuotaResp:
+      type: object
+      required:
+        - storage_quota
+      properties:
+        storage_quota:
+          type: integer
+          format: int64
+          description: Storage quota in bytes
+          example: 2147483648
+
+    UploadAttachmentReq:
+      type: object
+      required:
+        - key
+        - content_length
+      properties:
+        key:
+          type: string
+          description: Unique key for the attachment
+          example: datasets/experiment-1.tar.gz
+        content_length:
+          type: integer
+          format: uint64
+          description: Size of file in bytes
+          example: 1048576
+
+    UploadAttachmentResp:
+      type: object
+      required:
+        - url
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Presigned URL for uploading the file
+          example: https://s3.example.com/bucket/path?signature=...
+
+    AttachmentMetadata:
+      type: object
+      required:
+        - content_type
+        - size
+        - created_at
+        - updated_at
+      properties:
+        content_type:
+          $ref: "#/components/schemas/AttachmentContentType"
+        size:
+          type: integer
+          format: int64
+          description: File size in bytes
+          example: 1048576
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+
+    AttachmentsQueryReq:
+      type: object
+      properties:
+        key_prefix:
+          type: string
+          nullable: true
+          description: Filter attachments by key prefix
+          example: datasets/
+        limit:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Maximum number of results
+          example: 50
+        offset:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Offset for pagination
+          example: 0
+        count:
+          type: boolean
+          description: Whether to return total count
+          default: false
+
+    AttachmentQueryInfo:
+      type: object
+      required:
+        - key
+        - content_type
+        - size
+        - created_at
+        - updated_at
+      properties:
+        key:
+          type: string
+          example: datasets/experiment-1.tar.gz
+        content_type:
+          $ref: "#/components/schemas/AttachmentContentType"
+        size:
+          type: integer
+          format: int64
+          example: 1048576
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+
+    AttachmentsQueryResp:
+      type: object
+      required:
+        - count
+        - attachments
+        - group_name
+      properties:
+        count:
+          type: integer
+          format: uint64
+          description: Total number of attachments (if count=true)
+          example: 25
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/AttachmentQueryInfo"
+        group_name:
+          type: string
+          example: research-team
+
+    RegisterWorkerReq:
+      type: object
+      required:
+        - tags
+        - groups
+      properties:
+        tags:
+          type: array
+          items:
+            type: string
+          description: Worker capability tags
+          example:
+            - gpu
+            - cuda
+            - python
+        groups:
+          type: array
+          items:
+            type: string
+          description: Groups this worker can serve
+          example:
+            - research-team
+            - ml-group
+        lifetime:
+          type: string
+          nullable: true
+          description: Worker lifetime (e.g. "7d", "1h")
+          example: 7d
+
+    RegisterWorkerResp:
+      type: object
+      required:
+        - worker_id
+        - token
+      properties:
+        worker_id:
+          type: string
+          format: uuid
+          description: Unique worker identifier
+          example: 123e4567-e89b-12d3-a456-426614174000
+        token:
+          type: string
+          description: JWT token for worker authentication
+        redis_url:
+          type: string
+          nullable: true
+          description: Redis URL for worker notifications
+          example: redis://:password@localhost:6379
+
+    WorkersQueryReq:
+      type: object
+      properties:
+        group_name:
+          type: string
+          nullable: true
+          description: Filter by group name
+          example: research-team
+        role:
+          type: array
+          items:
+            $ref: "#/components/schemas/GroupWorkerRole"
+          nullable: true
+          description: Filter by group roles
+        tags:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by worker tags
+          example:
+            - gpu
+            - python
+        creator_username:
+          type: string
+          nullable: true
+          description: Filter by creator username
+          example: johndoe
+        count:
+          type: boolean
+          description: Whether to return total count
+          default: false
+
+    WorkerQueryInfo:
+      type: object
+      required:
+        - worker_id
+        - creator_username
+        - tags
+        - created_at
+        - updated_at
+        - state
+        - last_heartbeat
+      properties:
+        worker_id:
+          type: string
+          format: uuid
+          example: 123e4567-e89b-12d3-a456-426614174000
+        creator_username:
+          type: string
+          example: johndoe
+        tags:
+          type: array
+          items:
+            type: string
+          example:
+            - gpu
+            - python
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+        state:
+          $ref: "#/components/schemas/WorkerState"
+        last_heartbeat:
+          type: string
+          format: date-time
+          description: When worker last sent heartbeat
+          example: "2024-01-15T10:35:00Z"
+        assigned_task_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Currently assigned task UUID
+          example: 456e7890-e89b-12d3-a456-426614174111
+
+    WorkerQueryResp:
+      type: object
+      required:
+        - info
+        - groups
+      properties:
+        info:
+          $ref: "#/components/schemas/WorkerQueryInfo"
+        groups:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/GroupWorkerRole"
+          description: Groups this worker serves and their roles
+          example:
+            research-team: Write
+            ml-group: Admin
+
+    WorkersQueryResp:
+      type: object
+      required:
+        - count
+        - workers
+        - group_name
+      properties:
+        count:
+          type: integer
+          format: uint64
+          description: Total number of workers (if count=true)
+          example: 5
+        workers:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkerQueryInfo"
+        group_name:
+          type: string
+          example: research-team
+
+    ReplaceWorkerTagsReq:
+      type: object
+      required:
+        - tags
+      properties:
+        tags:
+          type: array
+          items:
+            type: string
+          description: New set of worker tags
+          example:
+            - gpu
+            - cuda
+            - tensorflow
+
+    UpdateGroupWorkerRoleReq:
+      type: object
+      required:
+        - relations
+      properties:
+        relations:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/GroupWorkerRole"
+          description: Group to role mapping
+          example:
+            research-team: Write
+            ml-group: Admin
+
+    RemoveGroupWorkerRoleReq:
+      type: object
+      required:
+        - groups
+      properties:
+        groups:
+          type: array
+          items:
+            type: string
+          description: Groups to remove from worker
+          example:
+            - old-group
+            - deprecated-group
+
+    WorkerShutdown:
+      type: object
+      properties:
+        op:
+          $ref: "#/components/schemas/WorkerShutdownOp"
+
+    WorkerShutdownOp:
+      type: string
+      enum:
+        - Graceful
+        - Force
+      default: Graceful
+      description: |
+        Worker shutdown operation:
+        - Graceful: Wait for current task to complete
+        - Force: Stop immediately
+
+    TaskSpec:
+      type: object
+      required:
+        - args
+      properties:
+        args:
+          type: array
+          items:
+            type: string
+          description: Command and arguments to execute
+          example:
+            - python3
+            - train.py
+            - --epochs
+            - "100"
+        envs:
+          type: object
+          additionalProperties:
+            type: string
+          description: Environment variables
+          example:
+            CUDA_VISIBLE_DEVICES: "0,1"
+            PYTHONPATH: "/workspace"
+        resources:
+          type: array
+          items:
+            $ref: "#/components/schemas/RemoteResourceDownload"
+          description: Resources to download before execution
+        terminal_output:
+          type: boolean
+          default: false
+          description: Whether to capture stdout/stderr
+        watch:
+          type: array
+          items:
+            oneOf:
+              - type: string
+                format: uuid
+              - $ref: "#/components/schemas/TaskExecState"
+          minItems: 2
+          maxItems: 2
+          nullable: true
+          description: Watch another task until it reaches specified state
+
+    RemoteResourceDownload:
+      type: object
+      required:
+        - remote_file
+        - local_path
+      properties:
+        remote_file:
+          $ref: "#/components/schemas/RemoteResource"
+        local_path:
+          type: string
+          description: Local path to save the downloaded resource
+          example: data/dataset.tar.gz
+
+    RemoteResource:
+      type: object
+      oneOf:
+        - type: object
+          required:
+            - Artifact
+          properties:
+            Artifact:
+              type: object
+              required:
+                - uuid
+                - content_type
+              properties:
+                uuid:
+                  type: string
+                  format: uuid
+                content_type:
+                  $ref: "#/components/schemas/ArtifactContentType"
+        - type: object
+          required:
+            - Attachment
+          properties:
+            Attachment:
+              type: object
+              required:
+                - key
+              properties:
+                key:
+                  type: string
+      description: |
+        Remote resource reference:
+        - Artifact: Reference to a task artifact
+        - Attachment: Reference to a group attachment
+
+    SubmitTaskReq:
+      type: object
+      required:
+        - group_name
+        - tags
+        - labels
+        - timeout
+        - priority
+        - task_spec
+      properties:
+        group_name:
+          type: string
+          description: Target group for task execution
+          example: research-team
+        tags:
+          type: array
+          items:
+            type: string
+          description: Required worker tags for task execution
+          example:
+            - gpu
+            - python
+        labels:
+          type: array
+          items:
+            type: string
+          description: Labels for task organization and querying
+          example:
+            - experiment-1
+            - training
+        timeout:
+          type: string
+          description: Task timeout duration (e.g. "1h", "30m")
+          example: 2h
+        priority:
+          type: integer
+          format: int32
+          description: Task priority (higher = more important)
+          example: 10
+        task_spec:
+          $ref: "#/components/schemas/TaskSpec"
+
+    SubmitTaskResp:
+      type: object
+      required:
+        - task_id
+        - uuid
+      properties:
+        task_id:
+          type: integer
+          format: int64
+          description: Internal task ID
+          example: 12345
+        uuid:
+          type: string
+          format: uuid
+          description: Unique task identifier
+          example: 789e0123-e89b-12d3-a456-426614174222
+
+    ChangeTaskReq:
+      type: object
+      properties:
+        tags:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Update required worker tags
+        timeout:
+          type: string
+          nullable: true
+          description: Update task timeout
+          example: 3h
+        priority:
+          type: integer
+          format: int32
+          nullable: true
+          description: Update task priority
+        task_spec:
+          $ref: "#/components/schemas/TaskSpec"
+          nullable: true
+          description: Update task specification
+
+    UpdateTaskLabelsReq:
+      type: object
+      required:
+        - labels
+      properties:
+        labels:
+          type: array
+          items:
+            type: string
+          description: New set of labels (replaces existing)
+          example:
+            - experiment-2
+            - validation
+
+    TaskResultSpec:
+      type: object
+      required:
+        - exit_status
+      properties:
+        exit_status:
+          type: integer
+          format: int32
+          description: Process exit code
+          example: 0
+        msg:
+          $ref: "#/components/schemas/TaskResultMessage"
+          nullable: true
+          description: Optional result message for failures
+
+    TaskResultMessage:
+      type: string
+      enum:
+        - FetchResourceTimeout
+        - ExecTimeout
+        - UploadResultTimeout
+        - ResourceNotFound
+        - ResourceForbidden
+        - WatchTimeout
+        - UserCancellation
+      description: |
+        Task failure reason:
+        - FetchResourceTimeout: Timeout downloading resources
+        - ExecTimeout: Task execution timeout
+        - UploadResultTimeout: Timeout uploading results
+        - ResourceNotFound: Required resource not found
+        - ResourceForbidden: Access denied to resource
+        - WatchTimeout: Watched task timeout
+        - UserCancellation: Task cancelled by user
+
+    TasksQueryReq:
+      type: object
+      properties:
+        creator_usernames:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by task creators
+          example:
+            - johndoe
+            - janedoe
+        group_name:
+          type: string
+          nullable: true
+          description: Filter by group name
+          example: research-team
+        tags:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by task tags
+          example:
+            - gpu
+            - training
+        labels:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by task labels
+          example:
+            - experiment-1
+        states:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskState"
+          nullable: true
+          description: Filter by task states
+        exit_status:
+          type: string
+          nullable: true
+          description: Filter by exit status (e.g. "0", "!=0")
+          example: "0"
+        priority:
+          type: string
+          nullable: true
+          description: Filter by priority (e.g. ">5", "<=10")
+          example: ">5"
+        limit:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Maximum number of results
+          example: 50
+        offset:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Offset for pagination
+          example: 0
+        count:
+          type: boolean
+          description: Whether to return total count
+          default: false
+
+    TaskQueryInfo:
+      type: object
+      required:
+        - uuid
+        - creator_username
+        - group_name
+        - task_id
+        - tags
+        - labels
+        - created_at
+        - updated_at
+        - state
+        - timeout
+        - priority
+        - spec
+      properties:
+        uuid:
+          type: string
+          format: uuid
+          example: 789e0123-e89b-12d3-a456-426614174222
+        creator_username:
+          type: string
+          example: johndoe
+        group_name:
+          type: string
+          example: research-team
+        task_id:
+          type: integer
+          format: int64
+          example: 12345
+        tags:
+          type: array
+          items:
+            type: string
+          example:
+            - gpu
+            - python
+        labels:
+          type: array
+          items:
+            type: string
+          example:
+            - experiment-1
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:35:00Z"
+        state:
+          $ref: "#/components/schemas/TaskState"
+        timeout:
+          type: integer
+          format: int64
+          description: Task timeout in seconds
+          example: 7200
+        priority:
+          type: integer
+          format: int32
+          example: 10
+        spec:
+          type: object
+          description: Task specification as JSON
+        result:
+          type: object
+          nullable: true
+          description: Task result as JSON (if completed)
+
+    ParsedTaskQueryInfo:
+      type: object
+      required:
+        - uuid
+        - creator_username
+        - group_name
+        - task_id
+        - tags
+        - labels
+        - created_at
+        - updated_at
+        - state
+        - timeout
+        - priority
+        - spec
+      properties:
+        uuid:
+          type: string
+          format: uuid
+        creator_username:
+          type: string
+        group_name:
+          type: string
+        task_id:
+          type: integer
+          format: int64
+        tags:
+          type: array
+          items:
+            type: string
+        labels:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        state:
+          $ref: "#/components/schemas/TaskState"
+        timeout:
+          type: integer
+          format: int64
+        priority:
+          type: integer
+          format: int32
+        spec:
+          $ref: "#/components/schemas/TaskSpec"
+        result:
+          $ref: "#/components/schemas/TaskResultSpec"
+          nullable: true
+
+    TaskQueryResp:
+      type: object
+      required:
+        - info
+        - artifacts
+      properties:
+        info:
+          $ref: "#/components/schemas/ParsedTaskQueryInfo"
+        artifacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ArtifactQueryResp"
+          description: Available artifacts for this task
+
+    TasksQueryResp:
+      type: object
+      required:
+        - count
+        - tasks
+        - group_name
+      properties:
+        count:
+          type: integer
+          format: uint64
+          description: Total number of tasks (if count=true)
+        tasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskQueryInfo"
+        group_name:
+          type: string
+
+    ArtifactQueryResp:
+      type: object
+      required:
+        - content_type
+        - size
+        - created_at
+        - updated_at
+      properties:
+        content_type:
+          $ref: "#/components/schemas/ArtifactContentType"
+        size:
+          type: integer
+          format: int64
+          description: Artifact size in bytes
+          example: 2048576
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+
+    UploadArtifactReq:
+      type: object
+      required:
+        - content_type
+        - content_length
+      properties:
+        content_type:
+          $ref: "#/components/schemas/ArtifactContentType"
+        content_length:
+          type: integer
+          format: uint64
+          description: Artifact size in bytes
+          example: 2048576
+
+    UploadArtifactResp:
+      type: object
+      required:
+        - url
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Presigned URL for uploading the artifact
+
+    WorkerTaskResp:
+      type: object
+      required:
+        - id
+        - uuid
+        - timeout
+        - spec
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Internal task ID
+        uuid:
+          type: string
+          format: uuid
+          description: Task UUID
+        timeout:
+          type: string
+          description: Task timeout duration
+          example: 2h
+        spec:
+          $ref: "#/components/schemas/TaskSpec"
+
+    ReportTaskReq:
+      type: object
+      required:
+        - id
+        - op
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Internal task ID
+        op:
+          $ref: "#/components/schemas/ReportTaskOp"
+
+    ReportTaskOp:
+      type: object
+      oneOf:
+        - type: string
+          enum:
+            - Finish
+        - type: string
+          enum:
+            - Cancel
+        - type: object
+          required:
+            - Commit
+          properties:
+            Commit:
+              $ref: "#/components/schemas/TaskResultSpec"
+        - type: object
+          required:
+            - Upload
+          properties:
+            Upload:
+              type: object
+              required:
+                - content_type
+                - content_length
+              properties:
+                content_type:
+                  $ref: "#/components/schemas/ArtifactContentType"
+                content_length:
+                  type: integer
+                  format: uint64
+      description: |
+        Task operation:
+        - Finish: Task execution finished (no result)
+        - Cancel: Task was cancelled
+        - Commit: Commit task result
+        - Upload: Request upload URL for artifacts
+
+    ReportTaskResp:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+          nullable: true
+          description: Upload URL (only for Upload operations)
+
+    ShutdownReq:
+      type: object
+      required:
+        - secret
+      properties:
+        secret:
+          type: string
+          description: Secret key for shutdown authorization
+          example: shutdown-secret-123
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Authentication
+    description: User authentication and session management
+  - name: Users
+    description: User account management
+  - name: Groups
+    description: Group management and file attachments
+  - name: Workers
+    description: Worker registration and management
+  - name: Tasks
+    description: Task submission and monitoring
+  - name: Admin
+    description: Administrative operations
+  - name: Health
+    description: Service health and status
+  - name: Pubsub
+    description: Publish or subscribe to task state transition

@@ -22,7 +22,7 @@ pub enum WorkersCommands {
     /// Cancel a worker
     Cancel(CancelWorkerArgs),
     /// Replace tags of a worker
-    UpdateTags(ReplaceWorkerTagsArgs),
+    UpdateTags(WorkerUpdateTagsArgs),
     /// Update the roles of groups to a worker
     UpdateRoles(UpdateWorkerGroupArgs),
     /// Remove the accessibility of groups from a worker
@@ -30,7 +30,7 @@ pub enum WorkersCommands {
     /// Get information about a worker
     Get(GetWorkerArgs),
     /// Query workers subject to the filter
-    Query(QueryWorkersArgs),
+    Query(WorkersQueryArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -44,7 +44,7 @@ pub struct CancelWorkerArgs {
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
-pub struct ReplaceWorkerTagsArgs {
+pub struct WorkerUpdateTagsArgs {
     /// The UUID of the worker
     pub uuid: Uuid,
     /// The tags to replace
@@ -77,7 +77,7 @@ pub struct GetWorkerArgs {
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
-pub struct QueryWorkersArgs {
+pub struct WorkersQueryArgs {
     /// The name of the group has access to the workers
     #[arg(short, long)]
     pub group: Option<String>,
@@ -98,8 +98,8 @@ pub struct QueryWorkersArgs {
     pub count: bool,
 }
 
-impl From<QueryWorkersArgs> for WorkersQueryReq {
-    fn from(args: QueryWorkersArgs) -> Self {
+impl From<WorkersQueryArgs> for WorkersQueryReq {
+    fn from(args: WorkersQueryArgs) -> Self {
         Self {
             group_name: args.group,
             role: if args.role.is_empty() {
@@ -126,8 +126,8 @@ impl From<UpdateWorkerGroupArgs> for UpdateGroupWorkerRoleReq {
     }
 }
 
-impl From<ReplaceWorkerTagsArgs> for ReplaceWorkerTagsReq {
-    fn from(args: ReplaceWorkerTagsArgs) -> Self {
+impl From<WorkerUpdateTagsArgs> for ReplaceWorkerTagsReq {
+    fn from(args: WorkerUpdateTagsArgs) -> Self {
         Self {
             tags: args.tags.into_iter().collect(),
         }

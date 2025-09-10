@@ -297,7 +297,7 @@ impl MitoClient {
         self.http_client.user_auth().await
     }
 
-    pub async fn admin_change_password(
+    pub async fn admin_change_user_password(
         &mut self,
         args: ChangePasswordArgs,
     ) -> crate::error::Result<()> {
@@ -317,7 +317,7 @@ impl MitoClient {
         self.http_client.user_change_password(username, req).await
     }
 
-    pub async fn admin_create_user(
+    pub async fn admin_users_create(
         &mut self,
         args: AdminCreateUserArgs,
     ) -> crate::error::Result<()> {
@@ -325,21 +325,21 @@ impl MitoClient {
         self.http_client.admin_create_user(req).await
     }
 
-    pub async fn admin_delete_user(
+    pub async fn admin_users_delete(
         &mut self,
         args: AdminDeleteUserArgs,
     ) -> crate::error::Result<()> {
         self.http_client.admin_delete_user(args.username).await
     }
 
-    pub async fn create_group(&mut self, args: CreateGroupArgs) -> crate::error::Result<()> {
+    pub async fn groups_create(&mut self, args: GroupCreateArgs) -> crate::error::Result<()> {
         let req = CreateGroupReq {
             group_name: args.group,
         };
         self.http_client.user_create_group(req).await
     }
 
-    pub async fn get_task(&mut self, args: GetTaskArgs) -> crate::error::Result<TaskQueryResp> {
+    pub async fn tasks_get(&mut self, args: GetTaskArgs) -> crate::error::Result<TaskQueryResp> {
         self.http_client.get_task_by_uuid(args.uuid).await
     }
 
@@ -386,7 +386,7 @@ impl MitoClient {
         Ok(resp.url)
     }
 
-    pub async fn user_delete_artifact(
+    pub async fn tasks_artifacts_delete(
         &mut self,
         args: DeleteArtifactArgs,
     ) -> crate::error::Result<()> {
@@ -395,7 +395,7 @@ impl MitoClient {
             .await
     }
 
-    pub async fn admin_delete_artifact(
+    pub async fn admin_tasks_artifacts_delete(
         &mut self,
         args: DeleteArtifactArgs,
     ) -> crate::error::Result<()> {
@@ -483,7 +483,7 @@ impl MitoClient {
         Ok(resp.url)
     }
 
-    pub async fn get_attachment_meta(
+    pub async fn groups_attachments_get_metadata(
         &mut self,
         args: GetAttachmentMetaArgs,
     ) -> crate::error::Result<AttachmentMetadata> {
@@ -492,7 +492,7 @@ impl MitoClient {
             .await
     }
 
-    pub async fn user_delete_attachment(
+    pub async fn groups_attachments_delete(
         &mut self,
         args: DeleteAttachmentArgs,
     ) -> crate::error::Result<()> {
@@ -501,7 +501,7 @@ impl MitoClient {
             .await
     }
 
-    pub async fn admin_delete_attachment(
+    pub async fn admin_groups_attachments_delete(
         &mut self,
         args: DeleteAttachmentArgs,
     ) -> crate::error::Result<()> {
@@ -510,7 +510,7 @@ impl MitoClient {
             .await
     }
 
-    pub async fn admin_update_group_storage_quota(
+    pub async fn admin_groups_update_storage_quota(
         &mut self,
         args: AdminUpdateGroupStorageQuotaArgs,
     ) -> crate::error::Result<GroupStorageQuotaResp> {
@@ -522,14 +522,14 @@ impl MitoClient {
             .await
     }
 
-    pub async fn query_tasks(
+    pub async fn tasks_query(
         &mut self,
         args: QueryTasksArgs,
     ) -> crate::error::Result<TasksQueryResp> {
         self.http_client.query_tasks_by_filter(args.into()).await
     }
 
-    pub async fn query_attachments(
+    pub async fn attachments_query(
         &mut self,
         args: QueryAttachmentsArgs,
     ) -> crate::error::Result<AttachmentsQueryResp> {
@@ -545,29 +545,29 @@ impl MitoClient {
             .await
     }
 
-    pub async fn get_worker(
+    pub async fn workers_get(
         &mut self,
         args: GetWorkerArgs,
     ) -> crate::error::Result<WorkerQueryResp> {
         self.http_client.get_worker_by_uuid(args.uuid).await
     }
 
-    pub async fn query_workers(
+    pub async fn workers_query(
         &mut self,
-        args: QueryWorkersArgs,
+        args: WorkersQueryArgs,
     ) -> crate::error::Result<WorkersQueryResp> {
         self.http_client.query_workers_by_filter(args.into()).await
     }
 
-    pub async fn get_group(&mut self, args: GetGroupArgs) -> crate::error::Result<GroupQueryInfo> {
+    pub async fn groups_get(&mut self, args: GroupGetArgs) -> crate::error::Result<GroupQueryInfo> {
         self.http_client.get_group_by_name(&args.group).await
     }
 
-    pub async fn query_groups(&mut self) -> crate::error::Result<GroupsQueryResp> {
+    pub async fn groups_query(&mut self) -> crate::error::Result<GroupsQueryResp> {
         self.http_client.get_user_groups_roles().await
     }
 
-    pub async fn submit_task(
+    pub async fn tasks_submit(
         &mut self,
         args: SubmitTaskArgs,
     ) -> crate::error::Result<SubmitTaskResp> {
@@ -666,7 +666,7 @@ impl MitoClient {
             .await
     }
 
-    pub async fn admin_cancel_worker(
+    pub async fn admin_workers_cancel(
         &mut self,
         args: CancelWorkerArgs,
     ) -> crate::error::Result<()> {
@@ -675,22 +675,22 @@ impl MitoClient {
             .await
     }
 
-    pub async fn cancel_worker(&mut self, args: CancelWorkerArgs) -> crate::error::Result<()> {
+    pub async fn workers_cancel(&mut self, args: CancelWorkerArgs) -> crate::error::Result<()> {
         self.http_client
             .cancel_worker_by_uuid(args.uuid, args.force)
             .await
     }
 
-    pub async fn replace_worker_tags(
+    pub async fn workers_update_tags(
         &mut self,
-        args: ReplaceWorkerTagsArgs,
+        args: WorkerUpdateTagsArgs,
     ) -> crate::error::Result<()> {
         self.http_client
             .replace_worker_tags(args.uuid, args.into())
             .await
     }
 
-    pub async fn update_group_worker_roles(
+    pub async fn workers_update_group_roles(
         &mut self,
         args: UpdateWorkerGroupArgs,
     ) -> crate::error::Result<()> {
@@ -699,7 +699,7 @@ impl MitoClient {
             .await
     }
 
-    pub async fn remove_group_worker_roles(
+    pub async fn workers_remove_group_roles(
         &mut self,
         args: RemoveWorkerGroupArgs,
     ) -> crate::error::Result<()> {
@@ -708,11 +708,11 @@ impl MitoClient {
             .await
     }
 
-    pub async fn cancel_task(&mut self, uuid: Uuid) -> crate::error::Result<()> {
+    pub async fn tasks_cancel(&mut self, uuid: Uuid) -> crate::error::Result<()> {
         self.http_client.cancel_task_by_uuid(uuid).await
     }
 
-    pub async fn update_task_labels(
+    pub async fn tasks_update_labels(
         &mut self,
         args: UpdateTaskLabelsArgs,
     ) -> crate::error::Result<()> {
@@ -721,13 +721,13 @@ impl MitoClient {
             .await
     }
 
-    pub async fn change_task(&mut self, args: ChangeTaskArgs) -> crate::error::Result<()> {
+    pub async fn tasks_change(&mut self, args: ChangeTaskArgs) -> crate::error::Result<()> {
         self.http_client.change_task(args.uuid, args.into()).await
     }
 
-    pub async fn update_user_group_roles(
+    pub async fn groups_update_user_roles(
         &mut self,
-        args: UpdateUserGroupArgs,
+        args: GroupUpdateUserArgs,
     ) -> crate::error::Result<()> {
         let req = UpdateUserGroupRoleReq {
             relations: args.roles.into_iter().collect(),
@@ -737,7 +737,7 @@ impl MitoClient {
             .await
     }
 
-    pub async fn remove_user_group_roles(
+    pub async fn groups_remove_user_roles(
         &mut self,
         args: RemoveUserGroupArgs,
     ) -> crate::error::Result<()> {
@@ -761,6 +761,34 @@ impl MitoClient {
 
     pub async fn quit(self) {}
 
+    pub async fn tasks_artifacts_upload(
+        &mut self,
+        args: TaskArtifactUploadArgs,
+    ) -> crate::error::Result<()> {
+        self.upload_artifact(args).await
+    }
+
+    pub async fn tasks_artifacts_download(
+        &mut self,
+        args: TaskArtifactDownloadArgs,
+    ) -> crate::error::Result<ResourceDownloadInfo> {
+        self.download_artifact(args).await
+    }
+
+    pub async fn groups_attachments_upload(
+        &mut self,
+        args: GroupAttachmentUploadArgs,
+    ) -> crate::error::Result<()> {
+        self.upload_attachment(args).await
+    }
+
+    pub async fn groups_attachments_download(
+        &mut self,
+        args: GroupAttachmentDownloadArgs,
+    ) -> crate::error::Result<ResourceDownloadInfo> {
+        self.download_attachment(args).await
+    }
+
     pub async fn handle_command<T>(&mut self, cmd: T) -> bool
     where
         T: Into<ClientCommand>,
@@ -769,7 +797,7 @@ impl MitoClient {
         match cmd {
             ClientCommand::Admin(admin_args) => match admin_args.command {
                 AdminCommands::Users(args) => match args.command {
-                    AdminUsersCommands::Create(args) => match self.admin_create_user(args).await {
+                    AdminUsersCommands::Create(args) => match self.admin_users_create(args).await {
                         Ok(_) => {
                             tracing::info!("Successfully created user");
                         }
@@ -777,7 +805,7 @@ impl MitoClient {
                             tracing::error!("{}", e);
                         }
                     },
-                    AdminUsersCommands::Delete(args) => match self.admin_delete_user(args).await {
+                    AdminUsersCommands::Delete(args) => match self.admin_users_delete(args).await {
                         Ok(_) => {
                             tracing::info!("Successfully deleted user");
                         }
@@ -786,7 +814,7 @@ impl MitoClient {
                         }
                     },
                     AdminUsersCommands::ChangePassword(args) => {
-                        match self.admin_change_password(args).await {
+                        match self.admin_change_user_password(args).await {
                             Ok(_) => {
                                 tracing::info!("Successfully changed password");
                             }
@@ -798,7 +826,7 @@ impl MitoClient {
                 },
                 AdminCommands::Groups(args) => match args.command {
                     AdminGroupsCommands::StorageQuota(args) => {
-                        match self.admin_update_group_storage_quota(args).await {
+                        match self.admin_groups_update_storage_quota(args).await {
                             Ok(resp) => {
                                 tracing::info!(
                                     "Successfully updated group storage quota to {}",
@@ -812,7 +840,7 @@ impl MitoClient {
                     }
                     AdminGroupsCommands::Attachments(args) => match args.command {
                         AdminAttachmentsCommands::Delete(args) => {
-                            match self.admin_delete_attachment(args).await {
+                            match self.admin_groups_attachments_delete(args).await {
                                 Ok(_) => {
                                     tracing::info!("Successfully deleted attachment");
                                 }
@@ -826,7 +854,7 @@ impl MitoClient {
                 AdminCommands::Tasks(args) => match args.command {
                     AdminTasksCommands::Artifacts(args) => match args.command {
                         AdminArtifactsCommands::Delete(args) => {
-                            match self.admin_delete_artifact(args).await {
+                            match self.admin_tasks_artifacts_delete(args).await {
                                 Ok(_) => {
                                     tracing::info!("Successfully deleted artifact");
                                 }
@@ -850,7 +878,7 @@ impl MitoClient {
                 }
                 AdminCommands::Workers(args) => match args.command {
                     AdminWorkersCommands::Cancel(args) => {
-                        match self.admin_cancel_worker(args).await {
+                        match self.admin_workers_cancel(args).await {
                             Ok(_) => {
                                 tracing::info!("Successfully cancelled worker");
                             }
@@ -899,7 +927,7 @@ impl MitoClient {
             }
 
             ClientCommand::Workers(args) => match args.command {
-                WorkersCommands::Cancel(args) => match self.cancel_worker(args).await {
+                WorkersCommands::Cancel(args) => match self.workers_cancel(args).await {
                     Ok(_) => {
                         tracing::info!("Worker cancelled successfully");
                     }
@@ -907,7 +935,7 @@ impl MitoClient {
                         tracing::error!("{}", e);
                     }
                 },
-                WorkersCommands::UpdateTags(args) => match self.replace_worker_tags(args).await {
+                WorkersCommands::UpdateTags(args) => match self.workers_update_tags(args).await {
                     Ok(_) => {
                         tracing::info!("Worker tags updated successfully");
                     }
@@ -916,7 +944,7 @@ impl MitoClient {
                     }
                 },
                 WorkersCommands::UpdateRoles(args) => {
-                    match self.update_group_worker_roles(args).await {
+                    match self.workers_update_group_roles(args).await {
                         Ok(_) => {
                             tracing::info!("Group worker roles updated successfully");
                         }
@@ -926,7 +954,7 @@ impl MitoClient {
                     }
                 }
                 WorkersCommands::RemoveRoles(args) => {
-                    match self.remove_group_worker_roles(args).await {
+                    match self.workers_remove_group_roles(args).await {
                         Ok(_) => {
                             tracing::info!("Group worker roles removed successfully");
                         }
@@ -935,7 +963,7 @@ impl MitoClient {
                         }
                     }
                 }
-                WorkersCommands::Get(args) => match self.get_worker(args).await {
+                WorkersCommands::Get(args) => match self.workers_get(args).await {
                     Ok(resp) => {
                         output_worker_info(&resp.info, &resp.groups);
                     }
@@ -946,7 +974,7 @@ impl MitoClient {
                 WorkersCommands::Query(args) => {
                     let verbose = args.verbose;
                     let counted = args.count;
-                    match self.query_workers(args).await {
+                    match self.workers_query(args).await {
                         Ok(resp) => {
                             let WorkersQueryResp {
                                 count,
@@ -983,7 +1011,7 @@ impl MitoClient {
                         }
                     }
                 }
-                UsersCommands::Groups => match self.query_groups().await {
+                UsersCommands::Groups => match self.groups_query().await {
                     Ok(resp) => {
                         tracing::info!("Currently in {} groups", resp.groups.len());
                         for (group, role) in resp.groups {
@@ -996,7 +1024,7 @@ impl MitoClient {
                 },
             },
             ClientCommand::Groups(args) => match args.command {
-                GroupsCommands::Create(args) => match self.create_group(args).await {
+                GroupsCommands::Create(args) => match self.groups_create(args).await {
                     Ok(_) => {
                         tracing::info!("Successfully created group");
                     }
@@ -1004,7 +1032,7 @@ impl MitoClient {
                         tracing::error!("{}", e);
                     }
                 },
-                GroupsCommands::Get(args) => match self.get_group(args).await {
+                GroupsCommands::Get(args) => match self.groups_get(args).await {
                     Ok(resp) => {
                         output_group_info(&resp);
                     }
@@ -1013,7 +1041,7 @@ impl MitoClient {
                     }
                 },
                 GroupsCommands::UpdateUser(args) => {
-                    match self.update_user_group_roles(args).await {
+                    match self.groups_update_user_roles(args).await {
                         Ok(_) => {
                             tracing::info!("User group roles updated successfully");
                         }
@@ -1023,7 +1051,7 @@ impl MitoClient {
                     }
                 }
                 GroupsCommands::RemoveUser(args) => {
-                    match self.remove_user_group_roles(args).await {
+                    match self.groups_remove_user_roles(args).await {
                         Ok(_) => {
                             tracing::info!("User group roles removed successfully");
                         }
@@ -1034,7 +1062,7 @@ impl MitoClient {
                 }
                 GroupsCommands::Attachments(args) => match args.command {
                     AttachmentsCommands::Delete(args) => {
-                        match self.user_delete_attachment(args).await {
+                        match self.groups_attachments_delete(args).await {
                             Ok(_) => {
                                 tracing::info!("Successfully deleted attachment");
                             }
@@ -1076,22 +1104,24 @@ impl MitoClient {
                             }
                         }
                     }
-                    AttachmentsCommands::Get(args) => match self.get_attachment_meta(args).await {
-                        Ok(info) => {
-                            tracing::info!(
-                                "Attachment of size {}B, Created at {} and Updated at {}",
-                                info.size,
-                                info.created_at,
-                                info.updated_at
-                            );
+                    AttachmentsCommands::Get(args) => {
+                        match self.groups_attachments_get_metadata(args).await {
+                            Ok(info) => {
+                                tracing::info!(
+                                    "Attachment of size {}B, Created at {} and Updated at {}",
+                                    info.size,
+                                    info.created_at,
+                                    info.updated_at
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
                         }
-                        Err(e) => {
-                            tracing::error!("{}", e);
-                        }
-                    },
+                    }
                     AttachmentsCommands::Query(args) => {
                         let counted = args.count;
-                        match self.query_attachments(args).await {
+                        match self.attachments_query(args).await {
                             Ok(resp) => {
                                 let AttachmentsQueryResp {
                                     count,
@@ -1126,7 +1156,7 @@ impl MitoClient {
             ClientCommand::Tasks(args) => match args.command {
                 TasksCommands::Submit(args) => {
                     let group_name = args.group_name.clone().unwrap_or(self.username.clone());
-                    match self.submit_task(args).await {
+                    match self.tasks_submit(args).await {
                         Ok(resp) => {
                             tracing::info!(
                                 "Task submitted with id {} in group {} and a global uuid {}",
@@ -1140,7 +1170,7 @@ impl MitoClient {
                         }
                     }
                 }
-                TasksCommands::Get(args) => match self.get_task(args).await {
+                TasksCommands::Get(args) => match self.tasks_get(args).await {
                     Ok(resp) => {
                         output_parsed_task_info(&resp.info);
                         if resp.artifacts.is_empty() {
@@ -1164,7 +1194,7 @@ impl MitoClient {
                 TasksCommands::Query(args) => {
                     let verbose = args.verbose;
                     let counted = args.count;
-                    match self.query_tasks(args).await {
+                    match self.tasks_query(args).await {
                         Ok(resp) => {
                             tracing::info!("Found {} tasks", resp.count);
                             if !counted {
@@ -1184,7 +1214,7 @@ impl MitoClient {
                         }
                     }
                 }
-                TasksCommands::Cancel(args) => match self.cancel_task(args.uuid).await {
+                TasksCommands::Cancel(args) => match self.tasks_cancel(args.uuid).await {
                     Ok(_) => {
                         tracing::info!("Task cancelled successfully");
                     }
@@ -1192,7 +1222,7 @@ impl MitoClient {
                         tracing::error!("{}", e);
                     }
                 },
-                TasksCommands::UpdateLabels(args) => match self.update_task_labels(args).await {
+                TasksCommands::UpdateLabels(args) => match self.tasks_update_labels(args).await {
                     Ok(_) => {
                         tracing::info!("Task labels updated successfully");
                     }
@@ -1200,7 +1230,7 @@ impl MitoClient {
                         tracing::error!("{}", e);
                     }
                 },
-                TasksCommands::Change(args) => match self.change_task(args).await {
+                TasksCommands::Change(args) => match self.tasks_change(args).await {
                     Ok(_) => {
                         tracing::info!("Task changed successfully");
                     }
@@ -1210,7 +1240,7 @@ impl MitoClient {
                 },
                 TasksCommands::Artifacts(args) => match args.command {
                     ArtifactsCommands::Delete(args) => {
-                        match self.user_delete_artifact(args).await {
+                        match self.tasks_artifacts_delete(args).await {
                             Ok(_) => {
                                 tracing::info!("Successfully deleted artifact");
                             }

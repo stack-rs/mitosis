@@ -4,6 +4,7 @@ use axum::{
     routing::{get, post, put},
     Extension, Json, Router,
 };
+use axum_extra::extract::Query;
 
 use crate::{
     config::InfraPool,
@@ -19,9 +20,10 @@ pub fn groups_router(st: InfraPool) -> Router<InfraPool> {
     Router::new()
         .route("/", post(create_group))
         .route("/{group_name}", get(get_group))
+        .route("/{group_name}/users/remove", post(remove_user_group))
         .route(
             "/{group_name}/users",
-            put(update_user_group).delete(remove_user_group),
+            put(update_user_group).delete(remove_user_group_params),
         )
         .route(
             "/{group_name}/download/attachments/{*key}",
@@ -102,6 +104,25 @@ pub async fn remove_user_group(
     Json(req): Json<RemoveUserGroupRoleReq>,
 ) -> ApiResult<()> {
     service::group::remove_user_group_role(u.id, group_name, req.users, &pool)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
+}
+
+pub async fn remove_user_group_params(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(group_name): Path<String>,
+    Query(params): Query<RemoveUserGroupRoleParams>,
+) -> ApiResult<()> {
+    service::group::remove_user_group_role(u.id, group_name, params.users, &pool)
         .await
         .map_err(|e| match e {
             crate::error::Error::AuthError(err) => ApiError::AuthError(err),

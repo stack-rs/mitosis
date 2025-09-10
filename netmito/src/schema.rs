@@ -432,12 +432,24 @@ pub struct RemoveGroupWorkerRoleReq {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RemoveGroupWorkerRoleParams {
+    #[serde(default)]
+    pub groups: HashSet<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UpdateUserGroupRoleReq {
     pub relations: HashMap<String, UserGroupRole>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RemoveUserGroupRoleReq {
+    pub users: HashSet<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RemoveUserGroupRoleParams {
+    #[serde(default)]
     pub users: HashSet<String>,
 }
 

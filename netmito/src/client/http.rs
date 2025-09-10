@@ -759,11 +759,16 @@ impl MitoHttpClient {
         req: RemoveGroupWorkerRoleReq,
     ) -> crate::error::Result<()> {
         self.url.set_path(&format!("workers/{uuid}/groups"));
+        let params = req
+            .groups
+            .into_iter()
+            .map(|g| ("groups", g))
+            .collect::<Vec<_>>();
         let resp = self
             .http_client
             .delete(self.url.as_str())
             .bearer_auth(&self.credential)
-            .json(&req)
+            .query(&params)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -859,11 +864,16 @@ impl MitoHttpClient {
         req: RemoveUserGroupRoleReq,
     ) -> crate::error::Result<()> {
         self.url.set_path(&format!("groups/{group_name}/users"));
+        let params = req
+            .users
+            .into_iter()
+            .map(|u| ("users", u))
+            .collect::<Vec<_>>();
         let resp = self
             .http_client
             .delete(self.url.as_str())
             .bearer_auth(&self.credential)
-            .json(&req)
+            .query(&params)
             .send()
             .await
             .map_err(map_reqwest_err)?;

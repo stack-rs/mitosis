@@ -14,11 +14,11 @@ pub struct GroupsArgs {
 #[derive(Subcommand, Serialize, Debug, Deserialize, derive_more::From, Clone)]
 pub enum GroupsCommands {
     /// Create a new group
-    Create(CreateGroupArgs),
+    Create(GroupCreateArgs),
     /// Get the information of a group
-    Get(GetGroupArgs),
+    Get(GroupGetArgs),
     /// Update the roles of users to a group
-    UpdateUser(UpdateUserGroupArgs),
+    UpdateUser(GroupUpdateUserArgs),
     /// Remove the accessibility of users from a group
     RemoveUser(RemoveUserGroupArgs),
     /// Query, upload, download or delete an attachment
@@ -26,19 +26,19 @@ pub enum GroupsCommands {
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
-pub struct CreateGroupArgs {
+pub struct GroupCreateArgs {
     /// The name of the group
     pub group: String,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
-pub struct GetGroupArgs {
+pub struct GroupGetArgs {
     /// The name of the group
     pub group: String,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
-pub struct UpdateUserGroupArgs {
+pub struct GroupUpdateUserArgs {
     /// The name of the group
     pub group: String,
     /// The username and role of the user to the group

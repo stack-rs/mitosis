@@ -4,6 +4,7 @@ use axum::{
     routing::{delete, get, post, put},
     Extension, Json, Router,
 };
+use axum_extra::extract::Query as ExtraQuery;
 use uuid::Uuid;
 
 use crate::{
@@ -45,9 +46,10 @@ pub fn workers_router(st: InfraPool) -> Router<InfraPool> {
             get(user_query_worker).delete(user_shutdown_worker),
         )
         .route("/{uuid}/tags", put(user_replace_worker_tags))
+        .route("/{uuid}/groups/remove", delete(user_remove_worker_groups))
         .route(
             "/{uuid}/groups",
-            put(user_update_worker_groups).delete(user_remove_worker_groups),
+            put(user_update_worker_groups).delete(user_remove_worker_groups_params),
         )
         .route("/", post(user_register_worker))
         .route("/query", post(user_query_workers))
@@ -291,6 +293,25 @@ pub async fn user_remove_worker_groups(
     State(pool): State<InfraPool>,
     Path(uuid): Path<Uuid>,
     Json(req): Json<RemoveGroupWorkerRoleReq>,
+) -> Result<(), ApiError> {
+    service::worker::user_remove_worker_groups(u.id, uuid, req.groups, &pool)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
+}
+
+pub async fn user_remove_worker_groups_params(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    ExtraQuery(req): ExtraQuery<RemoveGroupWorkerRoleParams>,
 ) -> Result<(), ApiError> {
     service::worker::user_remove_worker_groups(u.id, uuid, req.groups, &pool)
         .await

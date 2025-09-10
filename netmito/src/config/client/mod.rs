@@ -25,6 +25,12 @@ pub use tasks::*;
 pub use users::*;
 pub use workers::*;
 
+// Type aliases for SDK documentation compatibility
+pub type TaskArtifactUploadArgs = UploadArtifactArgs;
+pub type TaskArtifactDownloadArgs = DownloadArtifactArgs;
+pub type GroupAttachmentUploadArgs = UploadAttachmentArgs;
+pub type GroupAttachmentDownloadArgs = DownloadAttachmentArgs;
+
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct ClientConfig {
     pub coordinator_addr: Url,

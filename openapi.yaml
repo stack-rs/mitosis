@@ -256,9 +256,9 @@ paths:
           $ref: "#/components/responses/NotFound"
 
     delete:
-      summary: Remove users from group
-      description: Remove users from the group
-      operationId: removeUserGroup
+      summary: Remove users from group (query params)
+      description: Remove users from the group using query parameters
+      operationId: removeUserGroupParams
       tags:
         - Groups
       security:
@@ -269,12 +269,16 @@ paths:
           required: true
           schema:
             type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/RemoveUserGroupRoleReq"
+        - name: users
+          in: query
+          required: false
+          style: form
+          explode: false
+          schema:
+            type: array
+            items:
+              type: string
+          description: Comma-separated list of usernames to remove
       responses:
         "200":
           description: Users removed successfully
@@ -284,6 +288,37 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  # /groups/{group_name}/users/remove:
+  #   post:
+  #     summary: Remove users from group (JSON body)
+  #     description: Remove users from the group using JSON request body
+  #     operationId: removeUserGroup
+  #     tags:
+  #       - Groups
+  #     security:
+  #       - bearerAuth: []
+  #     parameters:
+  #       - name: group_name
+  #         in: path
+  #         required: true
+  #         schema:
+  #           type: string
+  #     requestBody:
+  #       required: true
+  #       content:
+  #         application/json:
+  #           schema:
+  #             $ref: "#/components/schemas/RemoveUserGroupRoleReq"
+  #     responses:
+  #       "200":
+  #         description: Users removed successfully
+  #       "401":
+  #         $ref: "#/components/responses/Unauthorized"
+  #       "403":
+  #         $ref: "#/components/responses/Forbidden"
+  #       "404":
+  #         $ref: "#/components/responses/NotFound"
 
   /groups/{group_name}/attachments:
     post:
@@ -559,11 +594,18 @@ paths:
           schema:
             type: string
             format: uuid
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/WorkerShutdown"
+        - name: op
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - graceful
+              - force
+          description: |
+            Worker shutdown operation:
+            - Graceful: Wait for current task to complete
+            - Force: Stop immediately
       responses:
         "200":
           description: Shutdown request sent
@@ -639,9 +681,9 @@ paths:
           $ref: "#/components/responses/NotFound"
 
     delete:
-      summary: Remove worker group roles
-      description: Remove groups from worker
-      operationId: removeWorkerGroups
+      summary: Remove worker group roles (query params)
+      description: Remove groups from worker using query parameters
+      operationId: removeWorkerGroupsParams
       tags:
         - Workers
       security:
@@ -653,12 +695,16 @@ paths:
           schema:
             type: string
             format: uuid
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/RemoveGroupWorkerRoleReq"
+        - name: groups
+          in: query
+          required: false
+          style: form
+          explode: false
+          schema:
+            type: array
+            items:
+              type: string
+          description: Comma-separated list of group names to remove
       responses:
         "200":
           description: Groups removed successfully
@@ -668,6 +714,38 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  # /workers/{uuid}/groups/remove:
+  #   post:
+  #     summary: Remove worker group roles (JSON body)
+  #     description: Remove groups from worker using JSON request body
+  #     operationId: removeWorkerGroups
+  #     tags:
+  #       - Workers
+  #     security:
+  #       - bearerAuth: []
+  #     parameters:
+  #       - name: uuid
+  #         in: path
+  #         required: true
+  #         schema:
+  #           type: string
+  #           format: uuid
+  #     requestBody:
+  #       required: true
+  #       content:
+  #         application/json:
+  #           schema:
+  #             $ref: "#/components/schemas/RemoveGroupWorkerRoleReq"
+  #     responses:
+  #       "200":
+  #         description: Groups removed successfully
+  #       "401":
+  #         $ref: "#/components/responses/Unauthorized"
+  #       "403":
+  #         $ref: "#/components/responses/Forbidden"
+  #       "404":
+  #         $ref: "#/components/responses/NotFound"
 
   /workers/heartbeat:
     post:
@@ -1260,11 +1338,18 @@ paths:
           schema:
             type: string
             format: uuid
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/WorkerShutdown"
+        - name: op
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - graceful
+              - force
+          description: |
+            Worker shutdown operation:
+            - Graceful: Wait for current task to complete
+            - Force: Stop immediately
       responses:
         "200":
           description: Worker shutdown initiated
@@ -1781,16 +1866,28 @@ components:
             johndoe: Admin
             janedoe: Write
 
-    RemoveUserGroupRoleReq:
+    # RemoveUserGroupRoleReq:
+    #   type: object
+    #   required:
+    #     - users
+    #   properties:
+    #     users:
+    #       type: array
+    #       items:
+    #         type: string
+    #       description: Usernames to remove from group
+    #       example:
+    #         - johndoe
+    #         - janedoe
+
+    RemoveUserGroupRoleParams:
       type: object
-      required:
-        - users
       properties:
         users:
           type: array
           items:
             type: string
-          description: Usernames to remove from group
+          description: Usernames to remove from group (query parameter)
           example:
             - johndoe
             - janedoe
@@ -2134,36 +2231,31 @@ components:
             research-team: Write
             ml-group: Admin
 
-    RemoveGroupWorkerRoleReq:
+    # RemoveGroupWorkerRoleReq:
+    #   type: object
+    #   required:
+    #     - groups
+    #   properties:
+    #     groups:
+    #       type: array
+    #       items:
+    #         type: string
+    #       description: Groups to remove from worker
+    #       example:
+    #         - old-group
+    #         - deprecated-group
+
+    RemoveGroupWorkerRoleParams:
       type: object
-      required:
-        - groups
       properties:
         groups:
           type: array
           items:
             type: string
-          description: Groups to remove from worker
+          description: Groups to remove from worker (query parameter)
           example:
             - old-group
             - deprecated-group
-
-    WorkerShutdown:
-      type: object
-      properties:
-        op:
-          $ref: "#/components/schemas/WorkerShutdownOp"
-
-    WorkerShutdownOp:
-      type: string
-      enum:
-        - Graceful
-        - Force
-      default: Graceful
-      description: |
-        Worker shutdown operation:
-        - Graceful: Wait for current task to complete
-        - Force: Stop immediately
 
     TaskSpec:
       type: object

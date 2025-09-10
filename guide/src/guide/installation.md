@@ -13,19 +13,35 @@ Executable binaries are available for download on the [GitHub Releases page][rel
 Download the binary and extract the archive.
 The archive contains an `mito` executable which you can run to start your distributed platform.
 
-We have a installer script that you can use to install Mitosis (you may need to adjust the version number in the URL to the latest in the [releases] page).
-You can also change the version number in the URL to install a specific version. This script will install the binary in the `$HOME/.cargo/bin` directory.
+### Automated Installation Script
+
+We provide an installer script that automatically downloads and installs the latest version:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.4.0/mito-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/latest/download/mito-installer.sh | sh
 ```
+
+**For a specific version** (adjust version number as needed, found at [releases] page):
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.5.3/mito-installer.sh | sh
+```
+
+The installer script will:
+
+- Detect your platform automatically
+- Download the appropriate binary
+- Install it to `$HOME/.cargo/bin`
+- Add the directory to your PATH if needed
+
+### Manual Installation
 
 You can also download the binary directly from the [releases] page and install it manually.
 To make it easier to run, put the path to the binary into your `PATH` or install it in a directory that is already in your `PATH`.
-For example, do the following on Linux (you may need to adjust the version number to the latest in the URL):
+For example, do the following on Linux (glibc-based distributions):
 
 ```bash
-wget https://github.com/stack-rs/mitosis/releases/download/mito-v0.4.0/mito-x86_64-unknown-linux-gnu.tar.xz
+wget https://github.com/stack-rs/mitosis/releases/latest/download/mito-x86_64-unknown-linux-gnu.tar.xz
 tar xf mito-x86_64-unknown-linux-gnu.tar.xz
 cd mito-x86_64-unknown-linux-gnu
 sudo install -m 755 mito /usr/local/bin/mito
@@ -34,10 +50,19 @@ sudo install -m 755 mito /usr/local/bin/mito
 If you are using older Linux distributions (with older glibc), you may need to install the musl-compiled releases:
 
 ```bash
-wget https://github.com/stack-rs/mitosis/releases/download/mito-v0.4.0/mito-x86_64-unknown-linux-musl.tar.xz
+wget https://github.com/stack-rs/mitosis/releases/latest/download/mito-x86_64-unknown-linux-musl.tar.xz
 tar xf mito-x86_64-unknown-linux-musl.tar.xz
 cd mito-x86_64-unknown-linux-musl
 sudo install -m 755 mito /usr/local/bin/mito
+```
+
+### Verification
+
+After installation, verify that Mitosis is working correctly:
+
+```bash
+mito --version
+mito --help
 ```
 
 [releases]: https://github.com/stack-rs/mitosis/releases
@@ -96,7 +121,7 @@ Then you can find the binary in `target/release/mito` and install or run it as y
 ### Common building errors
 
 If you encounter compilation errors on rustls or aws-lc-sys in older Linux distributions, check gcc version and consider updating it.
-For example:
+For example on Ubuntu/Debian:
 
 ```bash
 sudo apt update -y
@@ -104,6 +129,20 @@ sudo apt upgrade -y
 sudo apt install -y build-essential
 sudo apt install -y gcc-10 g++-10 cpp-10
 sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 --slave /usr/bin/g++ g++ /usr/bin/g++-10 --slave /usr/bin/gcov gcov /usr/bin/gcov-10
+```
+
+**CentOS/RHEL/Fedora:**
+
+```bash
+sudo dnf install -y gcc gcc-c++ openssl-devel pkgconfig
+# OR for older versions:
+sudo yum install -y gcc gcc-c++ openssl-devel pkgconfig
+```
+
+**Alpine Linux:**
+
+```bash
+apk add --no-cache gcc musl-dev openssl-dev pkgconfig
 ```
 
 ## Modifying and contributing

@@ -30,14 +30,215 @@ You have to install pkg-config, libssl-dev if you want to build the binary from 
 
 Mitosis builds on stable Rust, if you want to build it from source, here are the steps to follow:
 
-1. Navigate to the directory of your choice
-2. Clone this repository with git.
+1. **Clone the repository**:
 
    ```bash
    git clone https://github.com/stack-rs/mitosis.git
+   cd mitosis
    ```
 
-3. Navigate into the newly created `mitosis` directory
-4. Run `cargo build`
+2. **Install dependencies**:
 
-The resulting binary can be found in `mitosis/target/debug/` under the name `mito` or `mito.exe`.
+   ```bash
+   # Ubuntu/Debian
+   sudo apt install build-essential pkg-config libssl-dev
+
+   # CentOS/RHEL/Fedora
+   sudo dnf install gcc gcc-c++ openssl-devel pkgconfig
+   ```
+
+3. **Build the project**:
+
+   ```bash
+   cargo build
+   # Or for release build
+   cargo build --release
+   ```
+
+The resulting binary can be found in `target/debug/mito` (or `target/release/mito` for release builds).
+
+## Development Workflow
+
+### Setting Up Development Environment
+
+You should set up the environment according to our [Guide](https://docs.stack.rs/mitosis/)
+
+### Making Changes
+
+1. **Create a feature branch**:
+
+   ```bash
+   git checkout -b your-feature-name
+   ```
+
+2. **Make your changes** following the coding guidelines below
+
+3. **Test your changes**:
+
+   ```bash
+   cargo clippy --workspace
+   cargo fmt --all
+   ```
+
+4. **Update documentation** if needed:
+
+   ```bash
+   # Update user guide
+   cd guide && mdbook build
+   ```
+
+5. **Commit with descriptive messages**:
+
+   ```bash
+   git commit -m "feat(coordinator): add task priority scheduling
+
+   - Implement priority queue for task scheduling
+   - Add priority field to task submission API
+   - Update database schema with migration
+
+   Closes #123"
+   ```
+
+### Code Quality Standards
+
+Before submitting a pull request:
+
+1. **Format code**: `cargo fmt`
+2. **Fix linting issues**: `cargo clippy`
+3. **Run tests**: `cargo test`
+4. **Security audit**: `cargo audit`
+5. **Check documentation**: `cargo doc`
+
+### Commit Message Guidelines
+
+We follow [Conventional Commits](https://www.conventionalcommits.org/):
+
+- `feat:` New features
+- `fix:` Bug fixes
+- `docs:` Documentation changes
+- `style:` Code style changes (formatting, etc.)
+- `refactor:` Code refactoring without functionality changes
+- `test:` Adding or modifying tests
+- `chore:` Maintenance tasks, dependency updates
+
+**Examples**:
+
+```
+feat(client): add interactive task monitoring
+fix(worker): resolve memory leak in task execution
+docs(api): improve SDK examples and error handling
+```
+
+## Testing Guidelines
+
+### Writing Tests
+
+- **Unit tests**: Test individual functions and modules
+- **Integration tests**: Test API endpoints and workflows
+- **Documentation tests**: Ensure code examples work
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_task_submission() {
+        // Test implementation
+    }
+}
+```
+
+### Running Tests
+
+```bash
+# All tests
+cargo test
+
+# Specific test
+cargo test test_task_submission
+
+# Integration tests only
+cargo test --test integration
+
+# With output
+cargo test -- --nocapture
+
+# Using nextest (faster)
+cargo nextest run
+```
+
+## Documentation Standards
+
+### Code Documentation
+
+- Add rustdoc comments to public APIs
+- Include examples in documentation
+- Document error conditions and panics
+
+````rust
+/// Submits a new task to the coordinator
+///
+/// # Arguments
+/// * `task` - The task specification to submit
+///
+/// # Returns
+/// Returns the UUID of the created task
+///
+/// # Errors
+/// Returns `MitoError::Unauthorized` if user lacks permissions
+///
+/// # Example
+/// ```rust
+/// let task_id = client.submit_task(task_spec).await?;
+/// ```
+pub async fn submit_task(&self, task: TaskSpec) -> Result<Uuid, MitoError> {
+    // Implementation
+}
+````
+
+### User Documentation
+
+When adding new features, update:
+
+- User guide in `guide/src/`
+- API documentation and examples
+- Configuration file examples
+- Troubleshooting guide if applicable
+
+## Performance Guidelines
+
+### Optimization Principles
+
+1. **Async/Await**: Use async for I/O operations
+2. **Connection Pooling**: Reuse database connections
+3. **Streaming**: Use streaming for large data transfers
+4. **Caching**: Cache frequently accessed data
+5. **Batch Operations**: Group operations where possible
+
+### Profiling
+
+```bash
+# CPU profiling
+cargo install flamegraph
+cargo flamegraph --bin mito -- coordinator
+
+# Memory profiling
+valgrind --tool=massif ./target/debug/mito coordinator
+```
+
+## Getting Help
+
+- **Questions**: Open a [Discussion](https://github.com/stack-rs/mitosis/discussions)
+- **Bug Reports**: Create an [Issue](https://github.com/stack-rs/mitosis/issues)
+- **Feature Requests**: Create an [Issue](https://github.com/stack-rs/mitosis/issues) with the "enhancement" label
+
+## Recognition
+
+Contributors are recognized in:
+
+- Release notes and changelog
+- Contributors section of documentation
+- GitHub contributor graphs
+
+Thank you for contributing to Mitosis! 🚀

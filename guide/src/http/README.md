@@ -1,9 +1,5 @@
 # HTTP endpoints
 
-We illustrate the HTTP endpoints of the Coordinator under the following sections:
+We have provide users and developers with an OpenAPI specification of our http endpoints. You can find it in the root of our repository ([openapi.yaml](https://github.com/stack-rs/mitosis/blob/main/openapi.yaml)) or access it online [herer with raw format](https://raw.githubusercontent.com/stack-rs/mitosis/refs/heads/main/openapi.yaml).
 
-- [General API on health-check or login](./general.md)
-- [User API for querying or managing tasks, groups, workers, attachments or artifacts](./user.md)
-- [Group API for querying or managing user-group relationship](./group.md)
-- [Worker API for fetching tasks and submitting results](./worker.md)
-- [Admin API for managing users](./admin.md)
+You can just read the specification file to understand how to interact with our http endpoints, or you can use tools like [Swagger UI](https://swagger.io/tools/swagger-ui/) or the online [Swagger Editor](https://editor.swagger.io/) to interactively explore and test the API.

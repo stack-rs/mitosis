@@ -13,6 +13,7 @@ pub struct Model {
     pub worker_id: Uuid,
     pub creator_id: i64,
     pub tags: Vec<String>,
+    pub labels: Vec<String>,
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
     pub state: WorkerState,

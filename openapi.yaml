@@ -648,6 +648,38 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /workers/{uuid}/labels:
+    put:
+      summary: Update worker labels
+      description: Replace worker's labels
+      operationId: updateWorkerLabels
+      tags:
+        - Workers
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplaceWorkerLabelsReq"
+      responses:
+        "200":
+          description: Tags updated successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /workers/{uuid}/groups:
     put:
       summary: Update worker group roles
@@ -2212,6 +2244,21 @@ components:
           items:
             type: string
           description: New set of worker tags
+          example:
+            - gpu
+            - cuda
+            - tensorflow
+
+    ReplaceWorkerLabelsReq:
+      type: object
+      required:
+        - labels
+      properties:
+        labels:
+          type: array
+          items:
+            type: string
+          description: New set of worker labels
           example:
             - gpu
             - cuda

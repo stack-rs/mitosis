@@ -38,6 +38,7 @@ use crate::{
 pub async fn register_worker(
     creator_id: i64,
     tags: Vec<String>,
+    labels: Vec<String>,
     mut groups: Vec<String>,
     pool: &InfraPool,
 ) -> crate::error::Result<Uuid> {
@@ -47,6 +48,7 @@ pub async fn register_worker(
         worker_id: Set(uuid),
         creator_id: Set(creator_id),
         tags: Set(tags),
+        labels: Set(labels),
         created_at: Set(now),
         updated_at: Set(now),
         last_heartbeat: Set(now),
@@ -687,6 +689,7 @@ pub async fn get_worker_by_uuid(
             (Worker::Entity, Worker::Column::Id),
             (Worker::Entity, Worker::Column::WorkerId),
             (Worker::Entity, Worker::Column::Tags),
+            (Worker::Entity, Worker::Column::Labels),
             (Worker::Entity, Worker::Column::CreatedAt),
             (Worker::Entity, Worker::Column::UpdatedAt),
             (Worker::Entity, Worker::Column::State),
@@ -806,6 +809,7 @@ pub async fn query_workers_by_filter(
         stmt.columns([
             (Worker::Entity, Worker::Column::WorkerId),
             (Worker::Entity, Worker::Column::Tags),
+            (Worker::Entity, Worker::Column::Labels),
             (Worker::Entity, Worker::Column::CreatedAt),
             (Worker::Entity, Worker::Column::UpdatedAt),
             (Worker::Entity, Worker::Column::State),
@@ -850,6 +854,10 @@ pub async fn query_workers_by_filter(
     if let Some(tags) = query.tags {
         let tags: Vec<String> = tags.into_iter().collect();
         stmt.and_where(Expr::col((Worker::Entity, Worker::Column::Tags)).contains(tags));
+    }
+    if let Some(labels) = query.labels {
+        let labels: Vec<String> = labels.into_iter().collect();
+        stmt.and_where(Expr::col((Worker::Entity, Worker::Column::Labels)).contains(labels));
     }
     if let Some(creator_username) = query.creator_username {
         stmt.and_where(
@@ -947,6 +955,71 @@ pub async fn user_replace_worker_tags(
         ))?;
     let mut worker: Worker::ActiveModel = worker.into();
     worker.tags = Set(tags);
+    worker.updated_at = Set(TimeDateTimeWithTimeZone::now_utc());
+    worker.update(&pool.db).await?;
+    Ok(())
+}
+
+pub async fn user_replace_worker_labels(
+    user_id: i64,
+    worker_uuid: Uuid,
+    labels: HashSet<String>,
+    pool: &InfraPool,
+) -> crate::error::Result<()> {
+    if labels.is_empty() {
+        return Err(ApiError::InvalidRequest("Empty labels".to_string()).into());
+    }
+    let labels = labels.into_iter().collect::<Vec<_>>();
+    let builder = pool.db.get_database_backend();
+    let worker = Worker::Entity::find()
+        .filter(Worker::Column::WorkerId.eq(worker_uuid))
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::NotFound(format!(
+            "Worker {worker_uuid} not found"
+        )))?;
+    let stmt = Query::select()
+        .column((Group::Entity, Group::Column::GroupName))
+        .column((GroupWorker::Entity, GroupWorker::Column::Role))
+        .from(GroupWorker::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((Group::Entity, Group::Column::Id)).eq(Expr::col((
+                GroupWorker::Entity,
+                GroupWorker::Column::GroupId,
+            ))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            UserGroup::Entity,
+            Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId)).eq(worker.id))
+        .and_where(
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).eq(PgFunc::any(vec![
+                GroupWorkerRole::Write,
+                GroupWorkerRole::Admin,
+            ])),
+        )
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+        .and_where(
+            Expr::col((UserGroup::Entity, UserGroup::Column::Role)).eq(PgFunc::any(vec![
+                UserGroupRole::Write,
+                UserGroupRole::Admin,
+            ])),
+        )
+        .limit(1)
+        .to_owned();
+    let _group = PartialGroupWorkerRole::find_by_statement(builder.build(&stmt))
+        .one(&pool.db)
+        .await?
+        .ok_or(ApiError::AuthError(
+            crate::error::AuthError::PermissionDenied,
+        ))?;
+    let mut worker: Worker::ActiveModel = worker.into();
+    worker.labels = Set(labels);
     worker.updated_at = Set(TimeDateTimeWithTimeZone::now_utc());
     worker.update(&pool.db).await?;
     Ok(())

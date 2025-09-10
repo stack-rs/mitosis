@@ -26,6 +26,7 @@ pub struct WorkerConfig {
     pub(crate) password: Option<String>,
     pub(crate) groups: HashSet<String>,
     pub(crate) tags: HashSet<String>,
+    pub(crate) labels: HashSet<String>,
     pub(crate) log_path: Option<RelativePathBuf>,
     pub(crate) file_log: bool,
     #[serde(with = "humantime_serde")]
@@ -75,6 +76,10 @@ pub struct WorkerConfigCli {
     #[arg(short, long, num_args = 0.., value_delimiter = ',')]
     #[serde(skip_serializing_if = "::std::vec::Vec::is_empty")]
     pub tags: Vec<String>,
+    /// The labels of this worker
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    #[serde(skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub labels: Vec<String>,
     /// The log file path. If not specified, then the default rolling log file path would be used.
     /// If specified, then the log file would be exactly at the path specified.
     #[arg(long)]
@@ -109,6 +114,7 @@ impl Default for WorkerConfig {
             password: None,
             groups: HashSet::new(),
             tags: HashSet::new(),
+            labels: HashSet::new(),
             log_path: None,
             file_log: false,
             lifetime: None,

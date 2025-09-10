@@ -732,6 +732,27 @@ impl MitoHttpClient {
         }
     }
 
+    pub async fn replace_worker_labels(
+        &mut self,
+        uuid: Uuid,
+        req: ReplaceWorkerLabelsReq,
+    ) -> crate::error::Result<()> {
+        self.url.set_path(&format!("workers/{uuid}/labels"));
+        let resp = self
+            .http_client
+            .put(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn update_group_worker_roles(
         &mut self,
         uuid: Uuid,

@@ -264,6 +264,7 @@ impl MitoWorker {
         url.set_path("workers");
         let req = RegisterWorkerReq {
             tags: config.tags.clone(),
+            labels: config.labels.clone(),
             groups: config.groups.clone(),
             lifetime: config.lifetime,
         };

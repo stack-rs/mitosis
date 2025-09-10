@@ -46,6 +46,7 @@ pub fn workers_router(st: InfraPool) -> Router<InfraPool> {
             get(user_query_worker).delete(user_shutdown_worker),
         )
         .route("/{uuid}/tags", put(user_replace_worker_tags))
+        .route("/{uuid}/labels", put(user_replace_worker_labels))
         .route("/{uuid}/groups/remove", delete(user_remove_worker_groups))
         .route(
             "/{uuid}/groups",
@@ -71,6 +72,7 @@ pub async fn user_register_worker(
     let uuid = service::worker::register_worker(
         u.id,
         Vec::from_iter(req.tags),
+        Vec::from_iter(req.labels),
         Vec::from_iter(req.groups),
         &pool,
     )
@@ -257,6 +259,25 @@ pub async fn user_replace_worker_tags(
     Json(req): Json<ReplaceWorkerTagsReq>,
 ) -> Result<(), ApiError> {
     service::worker::user_replace_worker_tags(u.id, uuid, req.tags, &pool)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(())
+}
+
+pub async fn user_replace_worker_labels(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<UpdateTaskLabelsReq>,
+) -> Result<(), ApiError> {
+    service::worker::user_replace_worker_labels(u.id, uuid, req.labels, &pool)
         .await
         .map_err(|e| match e {
             crate::error::Error::AuthError(err) => ApiError::AuthError(err),

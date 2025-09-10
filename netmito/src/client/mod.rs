@@ -690,6 +690,15 @@ impl MitoClient {
             .await
     }
 
+    pub async fn workers_update_labels(
+        &mut self,
+        args: WorkerUpdateLabelsArgs,
+    ) -> crate::error::Result<()> {
+        self.http_client
+            .replace_worker_labels(args.uuid, args.into())
+            .await
+    }
+
     pub async fn workers_update_group_roles(
         &mut self,
         args: UpdateWorkerGroupArgs,
@@ -938,6 +947,15 @@ impl MitoClient {
                 WorkersCommands::UpdateTags(args) => match self.workers_update_tags(args).await {
                     Ok(_) => {
                         tracing::info!("Worker tags updated successfully");
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                WorkersCommands::UpdateLabels(args) => match self.workers_update_labels(args).await
+                {
+                    Ok(_) => {
+                        tracing::info!("Worker labels updated successfully");
                     }
                     Err(e) => {
                         tracing::error!("{}", e);

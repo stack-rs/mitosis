@@ -5,7 +5,8 @@ use uuid::Uuid;
 use crate::{
     entity::role::GroupWorkerRole,
     schema::{
-        RemoveGroupWorkerRoleReq, ReplaceWorkerTagsReq, UpdateGroupWorkerRoleReq, WorkersQueryReq,
+        RemoveGroupWorkerRoleReq, ReplaceWorkerLabelsReq, ReplaceWorkerTagsReq,
+        UpdateGroupWorkerRoleReq, WorkersQueryReq,
     },
 };
 
@@ -23,6 +24,8 @@ pub enum WorkersCommands {
     Cancel(CancelWorkerArgs),
     /// Replace tags of a worker
     UpdateTags(WorkerUpdateTagsArgs),
+    /// Replace labels of a worker
+    UpdateLabels(WorkerUpdateLabelsArgs),
     /// Update the roles of groups to a worker
     UpdateRoles(UpdateWorkerGroupArgs),
     /// Remove the accessibility of groups from a worker
@@ -50,6 +53,15 @@ pub struct WorkerUpdateTagsArgs {
     /// The tags to replace
     #[arg(num_args = 0..)]
     pub tags: Vec<String>,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct WorkerUpdateLabelsArgs {
+    /// The UUID of the worker
+    pub uuid: Uuid,
+    /// The labels to replace
+    #[arg(num_args = 0..)]
+    pub labels: Vec<String>,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -87,6 +99,9 @@ pub struct WorkersQueryArgs {
     /// The tags of the workers
     #[arg(short, long, num_args = 0.., value_delimiter = ',')]
     pub tags: Vec<String>,
+    /// The labels of the workers
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub labels: Vec<String>,
     /// The username of the creator
     #[arg(long)]
     pub creator: Option<String>,
@@ -112,6 +127,11 @@ impl From<WorkersQueryArgs> for WorkersQueryReq {
             } else {
                 Some(args.tags.into_iter().collect())
             },
+            labels: if args.labels.is_empty() {
+                None
+            } else {
+                Some(args.labels.into_iter().collect())
+            },
             creator_username: args.creator,
             count: args.count,
         }
@@ -130,6 +150,14 @@ impl From<WorkerUpdateTagsArgs> for ReplaceWorkerTagsReq {
     fn from(args: WorkerUpdateTagsArgs) -> Self {
         Self {
             tags: args.tags.into_iter().collect(),
+        }
+    }
+}
+
+impl From<WorkerUpdateLabelsArgs> for ReplaceWorkerLabelsReq {
+    fn from(args: WorkerUpdateLabelsArgs) -> Self {
+        Self {
+            labels: args.labels.into_iter().collect(),
         }
     }
 }

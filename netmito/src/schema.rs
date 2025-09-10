@@ -92,6 +92,7 @@ pub struct GroupQueryInfo {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RegisterWorkerReq {
     pub tags: HashSet<String>,
+    pub labels: HashSet<String>,
     pub groups: HashSet<String>,
     #[serde(default)]
     #[serde(with = "humantime_serde")]
@@ -328,6 +329,7 @@ pub struct WorkersQueryReq {
     pub group_name: Option<String>,
     pub role: Option<HashSet<GroupWorkerRole>>,
     pub tags: Option<HashSet<String>>,
+    pub labels: Option<HashSet<String>>,
     pub creator_username: Option<String>,
     pub count: bool,
 }
@@ -338,6 +340,7 @@ pub(crate) struct RawWorkerQueryInfo {
     pub(crate) worker_id: Uuid,
     pub(crate) creator_username: String,
     pub(crate) tags: Vec<String>,
+    pub(crate) labels: Vec<String>,
     pub(crate) created_at: OffsetDateTime,
     pub(crate) updated_at: OffsetDateTime,
     pub(crate) state: WorkerState,
@@ -355,6 +358,7 @@ pub struct WorkerQueryInfo {
     pub worker_id: Uuid,
     pub creator_username: String,
     pub tags: Vec<String>,
+    pub labels: Vec<String>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
     pub state: WorkerState,
@@ -419,6 +423,11 @@ pub struct GroupsQueryResp {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ReplaceWorkerTagsReq {
     pub tags: HashSet<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReplaceWorkerLabelsReq {
+    pub labels: HashSet<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -520,6 +529,7 @@ impl From<RawWorkerQueryInfo> for WorkerQueryInfo {
             worker_id: model.worker_id,
             creator_username: model.creator_username,
             tags: model.tags,
+            labels: model.labels,
             created_at: model.created_at,
             updated_at: model.updated_at,
             state: model.state,

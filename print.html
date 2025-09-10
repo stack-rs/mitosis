@@ -89,7 +89,7 @@
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
             <div class="sidebar-scrollbox">
-                <ol class="chapter"><li class="chapter-item expanded affix "><a href="index.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="guide/installation.html"><strong aria-hidden="true">1.</strong> Installation</a></li><li class="chapter-item expanded "><a href="guide/coordinator.html"><strong aria-hidden="true">2.</strong> Running a Coordinator</a></li><li class="chapter-item expanded "><a href="guide/worker.html"><strong aria-hidden="true">3.</strong> Running a Worker</a></li><li class="chapter-item expanded "><a href="guide/client.html"><strong aria-hidden="true">4.</strong> Running a Client</a></li><li class="chapter-item expanded affix "><li class="part-title">Reference Guide</li><li class="chapter-item expanded "><a href="client/sdk.html"><strong aria-hidden="true">5.</strong> Client SDK</a></li></ol>
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="index.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="guide/installation.html"><strong aria-hidden="true">1.</strong> Installation</a></li><li class="chapter-item expanded "><a href="guide/coordinator.html"><strong aria-hidden="true">2.</strong> Running a Coordinator</a></li><li class="chapter-item expanded "><a href="guide/worker.html"><strong aria-hidden="true">3.</strong> Running a Worker</a></li><li class="chapter-item expanded "><a href="guide/client.html"><strong aria-hidden="true">4.</strong> Running a Client</a></li><li class="chapter-item expanded "><a href="guide/architecture.html"><strong aria-hidden="true">5.</strong> Architecture Overview</a></li><li class="chapter-item expanded "><a href="guide/troubleshooting.html"><strong aria-hidden="true">6.</strong> Troubleshooting</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="guide/development.html"><strong aria-hidden="true">7.</strong> Development Setup</a></li><li class="chapter-item expanded affix "><li class="part-title">Reference Guide</li><li class="chapter-item expanded "><a href="client/sdk.html"><strong aria-hidden="true">8.</strong> Client SDK</a></li><li class="chapter-item expanded "><a href="http/index.html"><strong aria-hidden="true">9.</strong> HTTP endpoints</a></li></ol>
             </div>
             <div id="sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
@@ -205,23 +205,39 @@ Choose any one of the methods below that best suit your needs.</p>
 <p>Executable binaries are available for download on the <a href="https://github.com/stack-rs/mitosis/releases">GitHub Releases page</a>.
 Download the binary and extract the archive.
 The archive contains an <code>mito</code> executable which you can run to start your distributed platform.</p>
-<p>We have a installer script that you can use to install Mitosis (you may need to adjust the version number in the URL to the latest in the <a href="https://github.com/stack-rs/mitosis/releases">releases</a> page).
-You can also change the version number in the URL to install a specific version. This script will install the binary in the <code>$HOME/.cargo/bin</code> directory.</p>
-<pre><code class="language-bash">curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.5.2/mito-installer.sh | sh
+<h3 id="automated-installation-script"><a class="header" href="#automated-installation-script">Automated Installation Script</a></h3>
+<p>We provide an installer script that automatically downloads and installs the latest version:</p>
+<pre><code class="language-bash">curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/latest/download/mito-installer.sh | sh
 </code></pre>
+<p><strong>For a specific version</strong> (adjust version number as needed, found at <a href="https://github.com/stack-rs/mitosis/releases">releases</a> page):</p>
+<pre><code class="language-bash">curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.5.3/mito-installer.sh | sh
+</code></pre>
+<p>The installer script will:</p>
+<ul>
+<li>Detect your platform automatically</li>
+<li>Download the appropriate binary</li>
+<li>Install it to <code>$HOME/.cargo/bin</code></li>
+<li>Add the directory to your PATH if needed</li>
+</ul>
+<h3 id="manual-installation"><a class="header" href="#manual-installation">Manual Installation</a></h3>
 <p>You can also download the binary directly from the <a href="https://github.com/stack-rs/mitosis/releases">releases</a> page and install it manually.
 To make it easier to run, put the path to the binary into your <code>PATH</code> or install it in a directory that is already in your <code>PATH</code>.
-For example, do the following on Linux (you may need to adjust the version number to the latest in the URL):</p>
-<pre><code class="language-bash">wget https://github.com/stack-rs/mitosis/releases/download/mito-v0.5.2/mito-x86_64-unknown-linux-gnu.tar.xz
+For example, do the following on Linux (glibc-based distributions):</p>
+<pre><code class="language-bash">wget https://github.com/stack-rs/mitosis/releases/latest/download/mito-x86_64-unknown-linux-gnu.tar.xz
 tar xf mito-x86_64-unknown-linux-gnu.tar.xz
 cd mito-x86_64-unknown-linux-gnu
 sudo install -m 755 mito /usr/local/bin/mito
 </code></pre>
 <p>If you are using older Linux distributions (with older glibc), you may need to install the musl-compiled releases:</p>
-<pre><code class="language-bash">wget https://github.com/stack-rs/mitosis/releases/download/mito-v0.5.2/mito-x86_64-unknown-linux-musl.tar.xz
+<pre><code class="language-bash">wget https://github.com/stack-rs/mitosis/releases/latest/download/mito-x86_64-unknown-linux-musl.tar.xz
 tar xf mito-x86_64-unknown-linux-musl.tar.xz
 cd mito-x86_64-unknown-linux-musl
 sudo install -m 755 mito /usr/local/bin/mito
+</code></pre>
+<h3 id="verification"><a class="header" href="#verification">Verification</a></h3>
+<p>After installation, verify that Mitosis is working correctly:</p>
+<pre><code class="language-bash">mito --version
+mito --help
 </code></pre>
 <h2 id="build-from-source-using-rust"><a class="header" href="#build-from-source-using-rust">Build from source using Rust</a></h2>
 <h3 id="dependencies"><a class="header" href="#dependencies">Dependencies</a></h3>
@@ -252,12 +268,20 @@ cargo build --release
 <p>Then you can find the binary in <code>target/release/mito</code> and install or run it as you like.</p>
 <h3 id="common-building-errors"><a class="header" href="#common-building-errors">Common building errors</a></h3>
 <p>If you encounter compilation errors on rustls or aws-lc-sys in older Linux distributions, check gcc version and consider updating it.
-For example:</p>
+For example on Ubuntu/Debian:</p>
 <pre><code class="language-bash">sudo apt update -y
 sudo apt upgrade -y
 sudo apt install -y build-essential
 sudo apt install -y gcc-10 g++-10 cpp-10
 sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 --slave /usr/bin/g++ g++ /usr/bin/g++-10 --slave /usr/bin/gcov gcov /usr/bin/gcov-10
+</code></pre>
+<p><strong>CentOS/RHEL/Fedora:</strong></p>
+<pre><code class="language-bash">sudo dnf install -y gcc gcc-c++ openssl-devel pkgconfig
+# OR for older versions:
+sudo yum install -y gcc gcc-c++ openssl-devel pkgconfig
+</code></pre>
+<p><strong>Alpine Linux:</strong></p>
+<pre><code class="language-bash">apk add --no-cache gcc musl-dev openssl-dev pkgconfig
 </code></pre>
 <h2 id="modifying-and-contributing"><a class="header" href="#modifying-and-contributing">Modifying and contributing</a></h2>
 <p>If you are interested in making modifications to Mitosis itself, check out the <a href="https://github.com/stack-rs/mitosis/blob/master/CONTRIBUTING.md">Contributing Guide</a> for more information.</p>
@@ -739,6 +763,435 @@ Options:
 <p>We can use this sub-command to run an external command. For example, to list files in the current directory, we can run:</p>
 <pre><code>cmd -- ls -hal
 </code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="architecture-overview"><a class="header" href="#architecture-overview">Architecture Overview</a></h1>
+<p>This document provides a comprehensive overview of Mitosis's architecture, components, and data flow.</p>
+<h2 id="system-components"><a class="header" href="#system-components">System Components</a></h2>
+<h3 id="coordinator"><a class="header" href="#coordinator">Coordinator</a></h3>
+<p>The Coordinator is the central management service that orchestrates the entire Mitosis system. It handles:</p>
+<ul>
+<li><strong>Task Management</strong>: Receives, validates, and stores task submissions</li>
+<li><strong>User Authentication</strong>: Manages user sessions and permissions using JWT tokens</li>
+<li><strong>Group Authorization</strong>: Enforces group-based access controls</li>
+<li><strong>Worker Registration</strong>: Tracks available workers and their capabilities</li>
+<li><strong>Scheduling</strong>: Matches tasks with appropriate workers based on groups and tags</li>
+<li><strong>State Management</strong>: Maintains task execution states and progress tracking</li>
+<li><strong>Artifact Storage</strong>: Coordinates with S3-compatible storage for task outputs</li>
+</ul>
+<p><strong>Key Dependencies:</strong></p>
+<ul>
+<li>PostgreSQL for persistent data storage</li>
+<li>S3-compatible storage for artifact management</li>
+<li>Redis (optional) for pub/sub notifications and caching</li>
+<li>Ed25519 key pair for JWT token signing</li>
+</ul>
+<h3 id="worker"><a class="header" href="#worker">Worker</a></h3>
+<p>Workers are the execution nodes that run tasks assigned by the Coordinator. Each worker:</p>
+<ul>
+<li><strong>Task Polling</strong>: Regularly checks for available tasks matching its configuration</li>
+<li><strong>Environment Isolation</strong>: Provides clean execution environments for tasks</li>
+<li><strong>Artifact Collection</strong>: Gathers task outputs from designated directories</li>
+<li><strong>Heartbeat Reporting</strong>: Sends periodic status updates to maintain liveness</li>
+<li><strong>Tag-based Matching</strong>: Only accepts tasks compatible with its configured tags</li>
+<li><strong>Group Membership</strong>: Serves tasks from groups it has been granted access to</li>
+</ul>
+<p><strong>Execution Flow:</strong></p>
+<ol>
+<li>Poll Coordinator for available tasks</li>
+<li>Validate task compatibility (groups, tags)</li>
+<li>Create isolated execution environment</li>
+<li>Execute task command with configured environment variables</li>
+<li>Collect artifacts from <code>MITO_RESULT_DIR</code>, <code>MITO_EXEC_DIR</code></li>
+<li>Upload results and update task status</li>
+</ol>
+<h3 id="client"><a class="header" href="#client">Client</a></h3>
+<p>The Client provides both interactive and programmatic interfaces for users to interact with the system:</p>
+<ul>
+<li><strong>Interactive Mode</strong>: Shell-like interface for real-time system interaction</li>
+<li><strong>Batch Mode</strong>: Direct command execution for scripting and automation</li>
+<li><strong>Task Management</strong>: Submit, query, and manage task execution</li>
+<li><strong>User Administration</strong>: Create and manage users (admin only)</li>
+<li><strong>Group Management</strong>: Create groups and manage member permissions</li>
+<li><strong>Worker Management</strong>: Monitor and control worker nodes</li>
+<li><strong>Artifact Operations</strong>: Upload group attachments and download task results</li>
+</ul>
+<h2 id="data-flow"><a class="header" href="#data-flow">Data Flow</a></h2>
+<h3 id="task-submission-flow"><a class="header" href="#task-submission-flow">Task Submission Flow</a></h3>
+<pre><code>Client → Coordinator → Database
+  │         │
+  ├─→ Validates user credentials and permissions
+  ├─→ Stores task specification in database
+  └─→ Returns task UUID to client
+</code></pre>
+<h3 id="task-execution-flow"><a class="header" href="#task-execution-flow">Task Execution Flow</a></h3>
+<pre><code>Worker → Coordinator → Database → S3 Storage
+  │         │             │
+  ├─→ Polls for tasks based on groups/tags
+  ├─→ Updates task status (pending → running → completed/failed)
+  └─→ Uploads artifacts and execution logs
+</code></pre>
+<h3 id="monitoring-flow-with-redis"><a class="header" href="#monitoring-flow-with-redis">Monitoring Flow (with Redis)</a></h3>
+<pre><code>Coordinator → Redis → Client
+     │         │       │
+     ├─→ Publishes task status updates
+     └─→ Client subscribes to real-time notifications
+</code></pre>
+<h2 id="access-control-model"><a class="header" href="#access-control-model">Access Control Model</a></h2>
+<h3 id="users-and-groups"><a class="header" href="#users-and-groups">Users and Groups</a></h3>
+<ul>
+<li>Every user automatically gets a group with the same name</li>
+<li>Users can create additional groups and manage membership</li>
+<li>Group roles define access levels: <code>Read</code>, <code>Write</code>, <code>Admin</code></li>
+</ul>
+<h3 id="worker-permissions"><a class="header" href="#worker-permissions">Worker Permissions</a></h3>
+<p>Workers are configured with group access levels:</p>
+<ul>
+<li><strong>Write</strong>: Group members can submit tasks to this worker</li>
+<li><strong>Read</strong>: Group members can query worker status</li>
+<li><strong>Admin</strong>: Group members can manage worker configuration</li>
+</ul>
+<h3 id="task-routing"><a class="header" href="#task-routing">Task Routing</a></h3>
+<p>Tasks are routed to workers based on:</p>
+<ol>
+<li><strong>Group Membership</strong>: Worker must have access to the task's target group</li>
+<li><strong>Tag Compatibility</strong>: Worker tags must be empty or contain all task tags</li>
+<li><strong>Availability</strong>: Worker must be active and not at capacity</li>
+</ol>
+<h2 id="storage-architecture"><a class="header" href="#storage-architecture">Storage Architecture</a></h2>
+<h3 id="database-schema-postgresql"><a class="header" href="#database-schema-postgresql">Database Schema (PostgreSQL)</a></h3>
+<ul>
+<li><strong>Users</strong>: Authentication and profile information</li>
+<li><strong>Groups</strong>: Group definitions and membership</li>
+<li><strong>Tasks</strong>: Task specifications, state, and metadata</li>
+<li><strong>Workers</strong>: Worker registration and configuration</li>
+<li><strong>Artifacts / Attachments</strong>: File metadata and S3 object references</li>
+</ul>
+<h3 id="object-storage-s3"><a class="header" href="#object-storage-s3">Object Storage (S3)</a></h3>
+<ul>
+<li><strong>Task Artifacts</strong>: Results, logs, and execution outputs</li>
+<li><strong>Group Attachments</strong>: Shared files accessible to group members</li>
+<li><strong>Bucket Structure</strong>: Organized by groups and artifact types</li>
+</ul>
+<h3 id="cache-layer-redis"><a class="header" href="#cache-layer-redis">Cache Layer (Redis)</a></h3>
+<ul>
+<li><strong>Session Management</strong>: JWT token validation and user sessions</li>
+<li><strong>Pub/Sub</strong>: Real-time notifications for task status changes</li>
+</ul>
+<h2 id="security-model"><a class="header" href="#security-model">Security Model</a></h2>
+<h3 id="authentication"><a class="header" href="#authentication">Authentication</a></h3>
+<ul>
+<li>JWT tokens signed with Ed25519 private key</li>
+<li>Configurable token expiration (default: 7 days)</li>
+<li>Credential caching for user convenience</li>
+</ul>
+<h3 id="authorization"><a class="header" href="#authorization">Authorization</a></h3>
+<ul>
+<li>Role-based access control at group level</li>
+<li>API endpoint protection based on user permissions</li>
+<li>Resource isolation between groups</li>
+</ul>
+<h2 id="scalability-considerations"><a class="header" href="#scalability-considerations">Scalability Considerations</a></h2>
+<h3 id="horizontal-scaling"><a class="header" href="#horizontal-scaling">Horizontal Scaling</a></h3>
+<ul>
+<li><strong>Multiple Workers</strong>: Add workers to increase task execution capacity</li>
+<li><strong>Load Balancing</strong>: Coordinator can handle multiple concurrent clients</li>
+<li><strong>Database Partitioning</strong>: Tasks and artifacts can be partitioned by group</li>
+</ul>
+<h3 id="performance-optimization"><a class="header" href="#performance-optimization">Performance Optimization</a></h3>
+<ul>
+<li><strong>Connection Pooling</strong>: Database connections are pooled and reused</li>
+<li><strong>Batch Operations</strong>: Multiple tasks can be submitted in batches</li>
+<li><strong>Async Processing</strong>: Non-blocking I/O throughout the system</li>
+</ul>
+<h3 id="resource-management"><a class="header" href="#resource-management">Resource Management</a></h3>
+<ul>
+<li><strong>Worker Tagging</strong>: Allows targeting tasks to specific hardware capabilities</li>
+<li><strong>Heartbeat Monitoring</strong>: Automatic worker health checking and cleanup</li>
+<li><strong>Configurable Timeouts</strong>: Prevents resource leaks from stalled tasks</li>
+</ul>
+<h2 id="deployment-patterns"><a class="header" href="#deployment-patterns">Deployment Patterns</a></h2>
+<h3 id="single-node-development"><a class="header" href="#single-node-development">Single-Node Development</a></h3>
+<ul>
+<li>All components on one machine</li>
+<li>Docker Compose for external dependencies</li>
+<li>Suitable for testing and small workloads</li>
+</ul>
+<h3 id="multi-node-production"><a class="header" href="#multi-node-production">Multi-Node Production</a></h3>
+<ul>
+<li>Coordinator on dedicated server</li>
+<li>Workers distributed across compute nodes</li>
+<li>Shared database and storage infrastructure</li>
+<li>Load balancer for coordinator high availability</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="troubleshooting-guide"><a class="header" href="#troubleshooting-guide">Troubleshooting Guide</a></h1>
+<p>This guide covers common issues you might encounter when setting up and running Mitosis, along with their solutions.</p>
+<h2 id="installation-issues"><a class="header" href="#installation-issues">Installation Issues</a></h2>
+<h3 id="binary-not-found-after-installation"><a class="header" href="#binary-not-found-after-installation">Binary Not Found After Installation</a></h3>
+<p><strong>Problem</strong>: <code>mito: command not found</code> after installation.</p>
+<p><strong>Solution</strong>:</p>
+<ol>
+<li>
+<p>Verify the binary location:</p>
+<pre><code class="language-bash">which mito
+find / -name "mito" 2&gt;/dev/null
+</code></pre>
+</li>
+<li>
+<p>Add to PATH if needed:</p>
+<pre><code class="language-bash">export PATH="$HOME/.cargo/bin:$PATH"
+# Add to your shell profile (.bashrc, .zshrc, etc.)
+echo 'export PATH="$HOME/.cargo/bin:$PATH"' &gt;&gt; ~/.bashrc
+</code></pre>
+</li>
+</ol>
+<h3 id="permission-denied"><a class="header" href="#permission-denied">Permission Denied</a></h3>
+<p><strong>Problem</strong>: Permission errors when running the installer or binary.</p>
+<p><strong>Solution</strong>:</p>
+<pre><code class="language-bash"># Make binary executable
+chmod +x mito
+
+# Fix installer permissions
+chmod +x mito-installer.sh
+</code></pre>
+<h3 id="ssltls-certificate-issues"><a class="header" href="#ssltls-certificate-issues">SSL/TLS Certificate Issues</a></h3>
+<p><strong>Problem</strong>: Certificate verification errors during download.</p>
+<p><strong>Solution</strong>:</p>
+<pre><code class="language-bash"># Update certificates
+sudo apt-get update &amp;&amp; sudo apt-get install ca-certificates
+
+# Or bypass for known-safe sources (not recommended for production)
+curl -k --proto '=https' --tlsv1.2 -LsSf [URL]
+</code></pre>
+<h2 id="build-issues"><a class="header" href="#build-issues">Build Issues</a></h2>
+<h3 id="missing-dependencies"><a class="header" href="#missing-dependencies">Missing Dependencies</a></h3>
+<p><strong>Problem</strong>: Compilation fails due to missing system libraries.</p>
+<p><strong>Solution</strong>:</p>
+<pre><code class="language-bash"># Ubuntu/Debian
+sudo apt install build-essential pkg-config libssl-dev
+
+# CentOS/RHEL
+sudo yum install gcc gcc-c++ openssl-devel pkgconfig
+</code></pre>
+<h3 id="rust-version-issues"><a class="header" href="#rust-version-issues">Rust Version Issues</a></h3>
+<p><strong>Problem</strong>: Compilation fails due to incompatible Rust version.</p>
+<p><strong>Solution</strong>:</p>
+<pre><code class="language-bash"># Update Rust
+rustup update
+
+# Check version (needs 1.76+)
+rustc --version
+
+# Set specific toolchain if needed
+rustup default stable
+</code></pre>
+<h3 id="link-errors-on-older-systems"><a class="header" href="#link-errors-on-older-systems">Link Errors on Older Systems</a></h3>
+<p><strong>Problem</strong>: Linking errors with glibc or other system libraries.</p>
+<p><strong>Solution</strong>:
+Use the musl build instead:</p>
+<pre><code class="language-bash"># Install musl target
+rustup target add x86_64-unknown-linux-musl
+
+# Build with musl
+cargo build --target x86_64-unknown-linux-musl --release
+</code></pre>
+<h2 id="configuration-issues"><a class="header" href="#configuration-issues">Configuration Issues</a></h2>
+<h3 id="database-connection-failures"><a class="header" href="#database-connection-failures">Database Connection Failures</a></h3>
+<p><strong>Problem</strong>: <code>FATAL: database "mitosis" does not exist</code></p>
+<p><strong>Solution</strong>:</p>
+<ol>
+<li>
+<p>Create the database:</p>
+<pre><code class="language-sql">psql -U postgres -c "CREATE DATABASE mitosis;"
+psql -U postgres -c "CREATE USER username WITH PASSWORD 'password';"
+psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE mitosis TO useranme;"
+</code></pre>
+</li>
+<li>
+<p>Check connection string format:</p>
+<pre><code class="language-toml">db_url = "postgres://username:password@host:port/mitosis"
+</code></pre>
+</li>
+</ol>
+<h3 id="s3-storage-connection-issues"><a class="header" href="#s3-storage-connection-issues">S3 Storage Connection Issues</a></h3>
+<p><strong>Problem</strong>: S3 authentication or connection failures.</p>
+<p><strong>Solution</strong>:</p>
+<ol>
+<li>
+<p>Verify MinIO/S3 is running:</p>
+<pre><code class="language-bash"># For MinIO
+docker ps | grep minio
+curl http://localhost:9000/minio/health/ready
+</code></pre>
+</li>
+<li>
+<p>Check credentials and bucket access:</p>
+<pre><code class="language-bash"># Using AWS CLI to test
+aws --endpoint-url=http://localhost:9000 s3 ls
+</code></pre>
+</li>
+</ol>
+<h3 id="redis-connection-problems"><a class="header" href="#redis-connection-problems">Redis Connection Problems</a></h3>
+<p><strong>Problem</strong>: Redis connection refused or authentication failures.</p>
+<p><strong>Solution</strong>:</p>
+<ol>
+<li>
+<p>Check Redis status:</p>
+<pre><code class="language-bash">redis-cli ping
+# Should return PONG
+</code></pre>
+</li>
+<li>
+<p>Verify ACL rules (Redis 6.0+):</p>
+<pre><code class="language-bash">redis-cli ACL LIST
+redis-cli ACL DELUSER default  # If needed
+</code></pre>
+</li>
+</ol>
+<h3 id="ssl-key-generation-issues"><a class="header" href="#ssl-key-generation-issues">SSL Key Generation Issues</a></h3>
+<p><strong>Problem</strong>: Ed25519 key generation fails or keys not recognized.</p>
+<p><strong>Solution</strong>:</p>
+<ol>
+<li>
+<p>Ensure OpenSSL version supports Ed25519 (1.1.1+):</p>
+<pre><code class="language-bash">openssl version
+</code></pre>
+</li>
+<li>
+<p>Generate keys correctly:</p>
+<pre><code class="language-bash">openssl genpkey -algorithm ed25519 -out private.pem
+openssl pkey -in private.pem -pubout -out public.pem
+</code></pre>
+</li>
+<li>
+<p>Verify key format:</p>
+<pre><code class="language-bash">openssl pkey -in private.pem -text -noout
+</code></pre>
+</li>
+</ol>
+<h2 id="network-issues"><a class="header" href="#network-issues">Network Issues</a></h2>
+<h3 id="port-already-in-use"><a class="header" href="#port-already-in-use">Port Already in Use</a></h3>
+<p><strong>Problem</strong>: <code>Address already in use</code> when starting coordinator.</p>
+<p><strong>Solution</strong>:</p>
+<ol>
+<li>
+<p>Find what's using the port:</p>
+<pre><code class="language-bash">lsof -i :5000
+netstat -tulpn | grep 5000
+</code></pre>
+</li>
+<li>
+<p>Change the port:</p>
+<pre><code class="language-bash">mito coordinator --bind 0.0.0.0:5001
+</code></pre>
+</li>
+</ol>
+<h3 id="firewall-blocking-connections"><a class="header" href="#firewall-blocking-connections">Firewall Blocking Connections</a></h3>
+<p><strong>Problem</strong>: Workers can't connect to coordinator.</p>
+<p><strong>Solution</strong>:</p>
+<ol>
+<li>
+<p>Check firewall rules:</p>
+<pre><code class="language-bash"># Ubuntu
+sudo ufw status
+sudo ufw allow 5000
+
+# CentOS/RHEL
+sudo firewall-cmd --list-ports
+sudo firewall-cmd --permanent --add-port=5000/tcp
+sudo firewall-cmd --reload
+</code></pre>
+</li>
+<li>
+<p>Test connectivity:</p>
+<pre><code class="language-bash">telnet coordinator_host 5000
+curl http://coordinator_host:5000/health
+</code></pre>
+</li>
+</ol>
+<h2 id="performance-issues"><a class="header" href="#performance-issues">Performance Issues</a></h2>
+<h3 id="slow-task-execution"><a class="header" href="#slow-task-execution">Slow Task Execution</a></h3>
+<p><strong>Problem</strong>: Tasks taking longer than expected to start or complete.</p>
+<p><strong>Solutions</strong>:</p>
+<ol>
+<li>
+<p>Reduce polling interval for workers:</p>
+<pre><code class="language-toml">polling_interval = "30s"  # Faster polling
+</code></pre>
+</li>
+<li>
+<p>Increase worker parallelism:</p>
+<pre><code class="language-bash"># Run multiple workers on the same node
+mito worker &amp;
+mito worker &amp;
+</code></pre>
+</li>
+<li>
+<p>Monitor database performance:</p>
+<pre><code class="language-sql">SELECT * FROM pg_stat_activity;
+SELECT * FROM pg_stat_user_tables;
+</code></pre>
+</li>
+</ol>
+<h3 id="database-lock-contention"><a class="header" href="#database-lock-contention">Database Lock Contention</a></h3>
+<p><strong>Problem</strong>: High lock wait times or deadlocks.</p>
+<p><strong>Solution</strong>:</p>
+<ol>
+<li>
+<p>Monitor locks:</p>
+<pre><code class="language-sql">SELECT * FROM pg_locks WHERE NOT granted;
+</code></pre>
+</li>
+<li>
+<p>Tune PostgreSQL settings:</p>
+<pre><code class="language-postgresql">max_connections = 100
+shared_buffers = 256MB
+effective_cache_size = 1GB
+</code></pre>
+</li>
+</ol>
+<h2 id="debugging-tips"><a class="header" href="#debugging-tips">Debugging Tips</a></h2>
+<h3 id="enable-debug-logging"><a class="header" href="#enable-debug-logging">Enable Debug Logging</a></h3>
+<pre><code class="language-bash">RUST_LOG=debug mito coordinator
+RUST_LOG=netmito=debug mito worker
+RUST_LOG=debug mito client
+</code></pre>
+<h3 id="health-checks"><a class="header" href="#health-checks">Health Checks</a></h3>
+<pre><code class="language-bash"># Check coordinator health
+curl http://localhost:5000/health
+
+# Check database connection
+psql "postgres://mitosis:mitosis@localhost/mitosis" -c "SELECT version();"
+
+# Check S3 connection
+aws --endpoint-url=http://localhost:9000 s3 ls
+</code></pre>
+<h2 id="getting-help"><a class="header" href="#getting-help">Getting Help</a></h2>
+<p>If you continue to experience issues:</p>
+<ol>
+<li>
+<p>Check the <a href="https://github.com/stack-rs/mitosis/issues">GitHub Issues</a> for similar problems</p>
+</li>
+<li>
+<p>Run with debug logging and include logs in your issue report</p>
+</li>
+<li>
+<p>Provide system information:</p>
+<pre><code class="language-bash">mito --version
+rustc --version
+uname -a
+docker --version  # if using Docker
+</code></pre>
+</li>
+<li>
+<p>Include relevant configuration (sanitize sensitive data)</p>
+</li>
+<li>
+<p>Describe the expected vs actual behavior</p>
+</li>
+<li>
+<p>List steps to reproduce the issue</p>
+</li>
+</ol>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="development-setup"><a class="header" href="#development-setup">Development Setup</a></h1>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="client-sdk"><a class="header" href="#client-sdk">Client SDK</a></h1>
 <p>The Mitosis project contains a SDK library (named <code>netmito</code>) that you can use to create your own client programmatically.</p>
 <p>To use the SDK, add the following to your <code>Cargo.toml</code>:</p>
@@ -765,6 +1218,9 @@ let args = AdminCreateUserArgs {
 client.admin_create_user(args).await.unwrap();
 <span class="boring">}</span></code></pre>
 <p>For more details, please refer to the <a href="https://docs.rs/netmito">API documentation</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="http-endpoints"><a class="header" href="#http-endpoints">HTTP endpoints</a></h1>
+<p>We have provide users and developers with an OpenAPI specification of our http endpoints. You can find it in the root of our repository (<a href="https://github.com/stack-rs/mitosis/blob/main/openapi.yaml">openapi.yaml</a>) or access it online <a href="https://raw.githubusercontent.com/stack-rs/mitosis/refs/heads/main/openapi.yaml">herer with raw format</a>.</p>
+<p>You can just read the specification file to understand how to interact with our http endpoints, or you can use tools like <a href="https://swagger.io/tools/swagger-ui/">Swagger UI</a> or the online <a href="https://editor.swagger.io/">Swagger Editor</a> to interactively explore and test the API.</p>
 
                     </main>
 

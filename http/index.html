@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Client SDK - Mitosis Documentation</title>
+        <title>HTTP endpoints - Mitosis Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -88,7 +88,7 @@
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
             <div class="sidebar-scrollbox">
-                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../index.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="../guide/installation.html"><strong aria-hidden="true">1.</strong> Installation</a></li><li class="chapter-item expanded "><a href="../guide/coordinator.html"><strong aria-hidden="true">2.</strong> Running a Coordinator</a></li><li class="chapter-item expanded "><a href="../guide/worker.html"><strong aria-hidden="true">3.</strong> Running a Worker</a></li><li class="chapter-item expanded "><a href="../guide/client.html"><strong aria-hidden="true">4.</strong> Running a Client</a></li><li class="chapter-item expanded "><a href="../guide/architecture.html"><strong aria-hidden="true">5.</strong> Architecture Overview</a></li><li class="chapter-item expanded "><a href="../guide/troubleshooting.html"><strong aria-hidden="true">6.</strong> Troubleshooting</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="../guide/development.html"><strong aria-hidden="true">7.</strong> Development Setup</a></li><li class="chapter-item expanded affix "><li class="part-title">Reference Guide</li><li class="chapter-item expanded "><a href="../client/sdk.html" class="active"><strong aria-hidden="true">8.</strong> Client SDK</a></li><li class="chapter-item expanded "><a href="../http/index.html"><strong aria-hidden="true">9.</strong> HTTP endpoints</a></li></ol>
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../index.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="../guide/installation.html"><strong aria-hidden="true">1.</strong> Installation</a></li><li class="chapter-item expanded "><a href="../guide/coordinator.html"><strong aria-hidden="true">2.</strong> Running a Coordinator</a></li><li class="chapter-item expanded "><a href="../guide/worker.html"><strong aria-hidden="true">3.</strong> Running a Worker</a></li><li class="chapter-item expanded "><a href="../guide/client.html"><strong aria-hidden="true">4.</strong> Running a Client</a></li><li class="chapter-item expanded "><a href="../guide/architecture.html"><strong aria-hidden="true">5.</strong> Architecture Overview</a></li><li class="chapter-item expanded "><a href="../guide/troubleshooting.html"><strong aria-hidden="true">6.</strong> Troubleshooting</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="../guide/development.html"><strong aria-hidden="true">7.</strong> Development Setup</a></li><li class="chapter-item expanded affix "><li class="part-title">Reference Guide</li><li class="chapter-item expanded "><a href="../client/sdk.html"><strong aria-hidden="true">8.</strong> Client SDK</a></li><li class="chapter-item expanded "><a href="../http/index.html" class="active"><strong aria-hidden="true">9.</strong> HTTP endpoints</a></li></ol>
             </div>
             <div id="sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
@@ -150,7 +150,7 @@
                         <a href="https://github.com/stack-rs/mitosis/tree/master/guide" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/stack-rs/mitosis/edit/master/guide/src/client/sdk.md" title="Suggest an edit" aria-label="Suggest an edit">
+                        <a href="https://github.com/stack-rs/mitosis/edit/master/guide/src/http/README.md" title="Suggest an edit" aria-label="Suggest an edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -179,44 +179,18 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="client-sdk"><a class="header" href="#client-sdk">Client SDK</a></h1>
-<p>The Mitosis project contains a SDK library (named <code>netmito</code>) that you can use to create your own client programmatically.</p>
-<p>To use the SDK, add the following to your <code>Cargo.toml</code>:</p>
-<pre><code class="language-toml">[dependencies]
-netmito = "0.5"
-</code></pre>
-<p>Here is a simple example of how to create a new user using the SDK:</p>
-<pre><code class="language-rust ignore"><span class="boring">use netmito::client::MitoClient;
-</span><span class="boring">use netmito::config::client::{ClientConfig, AdminCreateUserArgs};
-</span><span class="boring">
-</span><span class="boring">#[tokio::main]
-</span><span class="boring">async fn main() {
-</span>// Create a new client configuration
-let config = ClientConfig::default();
-// Setup the client
-let mut client = MitoClient::new(config);
-// Fill up arguments for creating a new user
-let args = AdminCreateUserArgs {
-    username: Some("new_user".to_string()),
-    password: Some("new_password".to_string()),
-    admin: false,
-};
-// Create a new user
-client.admin_create_user(args).await.unwrap();
-<span class="boring">}</span></code></pre>
-<p>For more details, please refer to the <a href="https://docs.rs/netmito">API documentation</a>.</p>
+                        <h1 id="http-endpoints"><a class="header" href="#http-endpoints">HTTP endpoints</a></h1>
+<p>We have provide users and developers with an OpenAPI specification of our http endpoints. You can find it in the root of our repository (<a href="https://github.com/stack-rs/mitosis/blob/main/openapi.yaml">openapi.yaml</a>) or access it online <a href="https://raw.githubusercontent.com/stack-rs/mitosis/refs/heads/main/openapi.yaml">herer with raw format</a>.</p>
+<p>You can just read the specification file to understand how to interact with our http endpoints, or you can use tools like <a href="https://swagger.io/tools/swagger-ui/">Swagger UI</a> or the online <a href="https://editor.swagger.io/">Swagger Editor</a> to interactively explore and test the API.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../guide/development.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../client/sdk.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../http/index.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
-                                <i class="fa fa-angle-right"></i>
-                            </a>
 
                         <div style="clear: both"></div>
                     </nav>
@@ -224,13 +198,10 @@ client.admin_create_user(args).await.unwrap();
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../guide/development.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../client/sdk.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../http/index.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
-                        <i class="fa fa-angle-right"></i>
-                    </a>
             </nav>
 
         </div>

@@ -3,11 +3,44 @@ use redis::{
     aio::{MultiplexedConnection, PubSub},
     AsyncCommands, Commands, PubSubCommands, PushInfo,
 };
+#[cfg(feature = "crossfire-channel")]
+use std::ops::Deref;
+#[cfg(not(feature = "crossfire-channel"))]
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
 
 use crate::entity::state::TaskExecState;
 pub use redis::{ControlFlow, Msg};
+
+#[cfg(feature = "crossfire-channel")]
+pub struct UnboundedReceiver<T>(crossfire::AsyncRx<T>);
+
+#[cfg(feature = "crossfire-channel")]
+impl redis::aio::AsyncPushSender for UnboundedSender<PushInfo> {
+    fn send(&self, info: PushInfo) -> std::result::Result<(), redis::aio::SendError> {
+        self.0.send(info).map_err(|_| redis::aio::SendError)
+    }
+}
+
+#[cfg(feature = "crossfire-channel")]
+impl<T> Deref for UnboundedReceiver<T> {
+    type Target = crossfire::AsyncRx<T>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[cfg(feature = "crossfire-channel")]
+#[derive(Clone)]
+pub struct UnboundedSender<T>(crossfire::MTx<T>);
+
+#[cfg(feature = "crossfire-channel")]
+impl<T> Deref for UnboundedSender<T> {
+    type Target = crossfire::MTx<T>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 #[self_referencing]
 pub struct MitoRedisPubSubClient {
@@ -167,7 +200,13 @@ impl MitoAsyncRedisClient {
     }
 
     pub async fn get_resp3_pubsub(&mut self) -> crate::error::Result<AsyncPubSub> {
+        #[cfg(not(feature = "crossfire-channel"))]
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        #[cfg(feature = "crossfire-channel")]
+        let (tx, rx) = {
+            let (tx, rx) = crossfire::mpsc::unbounded_async();
+            (UnboundedSender(tx), UnboundedReceiver(rx))
+        };
         let config = redis::AsyncConnectionConfig::new().set_push_sender(tx.clone());
         let con = self
             .client

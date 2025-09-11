@@ -2,7 +2,9 @@ use std::{cmp::Reverse, time::Duration};
 
 use priority_queue::PriorityQueue;
 use sea_orm::prelude::*;
-use tokio::{sync::mpsc::UnboundedReceiver, time::Instant};
+#[cfg(not(feature = "crossfire-channel"))]
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{config::InfraPool, entity::workers as Worker};
@@ -14,7 +16,10 @@ pub struct HeartbeatQueue {
     cancel_token: CancellationToken,
     heartbeat_timeout: Duration,
     pool: InfraPool,
+    #[cfg(not(feature = "crossfire-channel"))]
     rx: UnboundedReceiver<HeartbeatOp>,
+    #[cfg(feature = "crossfire-channel")]
+    rx: crossfire::AsyncRx<HeartbeatOp>,
 }
 
 pub enum HeartbeatOp {
@@ -27,7 +32,8 @@ impl HeartbeatQueue {
         cancel_token: CancellationToken,
         heartbeat_timeout: Duration,
         pool: InfraPool,
-        rx: UnboundedReceiver<HeartbeatOp>,
+        #[cfg(not(feature = "crossfire-channel"))] rx: UnboundedReceiver<HeartbeatOp>,
+        #[cfg(feature = "crossfire-channel")] rx: crossfire::AsyncRx<HeartbeatOp>,
     ) -> Self {
         Self {
             workers: PriorityQueue::new(),
@@ -75,6 +81,7 @@ impl HeartbeatQueue {
 
     pub async fn run(&mut self) {
         let mut timeout_duration = self.heartbeat_timeout;
+        #[cfg(not(feature = "crossfire-channel"))]
         loop {
             tokio::select! {
                 biased;
@@ -82,6 +89,40 @@ impl HeartbeatQueue {
                     break;
                 }
                 op = self.rx.recv() => match op {
+                    None => {
+                        break;
+                    }
+                    Some(op) => {
+                        self.handle_op(op);
+                        timeout_duration = self
+                            .workers
+                            .peek()
+                            .map(|(_, r)| r.0 - Instant::now())
+                            .unwrap_or(self.heartbeat_timeout);
+                    }
+                },
+                _ = tokio::time::sleep(timeout_duration) => {
+                    if let Err(e) = self.handle_timeout().await {
+                        tracing::error!("handle timeout failed: {:?}", e);
+                        self.cancel_token.cancel();
+                        break;
+                    }
+                    timeout_duration = self
+                            .workers
+                            .peek()
+                            .map(|(_, r)| r.0 - Instant::now())
+                            .unwrap_or(self.heartbeat_timeout);
+                }
+            }
+        }
+        #[cfg(feature = "crossfire-channel")]
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => {
+                    break;
+                }
+                op = self.rx.recv() => match op.ok() {
                     None => {
                         break;
                     }

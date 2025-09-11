@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use priority_queue::PriorityQueue;
 
-use tokio::sync::{mpsc::UnboundedReceiver, oneshot::Sender};
+#[cfg(not(feature = "crossfire-channel"))]
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::oneshot::Sender;
 use tokio_util::sync::CancellationToken;
 
 // MARK: TaskDispatcher
@@ -12,7 +14,10 @@ pub struct TaskDispatcher {
     /// Every task is represented by a tuple of (task id, priority).
     pub workers: HashMap<i64, PriorityQueue<i64, i32>>,
     cancel_token: CancellationToken,
+    #[cfg(not(feature = "crossfire-channel"))]
     rx: UnboundedReceiver<TaskDispatcherOp>,
+    #[cfg(feature = "crossfire-channel")]
+    rx: crossfire::AsyncRx<TaskDispatcherOp>,
 }
 
 pub enum TaskDispatcherOp {
@@ -28,7 +33,11 @@ pub enum TaskDispatcherOp {
 }
 
 impl TaskDispatcher {
-    pub fn new(cancel_token: CancellationToken, rx: UnboundedReceiver<TaskDispatcherOp>) -> Self {
+    pub fn new(
+        cancel_token: CancellationToken,
+        #[cfg(not(feature = "crossfire-channel"))] rx: UnboundedReceiver<TaskDispatcherOp>,
+        #[cfg(feature = "crossfire-channel")] rx: crossfire::AsyncRx<TaskDispatcherOp>,
+    ) -> Self {
         Self {
             workers: HashMap::new(),
             cancel_token,
@@ -138,6 +147,7 @@ impl TaskDispatcher {
     }
 
     pub async fn run(&mut self) {
+        #[cfg(not(feature = "crossfire-channel"))]
         loop {
             tokio::select! {
                 biased;
@@ -145,6 +155,19 @@ impl TaskDispatcher {
                     break;
                 }
                 op = self.rx.recv() => if self.handle_op(op) {
+                    self.cancel_token.cancel();
+                    break;
+                }
+            }
+        }
+        #[cfg(feature = "crossfire-channel")]
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => {
+                    break;
+                }
+                op = self.rx.recv() => if self.handle_op(op.ok()) {
                     self.cancel_token.cancel();
                     break;
                 }

@@ -17,6 +17,7 @@ use redis::{acl::Rule, AsyncCommands};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use time::Duration;
+#[cfg(not(feature = "crossfire-channel"))]
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
@@ -197,7 +198,8 @@ impl CoordinatorConfig {
     pub fn build_worker_task_queue(
         &self,
         cancel_token: CancellationToken,
-        rx: UnboundedReceiver<TaskDispatcherOp>,
+        #[cfg(not(feature = "crossfire-channel"))] rx: UnboundedReceiver<TaskDispatcherOp>,
+        #[cfg(feature = "crossfire-channel")] rx: crossfire::AsyncRx<TaskDispatcherOp>,
     ) -> TaskDispatcher {
         TaskDispatcher::new(cancel_token, rx)
     }
@@ -206,7 +208,8 @@ impl CoordinatorConfig {
         &self,
         cancel_token: CancellationToken,
         pool: InfraPool,
-        rx: UnboundedReceiver<HeartbeatOp>,
+        #[cfg(not(feature = "crossfire-channel"))] rx: UnboundedReceiver<HeartbeatOp>,
+        #[cfg(feature = "crossfire-channel")] rx: crossfire::AsyncRx<HeartbeatOp>,
     ) -> HeartbeatQueue {
         HeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
     }
@@ -273,8 +276,18 @@ impl CoordinatorConfig {
 
     pub async fn build_infra_pool(
         &self,
-        worker_task_queue_tx: UnboundedSender<TaskDispatcherOp>,
-        worker_heartbeat_queue_tx: UnboundedSender<HeartbeatOp>,
+        #[cfg(not(feature = "crossfire-channel"))] worker_task_queue_tx: UnboundedSender<
+            TaskDispatcherOp,
+        >,
+        #[cfg(feature = "crossfire-channel")] worker_task_queue_tx: crossfire::MTx<
+            TaskDispatcherOp,
+        >,
+        #[cfg(not(feature = "crossfire-channel"))] worker_heartbeat_queue_tx: UnboundedSender<
+            HeartbeatOp,
+        >,
+        #[cfg(feature = "crossfire-channel")] worker_heartbeat_queue_tx: crossfire::MTx<
+            HeartbeatOp,
+        >,
     ) -> crate::error::Result<InfraPool> {
         let db = sea_orm::Database::connect(&self.db_url).await?;
         let credential = Credentials::new(
@@ -399,8 +412,14 @@ impl CoordinatorConfig {
 pub struct InfraPool {
     pub db: DatabaseConnection,
     pub s3: S3Client,
+    #[cfg(not(feature = "crossfire-channel"))]
     pub worker_task_queue_tx: UnboundedSender<TaskDispatcherOp>,
+    #[cfg(feature = "crossfire-channel")]
+    pub worker_task_queue_tx: crossfire::MTx<TaskDispatcherOp>,
+    #[cfg(not(feature = "crossfire-channel"))]
     pub worker_heartbeat_queue_tx: UnboundedSender<HeartbeatOp>,
+    #[cfg(feature = "crossfire-channel")]
+    pub worker_heartbeat_queue_tx: crossfire::MTx<HeartbeatOp>,
 }
 
 #[derive(Debug)]

@@ -7,7 +7,7 @@ use std::{
 };
 
 pub use heartbeat::{HeartbeatOp, HeartbeatQueue};
-pub use queue::{TaskDispatcher, TaskDispatcherOp};
+pub use queue::{BalanceStrategy, ScheduleMode, TaskDispatcher, TaskDispatcherOp};
 
 use sea_orm::{
     prelude::*,
@@ -146,6 +146,97 @@ pub async fn restore_workers(pool: &InfraPool) -> crate::error::Result<()> {
     Ok(())
 }
 
+/// Seeds all Ready tasks to eligible workers in Balanced mode.
+/// This ensures existing Ready tasks are queued after coordinator startup.
+pub async fn seed_ready_tasks_for_balanced_mode(pool: &InfraPool) -> crate::error::Result<()> {
+    // Only seed in Balanced mode
+    if !matches!(&pool.schedule_mode, ScheduleMode::Balanced(_)) {
+        return Ok(());
+    }
+
+    tracing::info!("Seeding Ready tasks for Balanced mode");
+
+    // Query all Ready tasks with their metadata
+    #[derive(Debug, Clone, FromQueryResult)]
+    struct ReadyTaskForSeeding {
+        id: i64,
+        priority: i32,
+        group_id: i64,
+        tags: Vec<String>,
+    }
+
+    let ready_tasks: Vec<ReadyTaskForSeeding> =
+        ReadyTaskForSeeding::find_by_statement(sea_orm::Statement::from_sql_and_values(
+            pool.db.get_database_backend(),
+            r#"
+                SELECT id, priority, group_id, tags 
+                FROM active_tasks 
+                WHERE state = $1 AND assigned_worker IS NULL
+            "#,
+            [TaskState::Ready.into()],
+        ))
+        .all(&pool.db)
+        .await?;
+
+    tracing::info!("Found {} Ready tasks to seed", ready_tasks.len());
+
+    // For each Ready task, find candidates and enqueue to one worker
+    for task in ready_tasks {
+        let builder = pool.db.get_database_backend();
+        let candidates_stmt = Query::select()
+            .column((Worker::Entity, Worker::Column::Id))
+            .from(Worker::Entity)
+            .join(
+                sea_orm::JoinType::Join,
+                GroupWorker::Entity,
+                Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId))
+                    .eq(Expr::col((Worker::Entity, Worker::Column::Id))),
+            )
+            .and_where(
+                Expr::col((GroupWorker::Entity, GroupWorker::Column::GroupId)).eq(task.group_id),
+            )
+            .and_where(
+                Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).eq(PgFunc::any(vec![
+                    GroupWorkerRole::Write,
+                    GroupWorkerRole::Admin,
+                ])),
+            )
+            .and_where(Expr::col((Worker::Entity, Worker::Column::Tags)).contains(task.tags))
+            .to_owned();
+
+        let candidates: Vec<super::task::PartialWorkerId> =
+            super::task::PartialWorkerId::find_by_statement(builder.build(&candidates_stmt))
+                .all(&pool.db)
+                .await?;
+
+        if !candidates.is_empty() {
+            let op = TaskDispatcherOp::EnqueueCandidates {
+                candidates: candidates.into_iter().map(i64::from).collect(),
+                task_id: task.id,
+                priority: task.priority,
+            };
+
+            if let Err(_) = pool.worker_task_queue_tx.send(op) {
+                tracing::error!(
+                    "Failed to seed task {} during balanced mode startup",
+                    task.id
+                );
+                return Err(Error::Custom(
+                    "send enqueue candidates failed during seeding".to_string(),
+                ));
+            }
+        } else {
+            tracing::warn!(
+                "No eligible workers found for task {} during seeding",
+                task.id
+            );
+        }
+    }
+
+    tracing::info!("Completed seeding Ready tasks for Balanced mode");
+    Ok(())
+}
+
 async fn setup_worker_queues(
     pool: &InfraPool,
     id: i64,
@@ -163,40 +254,53 @@ async fn setup_worker_queues(
         Err(Error::Custom("send register worker failed".to_string()))
     } else {
         // Add tasks from active_tasks to worker_task_queue
-        let builder = pool.db.get_database_backend();
-        let tasks_stmt = Query::select()
-            .columns([
-                (ActiveTask::Entity, ActiveTask::Column::Id),
-                (ActiveTask::Entity, ActiveTask::Column::Priority),
-            ])
-            .from(ActiveTask::Entity)
-            .join(
-                sea_orm::JoinType::Join,
-                GroupWorker::Entity,
-                Expr::col((ActiveTask::Entity, ActiveTask::Column::GroupId)).eq(Expr::col((
-                    GroupWorker::Entity,
-                    GroupWorker::Column::GroupId,
-                ))),
-            )
-            .join(
-                sea_orm::JoinType::Join,
-                Worker::Entity,
-                Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId))
-                    .eq(Expr::col((Worker::Entity, Worker::Column::Id))),
-            )
-            .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId)).eq(id))
-            .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).gt(0))
-            .and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::Tags)).contained(tags))
-            .to_owned();
-        let tasks: Vec<PartialActiveTask> =
-            PartialActiveTask::find_by_statement(builder.build(&tasks_stmt))
-                .all(&pool.db)
-                .await?;
-        let op = TaskDispatcherOp::AddTasks(id, tasks.into_iter().map(Into::into).collect());
-        if pool.worker_task_queue_tx.send(op).is_err() {
-            Err(Error::Custom("send add tasks failed".to_string()))
-        } else {
-            Ok(())
+        // Skip backfill in Balanced mode to avoid duplicating tasks across queues
+        match &pool.schedule_mode {
+            ScheduleMode::Balanced(_) => {
+                tracing::debug!("Skipping backfill for worker {} in Balanced mode", id);
+                Ok(())
+            }
+            ScheduleMode::Fanout => {
+                let builder = pool.db.get_database_backend();
+                let tasks_stmt = Query::select()
+                    .columns([
+                        (ActiveTask::Entity, ActiveTask::Column::Id),
+                        (ActiveTask::Entity, ActiveTask::Column::Priority),
+                    ])
+                    .from(ActiveTask::Entity)
+                    .join(
+                        sea_orm::JoinType::Join,
+                        GroupWorker::Entity,
+                        Expr::col((ActiveTask::Entity, ActiveTask::Column::GroupId)).eq(Expr::col(
+                            (GroupWorker::Entity, GroupWorker::Column::GroupId),
+                        )),
+                    )
+                    .join(
+                        sea_orm::JoinType::Join,
+                        Worker::Entity,
+                        Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId))
+                            .eq(Expr::col((Worker::Entity, Worker::Column::Id))),
+                    )
+                    .and_where(
+                        Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId)).eq(id),
+                    )
+                    .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).gt(0))
+                    .and_where(
+                        Expr::col((ActiveTask::Entity, ActiveTask::Column::Tags)).contained(tags),
+                    )
+                    .to_owned();
+                let tasks: Vec<PartialActiveTask> =
+                    PartialActiveTask::find_by_statement(builder.build(&tasks_stmt))
+                        .all(&pool.db)
+                        .await?;
+                let op =
+                    TaskDispatcherOp::AddTasks(id, tasks.into_iter().map(Into::into).collect());
+                if pool.worker_task_queue_tx.send(op).is_err() {
+                    Err(Error::Custom("send add tasks failed".to_string()))
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 }
@@ -224,6 +328,19 @@ async fn remove_worker(worker: Worker::Model, pool: &InfraPool) -> crate::error:
             ..Default::default()
         };
         let task = task.update(&pool.db).await?;
+
+        // Acknowledge task completion (worker removal) for load balancing
+        if pool
+            .worker_task_queue_tx
+            .send(TaskDispatcherOp::AckFinished(worker.id, task_id))
+            .is_err()
+        {
+            tracing::warn!(
+                "Failed to send AckFinished for reset task {} from removed worker {}",
+                task_id,
+                worker.id
+            );
+        }
         // Batch add task to worker task queues
         let builder = pool.db.get_database_backend();
         let tasks_stmt = Query::select()
@@ -245,11 +362,11 @@ async fn remove_worker(worker: Worker::Model, pool: &InfraPool) -> crate::error:
             super::task::PartialWorkerId::find_by_statement(builder.build(&tasks_stmt))
                 .all(&pool.db)
                 .await?;
-        let op = TaskDispatcherOp::BatchAddTask(
-            workers.into_iter().map(i64::from).collect(),
-            task.id,
-            task.priority,
-        );
+        let op = TaskDispatcherOp::EnqueueCandidates {
+            candidates: workers.into_iter().map(i64::from).collect(),
+            task_id: task.id,
+            priority: task.priority,
+        };
         if pool.worker_task_queue_tx.send(op).is_err() {
             return Err(Error::Custom("send batch add task op failed".to_string()));
         }
@@ -525,6 +642,32 @@ pub async fn fetch_task(
                             ..Default::default()
                         };
                         worker.update(&pool.db).await?;
+
+                        // Early removal: immediately send RemoveTask to purge from other queues
+                        if pool
+                            .worker_task_queue_tx
+                            .send(TaskDispatcherOp::RemoveTask(task.id))
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                "Failed to send RemoveTask for task {} after assignment",
+                                task.id
+                            );
+                        }
+
+                        // Acknowledge assignment for load balancing
+                        if pool
+                            .worker_task_queue_tx
+                            .send(TaskDispatcherOp::AckAssigned(worker_id, task.id))
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                "Failed to send AckAssigned for task {} to worker {}",
+                                task.id,
+                                worker_id
+                            );
+                        }
+
                         let spec: TaskSpec = serde_json::from_value(task.spec)?;
                         let task_resp = WorkerTaskResp {
                             id: task.id,
@@ -569,6 +712,19 @@ pub async fn report_task(
                 ..Default::default()
             };
             task.update(&pool.db).await?;
+
+            // Acknowledge task completion for load balancing
+            if pool
+                .worker_task_queue_tx
+                .send(TaskDispatcherOp::AckFinished(worker_id, task_id))
+                .is_err()
+            {
+                tracing::warn!(
+                    "Failed to send AckFinished for task {} from worker {}",
+                    task_id,
+                    worker_id
+                );
+            }
         }
         ReportTaskOp::Cancel => {
             tracing::debug!("Worker {} cancel task {}", worker_id, task_id);
@@ -579,6 +735,19 @@ pub async fn report_task(
                 ..Default::default()
             };
             task.update(&pool.db).await?;
+
+            // Acknowledge task cancellation for load balancing
+            if pool
+                .worker_task_queue_tx
+                .send(TaskDispatcherOp::AckFinished(worker_id, task_id))
+                .is_err()
+            {
+                tracing::warn!(
+                    "Failed to send AckFinished for cancelled task {} from worker {}",
+                    task_id,
+                    worker_id
+                );
+            }
         }
         ReportTaskOp::Commit(res) => {
             tracing::debug!("Worker {} commit task {}", worker_id, task_id);

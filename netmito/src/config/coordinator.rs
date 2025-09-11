@@ -23,7 +23,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use crate::{
     error::Error,
-    service::worker::{HeartbeatOp, HeartbeatQueue, TaskDispatcher, TaskDispatcherOp},
+    service::worker::{
+        BalanceStrategy, HeartbeatOp, HeartbeatQueue, ScheduleMode, TaskDispatcher,
+        TaskDispatcherOp,
+    },
 };
 
 use super::TracingGuard;
@@ -57,6 +60,10 @@ pub struct CoordinatorConfig {
     pub(crate) heartbeat_timeout: std::time::Duration,
     pub(crate) log_path: Option<RelativePathBuf>,
     pub(crate) file_log: bool,
+    #[serde(default)]
+    pub(crate) task_schedule_mode: Option<String>,
+    #[serde(default)]
+    pub(crate) task_balance_strategy: Option<String>,
 }
 
 fn default_mitosis_region() -> String {
@@ -145,6 +152,14 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "<&bool>::not")]
     pub file_log: bool,
+    /// Task scheduling mode: "fanout" or "balanced"
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub task_schedule_mode: Option<String>,
+    /// Task balance strategy: "least-queue" or "round-robin" (when mode is balanced)
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub task_balance_strategy: Option<String>,
 }
 
 impl Default for CoordinatorConfig {
@@ -169,6 +184,8 @@ impl Default for CoordinatorConfig {
             heartbeat_timeout: std::time::Duration::from_secs(600),
             log_path: None,
             file_log: false,
+            task_schedule_mode: None,
+            task_balance_strategy: None,
         }
     }
 }
@@ -199,7 +216,33 @@ impl CoordinatorConfig {
         cancel_token: CancellationToken,
         rx: UnboundedReceiver<TaskDispatcherOp>,
     ) -> TaskDispatcher {
-        TaskDispatcher::new(cancel_token, rx)
+        let mode = self.parse_schedule_mode();
+        TaskDispatcher::new(cancel_token, rx, mode)
+    }
+
+    fn parse_schedule_mode(&self) -> ScheduleMode {
+        match self.task_schedule_mode.as_deref() {
+            Some("fanout") | Some("Fanout") => ScheduleMode::Fanout,
+            Some("balanced") | Some("Balanced") => {
+                let strategy = match self.task_balance_strategy.as_deref() {
+                    Some("least-queue") | None => BalanceStrategy::LeastQueue,
+                    Some("round-robin") => BalanceStrategy::RoundRobin,
+                    _ => {
+                        tracing::warn!(
+                            "Unknown balance strategy '{}', defaulting to least-queue",
+                            self.task_balance_strategy.as_deref().unwrap_or("")
+                        );
+                        BalanceStrategy::LeastQueue
+                    }
+                };
+                ScheduleMode::Balanced(strategy)
+            }
+            Some(unknown) => {
+                tracing::warn!("Unknown schedule mode '{}', defaulting to fanout", unknown);
+                ScheduleMode::Fanout
+            }
+            None => ScheduleMode::Fanout,
+        }
     }
 
     pub fn build_worker_heartbeat_queue(
@@ -296,6 +339,7 @@ impl CoordinatorConfig {
             s3,
             worker_task_queue_tx,
             worker_heartbeat_queue_tx,
+            schedule_mode: self.parse_schedule_mode(),
         })
     }
 
@@ -401,6 +445,7 @@ pub struct InfraPool {
     pub s3: S3Client,
     pub worker_task_queue_tx: UnboundedSender<TaskDispatcherOp>,
     pub worker_heartbeat_queue_tx: UnboundedSender<HeartbeatOp>,
+    pub schedule_mode: ScheduleMode,
 }
 
 #[derive(Debug)]

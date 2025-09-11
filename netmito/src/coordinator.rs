@@ -9,7 +9,9 @@ use crate::api::router;
 use crate::config::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 use crate::migration::{Migrator, MigratorTrait};
 use crate::service::s3::{setup_buckets, ARTIFACTS_BUCKET, ATTACHMENTS_BUCKET};
-use crate::service::worker::{restore_workers, HeartbeatQueue, TaskDispatcher};
+use crate::service::worker::{
+    restore_workers, seed_ready_tasks_for_balanced_mode, HeartbeatQueue, TaskDispatcher,
+};
 use crate::signal::shutdown_signal;
 
 pub struct MitoCoordinator {
@@ -146,6 +148,9 @@ impl MitoCoordinator {
         } = self;
         let task_queue_hd = tokio::spawn(async move { worker_task_queue.run().await });
         let heartbeat_hd = tokio::spawn(async move { worker_heartbeat_queue.run().await });
+
+        // Seed Ready tasks for balanced mode before restoring workers
+        seed_ready_tasks_for_balanced_mode(&infra_pool).await?;
         restore_workers(&infra_pool).await?;
         let app = router(infra_pool, cancel_token.clone());
         let addr = crate::config::SERVER_CONFIG

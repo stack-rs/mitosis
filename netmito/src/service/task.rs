@@ -116,13 +116,13 @@ pub async fn user_submit_task(
         PartialWorkerId::find_by_statement(builder.build(&tasks_stmt))
             .all(&pool.db)
             .await?;
-    let op = TaskDispatcherOp::BatchAddTask(
-        workers.into_iter().map(i64::from).collect(),
-        task.id,
-        task.priority,
-    );
+    let op = TaskDispatcherOp::EnqueueCandidates {
+        candidates: workers.into_iter().map(i64::from).collect(),
+        task_id: task.id,
+        priority: task.priority,
+    };
     if pool.worker_task_queue_tx.send(op).is_err() {
-        Err(Error::Custom("send batch add task failed".to_string()))
+        Err(Error::Custom("send enqueue candidates failed".to_string()))
     } else {
         Ok(SubmitTaskResp {
             task_id: task.task_id,
@@ -223,13 +223,15 @@ pub async fn user_change_task(
     if pool.worker_task_queue_tx.send(op).is_err() {
         return Err(Error::Custom("send remove task op failed".to_string()));
     }
-    let op = TaskDispatcherOp::BatchAddTask(
-        workers.into_iter().map(i64::from).collect(),
-        task.id,
-        task.priority,
-    );
+    let op = TaskDispatcherOp::EnqueueCandidates {
+        candidates: workers.into_iter().map(i64::from).collect(),
+        task_id: task.id,
+        priority: task.priority,
+    };
     if pool.worker_task_queue_tx.send(op).is_err() {
-        Err(Error::Custom("send batch add task op failed".to_string()))
+        Err(Error::Custom(
+            "send enqueue candidates op failed".to_string(),
+        ))
     } else {
         Ok(())
     }

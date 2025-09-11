@@ -202,7 +202,7 @@ impl MigrationTrait for Migration {
             "idx_attachments_group_id",
         ];
 
-        for index_name in indices.iter() {
+        for index_name in indices.iter().rev() {
             manager
                 .drop_index(sea_query::Index::drop().name(*index_name).to_owned())
                 .await

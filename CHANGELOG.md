@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0](https://github.com/stack-rs/mitosis/compare/mito-v0.5.3...mito-v0.6.0) - 2025-09-11
+
+### Features
+
+- *(api)* Support labels of worker - ([72a123a](https://github.com/stack-rs/mitosis/commit/72a123a746d12ad56642be69e1102248aa063e93))
+- *(api)* Comply endpoints to OpenAPI spec - ([4ed5ef0](https://github.com/stack-rs/mitosis/commit/4ed5ef074243e584af0b0d803fa5cf3752cf0bca))
+- *(db)* Add database query indices for performance - ([51eb073](https://github.com/stack-rs/mitosis/commit/51eb0734d5a1b74cc54c8560b521b6d2f687d850))
+- *(db)* Add database performance indices - ([b482224](https://github.com/stack-rs/mitosis/commit/b482224a07a21132a852b6d0440bf9f94fe71d70))
+- Support different underlying unbounded channels - ([b87bada](https://github.com/stack-rs/mitosis/commit/b87badae86ae21d9f3326331900911263e26d154))
+
+### Documentation
+
+- *(guide)* Update key concepts and usage guide - ([784938b](https://github.com/stack-rs/mitosis/commit/784938b24dcbedbcb94729804c1561ecb160c074))
+- *(spec)* Add current OpenAPI specification - ([d222a08](https://github.com/stack-rs/mitosis/commit/d222a0886b2b83c16e85cc521e4249f009996c5e))
+
+
 ## [0.5.3](https://github.com/stack-rs/mitosis/compare/mito-v0.5.2...mito-v0.5.3) - 2025-09-03
 
 ### Features

@@ -19,7 +19,7 @@ info:
     - `/admin` - Administrative operations (admin users only)
     - `/health` - Service health check
     - `/redis` - Redis connection information
-  version: 0.5.3
+  version: 0.6.0
   contact:
     name: Mitosis
     url: https://github.com/stack-rs/mitosis

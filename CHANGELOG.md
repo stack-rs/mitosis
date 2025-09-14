@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.1](https://github.com/stack-rs/mitosis/compare/mito-v0.6.0...mito-v0.6.1) - 2025-09-14
+
+### Features
+
+- *(main)* Add entrypoint for manager - ([8465879](https://github.com/stack-rs/mitosis/commit/8465879a1b3ab1c53c8993bf14a94b71c00d522b))
+
+
 ## [0.6.0](https://github.com/stack-rs/mitosis/compare/mito-v0.5.3...mito-v0.6.0) - 2025-09-11
 
 ### Features

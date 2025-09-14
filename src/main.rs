@@ -2,8 +2,9 @@ use crate::build::CLAP_LONG_VERSION;
 use clap::{Parser, Subcommand};
 use netmito::{
     client::MitoClient,
-    config::{ClientConfigCli, CoordinatorConfigCli, WorkerConfigCli},
+    config::{ClientConfigCli, CoordinatorConfigCli, ManagerConfigCli, WorkerConfigCli},
     coordinator::MitoCoordinator,
+    manager::MitoManager,
     worker::MitoWorker,
 };
 use shadow_rs::shadow;
@@ -27,6 +28,8 @@ enum Mode {
     Worker(WorkerConfigCli),
     /// Run a mitosis client.
     Client(ClientConfigCli),
+    /// Manage mitosis workers.
+    Manager(ManagerConfigCli),
 }
 
 fn main() {
@@ -57,6 +60,15 @@ fn main() {
                 .unwrap()
                 .block_on(async {
                     MitoClient::main(client_cli).await;
+                });
+        }
+        Mode::Manager(manager_cli) => {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    MitoManager::main(manager_cli).await;
                 });
         }
     }

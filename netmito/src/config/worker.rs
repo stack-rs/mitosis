@@ -37,7 +37,7 @@ pub struct WorkerConfig {
     pub(crate) skip_redis: bool,
 }
 
-#[derive(Args, Debug, Serialize, Default)]
+#[derive(Args, Debug, Serialize, Default, Clone)]
 #[command(rename_all = "kebab-case")]
 pub struct WorkerConfigCli {
     /// The path of the config file
@@ -181,7 +181,7 @@ impl WorkerConfig {
                     "log path not valid and cache directory not found",
                 ))))?;
             let (non_blocking, guard) = tracing_appender::non_blocking(file_logger);
-            let env_filter = tracing_subscriber::EnvFilter::try_from_env("MITO_FILE_LOG")
+            let env_filter = tracing_subscriber::EnvFilter::try_from_env("MITO_FILE_LOG_LEVEL")
                 .unwrap_or_else(|_| "netmito=info".into());
             let coordinator_guard = tracing_subscriber::registry()
                 .with(

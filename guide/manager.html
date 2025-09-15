@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Client SDK - Mitosis Documentation</title>
+        <title>Managing multiple Workers - Mitosis Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -88,7 +88,7 @@
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
             <div class="sidebar-scrollbox">
-                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../index.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="../guide/installation.html"><strong aria-hidden="true">1.</strong> Installation</a></li><li class="chapter-item expanded "><a href="../guide/coordinator.html"><strong aria-hidden="true">2.</strong> Running a Coordinator</a></li><li class="chapter-item expanded "><a href="../guide/worker.html"><strong aria-hidden="true">3.</strong> Running a Worker</a></li><li class="chapter-item expanded "><a href="../guide/client.html"><strong aria-hidden="true">4.</strong> Running a Client</a></li><li class="chapter-item expanded "><a href="../guide/manager.html"><strong aria-hidden="true">5.</strong> Managing multiple Workers</a></li><li class="chapter-item expanded "><a href="../guide/architecture.html"><strong aria-hidden="true">6.</strong> Architecture Overview</a></li><li class="chapter-item expanded "><a href="../guide/troubleshooting.html"><strong aria-hidden="true">7.</strong> Troubleshooting</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="../guide/development.html"><strong aria-hidden="true">8.</strong> Development Setup</a></li><li class="chapter-item expanded affix "><li class="part-title">Reference Guide</li><li class="chapter-item expanded "><a href="../client/sdk.html" class="active"><strong aria-hidden="true">9.</strong> Client SDK</a></li><li class="chapter-item expanded "><a href="../http/index.html"><strong aria-hidden="true">10.</strong> HTTP endpoints</a></li></ol>
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../index.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="../guide/installation.html"><strong aria-hidden="true">1.</strong> Installation</a></li><li class="chapter-item expanded "><a href="../guide/coordinator.html"><strong aria-hidden="true">2.</strong> Running a Coordinator</a></li><li class="chapter-item expanded "><a href="../guide/worker.html"><strong aria-hidden="true">3.</strong> Running a Worker</a></li><li class="chapter-item expanded "><a href="../guide/client.html"><strong aria-hidden="true">4.</strong> Running a Client</a></li><li class="chapter-item expanded "><a href="../guide/manager.html" class="active"><strong aria-hidden="true">5.</strong> Managing multiple Workers</a></li><li class="chapter-item expanded "><a href="../guide/architecture.html"><strong aria-hidden="true">6.</strong> Architecture Overview</a></li><li class="chapter-item expanded "><a href="../guide/troubleshooting.html"><strong aria-hidden="true">7.</strong> Troubleshooting</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="../guide/development.html"><strong aria-hidden="true">8.</strong> Development Setup</a></li><li class="chapter-item expanded affix "><li class="part-title">Reference Guide</li><li class="chapter-item expanded "><a href="../client/sdk.html"><strong aria-hidden="true">9.</strong> Client SDK</a></li><li class="chapter-item expanded "><a href="../http/index.html"><strong aria-hidden="true">10.</strong> HTTP endpoints</a></li></ol>
             </div>
             <div id="sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
@@ -150,7 +150,7 @@
                         <a href="https://github.com/stack-rs/mitosis/tree/master/guide" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/stack-rs/mitosis/edit/master/guide/src/client/sdk.md" title="Suggest an edit" aria-label="Suggest an edit">
+                        <a href="https://github.com/stack-rs/mitosis/edit/master/guide/src/guide/manager.md" title="Suggest an edit" aria-label="Suggest an edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -179,42 +179,116 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="client-sdk"><a class="header" href="#client-sdk">Client SDK</a></h1>
-<p>The Mitosis project contains a SDK library (named <code>netmito</code>) that you can use to create your own client programmatically.</p>
-<p>To use the SDK, add the following to your <code>Cargo.toml</code>:</p>
-<pre><code class="language-toml">[dependencies]
-netmito = "0.5"
+                        <h1 id="use-manager-to-manage-multiple-workers"><a class="header" href="#use-manager-to-manage-multiple-workers">Use Manager to manage multiple workers</a></h1>
+<p>The Manager provides a convenient way to manage multiple Workers from a single command interface. It allows you to spawn, monitor, and terminate Workers efficiently.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>The manager component is designed to handle worker lifecycle management, including:</p>
+<ul>
+<li><strong>Status monitoring</strong>: Check the status of all running workers</li>
+<li><strong>Worker spawning</strong>: Launch multiple workers with configurable parameters</li>
+<li><strong>Worker termination</strong>: Kill all running workers at once</li>
+</ul>
+<h2 id="commands"><a class="header" href="#commands">Commands</a></h2>
+<h3 id="status"><a class="header" href="#status">Status</a></h3>
+<p>Check the status of all running workers:</p>
+<pre><code class="language-bash">mito manager status
 </code></pre>
-<p>Here is a simple example of how to create a new user using the SDK:</p>
-<pre><code class="language-rust ignore"><span class="boring">use netmito::client::MitoClient;
-</span><span class="boring">use netmito::config::client::{ClientConfig, AdminCreateUserArgs};
-</span><span class="boring">
-</span><span class="boring">#[tokio::main]
-</span><span class="boring">async fn main() {
-</span>// Create a new client configuration
-let config = ClientConfig::default();
-// Setup the client
-let mut client = MitoClient::new(config);
-// Fill up arguments for creating a new user
-let args = AdminCreateUserArgs {
-    username: Some("new_user".to_string()),
-    password: Some("new_password".to_string()),
-    admin: false,
-};
-// Create a new user
-client.admin_create_user(args).await.unwrap();
-<span class="boring">}</span></code></pre>
-<p>For more details, please refer to the <a href="https://docs.rs/netmito">API documentation</a>.</p>
+<p>This command:</p>
+<ul>
+<li>Lists all currently running <code>mito worker</code> processes</li>
+<li>Shows detailed process information (PID, CPU usage, memory, etc.)</li>
+<li>Displays the total count of active workers</li>
+</ul>
+<h3 id="spawn-workers"><a class="header" href="#spawn-workers">Spawn Workers</a></h3>
+<p>Launch multiple worker processes:</p>
+<pre><code class="language-bash">mito manager spawn &lt;count&gt; [worker-options]
+</code></pre>
+<ul>
+<li><code>count</code>: Number of workers to spawn (must be greater than 0)</li>
+<li><code>worker-options</code> All available worker options can be passed to the spawn command.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash"># Spawn 5 workers with default configuration
+mito manager spawn 5
+
+# Spawn 3 workers with custom coordinator and tags
+mito manager spawn 3 --coordinator "127.0.0.1:5000" --tags "gpu,cuda"
+
+# Spawn workers with specific groups and file logging
+mito manager spawn 2 --groups "batch-processing" --file-log --log-path "/var/log/mito"
+</code></pre>
+<p><strong>Spawning Process:</strong></p>
+<ul>
+<li>Shows a progress bar during worker creation</li>
+<li>Workers are spawned as detached processes (background execution)</li>
+<li>Each worker runs independently with its own process ID</li>
+<li>After spawning, displays the current total count of running workers</li>
+</ul>
+<h3 id="kill-workers"><a class="header" href="#kill-workers">Kill Workers</a></h3>
+<p>Terminate all running worker processes:</p>
+<pre><code class="language-bash">mito manager kill
+</code></pre>
+<p>This command:</p>
+<ul>
+<li>Finds all processes matching <code>mito worker</code></li>
+<li>Terminates them using <code>pkill</code></li>
+<li>Confirms successful termination or reports if no workers were found</li>
+</ul>
+<h2 id="environment-variables"><a class="header" href="#environment-variables">Environment Variables</a></h2>
+<p>When spawning workers, the manager automatically sets:</p>
+<ul>
+<li><code>NO_COLOR=1</code>: Disables colored output for consistent logging</li>
+<li><code>MITO_FILE_LOG_LEVEL</code>: Controls file logging level, if will inherit the current environment variable value and default to <code>info</code> if not set</li>
+</ul>
+<h2 id="best-practices"><a class="header" href="#best-practices">Best Practices</a></h2>
+<ol>
+<li><strong>Monitor before spawning</strong>: Always check current worker status before spawning new ones</li>
+<li><strong>Resource awareness</strong>: Consider system resources when spawning multiple workers</li>
+<li><strong>Configuration consistency</strong>: Use consistent worker configurations across spawned instances</li>
+<li><strong>Logging strategy</strong>: Enable file logging for persistent worker logs</li>
+</ol>
+<h2 id="example-workflow"><a class="header" href="#example-workflow">Example Workflow</a></h2>
+<pre><code class="language-bash"># Check current worker status
+mito manager status
+
+# Spawn 4 workers with GPU tags for ML workloads
+mito manager spawn 4 --tags "gpu,ml" --groups "training" --file-log
+
+# Monitor status after spawning
+mito manager status
+
+# When done, terminate all workers
+mito manager kill
+</code></pre>
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<p><strong>No workers showing in status:</strong></p>
+<ul>
+<li>Ensure workers are properly spawned</li>
+<li>Check if coordinator is running and accessible</li>
+<li>Verify worker configuration parameters</li>
+</ul>
+<p><strong>Failed to spawn workers:</strong></p>
+<ul>
+<li>Check system resources (memory, CPU)</li>
+<li>Verify coordinator connectivity</li>
+<li>Ensure proper permissions for process creation</li>
+</ul>
+<p><strong>Workers not terminating:</strong></p>
+<ul>
+<li>Check for zombie processes: <code>ps -aux | grep mito</code></li>
+<li>Force kill if necessary: <code>sudo pkill -9 -f "mito worker"</code></li>
+<li>Restart the manager if processes are stuck</li>
+</ul>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../guide/development.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../guide/client.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../http/index.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../guide/architecture.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -224,11 +298,11 @@ client.admin_create_user(args).await.unwrap();
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../guide/development.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../guide/client.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../http/index.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../guide/architecture.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

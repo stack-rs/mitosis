@@ -89,7 +89,7 @@
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
             <div class="sidebar-scrollbox">
-                <ol class="chapter"><li class="chapter-item expanded affix "><a href="index.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="guide/installation.html"><strong aria-hidden="true">1.</strong> Installation</a></li><li class="chapter-item expanded "><a href="guide/coordinator.html"><strong aria-hidden="true">2.</strong> Running a Coordinator</a></li><li class="chapter-item expanded "><a href="guide/worker.html"><strong aria-hidden="true">3.</strong> Running a Worker</a></li><li class="chapter-item expanded "><a href="guide/client.html"><strong aria-hidden="true">4.</strong> Running a Client</a></li><li class="chapter-item expanded "><a href="guide/architecture.html"><strong aria-hidden="true">5.</strong> Architecture Overview</a></li><li class="chapter-item expanded "><a href="guide/troubleshooting.html"><strong aria-hidden="true">6.</strong> Troubleshooting</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="guide/development.html"><strong aria-hidden="true">7.</strong> Development Setup</a></li><li class="chapter-item expanded affix "><li class="part-title">Reference Guide</li><li class="chapter-item expanded "><a href="client/sdk.html"><strong aria-hidden="true">8.</strong> Client SDK</a></li><li class="chapter-item expanded "><a href="http/index.html"><strong aria-hidden="true">9.</strong> HTTP endpoints</a></li></ol>
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="index.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="guide/installation.html"><strong aria-hidden="true">1.</strong> Installation</a></li><li class="chapter-item expanded "><a href="guide/coordinator.html"><strong aria-hidden="true">2.</strong> Running a Coordinator</a></li><li class="chapter-item expanded "><a href="guide/worker.html"><strong aria-hidden="true">3.</strong> Running a Worker</a></li><li class="chapter-item expanded "><a href="guide/client.html"><strong aria-hidden="true">4.</strong> Running a Client</a></li><li class="chapter-item expanded "><a href="guide/manager.html"><strong aria-hidden="true">5.</strong> Managing multiple Workers</a></li><li class="chapter-item expanded "><a href="guide/architecture.html"><strong aria-hidden="true">6.</strong> Architecture Overview</a></li><li class="chapter-item expanded "><a href="guide/troubleshooting.html"><strong aria-hidden="true">7.</strong> Troubleshooting</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="guide/development.html"><strong aria-hidden="true">8.</strong> Development Setup</a></li><li class="chapter-item expanded affix "><li class="part-title">Reference Guide</li><li class="chapter-item expanded "><a href="client/sdk.html"><strong aria-hidden="true">9.</strong> Client SDK</a></li><li class="chapter-item expanded "><a href="http/index.html"><strong aria-hidden="true">10.</strong> HTTP endpoints</a></li></ol>
             </div>
             <div id="sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
@@ -210,7 +210,7 @@ The archive contains an <code>mito</code> executable which you can run to start 
 <pre><code class="language-bash">curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/latest/download/mito-installer.sh | sh
 </code></pre>
 <p><strong>For a specific version</strong> (adjust version number as needed, found at <a href="https://github.com/stack-rs/mitosis/releases">releases</a> page):</p>
-<pre><code class="language-bash">curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.5.3/mito-installer.sh | sh
+<pre><code class="language-bash">curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.6.0/mito-installer.sh | sh
 </code></pre>
 <p>The installer script will:</p>
 <ul>
@@ -403,6 +403,17 @@ Options:
 <p>A Worker is a process that executes tasks.
 It is responsible for fetching tasks from the Coordinator, executing them, and reporting the results back to the Coordinator.
 The Worker is a long-running process that is typically deployed as a service.</p>
+<h2 id="environment-inside-a-worker"><a class="header" href="#environment-inside-a-worker">Environment inside a Worker</a></h2>
+<p>Before starting a Worker, we need to understand the environment inside a Worker.</p>
+<p>The Worker will spawn a new process for each task it runs and set up the following environment variables:</p>
+<ul>
+<li><code>MITO_TASK_UUID</code>: This will be set to the UUID of the task being executed.</li>
+<li><code>MITO_NEW_TASK</code>: This will be set to the path a file where you can write a new task specification (i.e., SubmitTaskReq) in json format for the Worker to submit it on behalf of you, as a downstream task of the current task.</li>
+<li><code>MITO_UPSTREAM_TASK_UUID</code>: This will be set to the UUID of the upstream task if the current task is submitted by another task while running.</li>
+<li><code>MITO_RESOURCE_DIR</code>: This will be set to the path of a directory where you can find the resources (i.e., attachments) of the task.</li>
+<li><code>MITO_RESULT_DIR</code>: This will be set to the path of a directory where you can store the results of the task. The Worker will pack the directory and upload it as the artifacts of the task if it is not empty.</li>
+<li><code>MITO_EXEC_DIR</code>: This will be set to the path of a directory where you can store execution logs. The Worker will pack the directory and upload it as the artifacts of the task if it is not empty.</li>
+</ul>
 <h2 id="starting-a-worker"><a class="header" href="#starting-a-worker">Starting a Worker</a></h2>
 <p>To start a Worker, you need to provide a TOML file that configures the Worker.
 The TOML file specifies the Worker's configuration, such as the polling (fetching) interval, the URL of the Coordinator, and the the groups allowed to submit tasks to it.
@@ -763,6 +774,106 @@ Options:
 <p>We can use this sub-command to run an external command. For example, to list files in the current directory, we can run:</p>
 <pre><code>cmd -- ls -hal
 </code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="use-manager-to-manage-multiple-workers"><a class="header" href="#use-manager-to-manage-multiple-workers">Use Manager to manage multiple workers</a></h1>
+<p>The Manager provides a convenient way to manage multiple Workers from a single command interface. It allows you to spawn, monitor, and terminate Workers efficiently.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>The manager component is designed to handle worker lifecycle management, including:</p>
+<ul>
+<li><strong>Status monitoring</strong>: Check the status of all running workers</li>
+<li><strong>Worker spawning</strong>: Launch multiple workers with configurable parameters</li>
+<li><strong>Worker termination</strong>: Kill all running workers at once</li>
+</ul>
+<h2 id="commands"><a class="header" href="#commands">Commands</a></h2>
+<h3 id="status"><a class="header" href="#status">Status</a></h3>
+<p>Check the status of all running workers:</p>
+<pre><code class="language-bash">mito manager status
+</code></pre>
+<p>This command:</p>
+<ul>
+<li>Lists all currently running <code>mito worker</code> processes</li>
+<li>Shows detailed process information (PID, CPU usage, memory, etc.)</li>
+<li>Displays the total count of active workers</li>
+</ul>
+<h3 id="spawn-workers"><a class="header" href="#spawn-workers">Spawn Workers</a></h3>
+<p>Launch multiple worker processes:</p>
+<pre><code class="language-bash">mito manager spawn &lt;count&gt; [worker-options]
+</code></pre>
+<ul>
+<li><code>count</code>: Number of workers to spawn (must be greater than 0)</li>
+<li><code>worker-options</code> All available worker options can be passed to the spawn command.</li>
+</ul>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash"># Spawn 5 workers with default configuration
+mito manager spawn 5
+
+# Spawn 3 workers with custom coordinator and tags
+mito manager spawn 3 --coordinator "127.0.0.1:5000" --tags "gpu,cuda"
+
+# Spawn workers with specific groups and file logging
+mito manager spawn 2 --groups "batch-processing" --file-log --log-path "/var/log/mito"
+</code></pre>
+<p><strong>Spawning Process:</strong></p>
+<ul>
+<li>Shows a progress bar during worker creation</li>
+<li>Workers are spawned as detached processes (background execution)</li>
+<li>Each worker runs independently with its own process ID</li>
+<li>After spawning, displays the current total count of running workers</li>
+</ul>
+<h3 id="kill-workers"><a class="header" href="#kill-workers">Kill Workers</a></h3>
+<p>Terminate all running worker processes:</p>
+<pre><code class="language-bash">mito manager kill
+</code></pre>
+<p>This command:</p>
+<ul>
+<li>Finds all processes matching <code>mito worker</code></li>
+<li>Terminates them using <code>pkill</code></li>
+<li>Confirms successful termination or reports if no workers were found</li>
+</ul>
+<h2 id="environment-variables"><a class="header" href="#environment-variables">Environment Variables</a></h2>
+<p>When spawning workers, the manager automatically sets:</p>
+<ul>
+<li><code>NO_COLOR=1</code>: Disables colored output for consistent logging</li>
+<li><code>MITO_FILE_LOG_LEVEL</code>: Controls file logging level, if will inherit the current environment variable value and default to <code>info</code> if not set</li>
+</ul>
+<h2 id="best-practices"><a class="header" href="#best-practices">Best Practices</a></h2>
+<ol>
+<li><strong>Monitor before spawning</strong>: Always check current worker status before spawning new ones</li>
+<li><strong>Resource awareness</strong>: Consider system resources when spawning multiple workers</li>
+<li><strong>Configuration consistency</strong>: Use consistent worker configurations across spawned instances</li>
+<li><strong>Logging strategy</strong>: Enable file logging for persistent worker logs</li>
+</ol>
+<h2 id="example-workflow"><a class="header" href="#example-workflow">Example Workflow</a></h2>
+<pre><code class="language-bash"># Check current worker status
+mito manager status
+
+# Spawn 4 workers with GPU tags for ML workloads
+mito manager spawn 4 --tags "gpu,ml" --groups "training" --file-log
+
+# Monitor status after spawning
+mito manager status
+
+# When done, terminate all workers
+mito manager kill
+</code></pre>
+<h2 id="troubleshooting"><a class="header" href="#troubleshooting">Troubleshooting</a></h2>
+<p><strong>No workers showing in status:</strong></p>
+<ul>
+<li>Ensure workers are properly spawned</li>
+<li>Check if coordinator is running and accessible</li>
+<li>Verify worker configuration parameters</li>
+</ul>
+<p><strong>Failed to spawn workers:</strong></p>
+<ul>
+<li>Check system resources (memory, CPU)</li>
+<li>Verify coordinator connectivity</li>
+<li>Ensure proper permissions for process creation</li>
+</ul>
+<p><strong>Workers not terminating:</strong></p>
+<ul>
+<li>Check for zombie processes: <code>ps -aux | grep mito</code></li>
+<li>Force kill if necessary: <code>sudo pkill -9 -f "mito worker"</code></li>
+<li>Restart the manager if processes are stuck</li>
+</ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="architecture-overview"><a class="header" href="#architecture-overview">Architecture Overview</a></h1>
 <p>This document provides a comprehensive overview of Mitosis's architecture, components, and data flow.</p>
 <h2 id="system-components"><a class="header" href="#system-components">System Components</a></h2>

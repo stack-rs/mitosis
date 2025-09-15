@@ -8,6 +8,7 @@
 - [Running a Coordinator](guide/coordinator.md)
 - [Running a Worker](guide/worker.md)
 - [Running a Client](guide/client.md)
+- [Managing multiple Workers](guide/manager.md)
 - [Architecture Overview](guide/architecture.md)
 - [Troubleshooting](guide/troubleshooting.md)
 

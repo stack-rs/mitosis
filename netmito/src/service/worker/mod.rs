@@ -24,15 +24,15 @@ use crate::{
         active_tasks as ActiveTask, archived_tasks as ArchivedTask, group_worker as GroupWorker,
         groups as Group,
         role::{GroupWorkerRole, UserGroupRole},
-        state::{TaskState, WorkerState},
+        state::{TaskState, UserState, WorkerState},
         user_group as UserGroup, users as User, workers as Worker, StoredTaskModel,
     },
-    error::{ApiError, Error},
+    error::{ApiError, AuthError, Error},
     schema::{
         CountQuery, RawWorkerQueryInfo, ReportTaskOp, TaskSpec, WorkerQueryInfo, WorkerQueryResp,
         WorkerShutdownOp, WorkerTaskResp, WorkersQueryReq, WorkersQueryResp,
     },
-    service::s3::group_upload_artifact,
+    service::{self, s3::group_upload_artifact},
 };
 
 pub async fn register_worker(
@@ -530,6 +530,7 @@ pub async fn fetch_task(
                             id: task.id,
                             uuid: task.uuid,
                             timeout: std::time::Duration::from_secs(task.timeout as u64),
+                            upstream_task_uuid: task.upstream_task_uuid,
                             spec,
                         };
                         break Ok(Some(task_resp));
@@ -580,6 +581,69 @@ pub async fn report_task(
             };
             task.update(&pool.db).await?;
         }
+        ReportTaskOp::Submit(req) => {
+            let req = *req;
+            tracing::debug!(
+                "Worker {} with task {} spawn a new task",
+                worker_id,
+                task_id
+            );
+            if task.state != TaskState::Finished && task.state != TaskState::Cancelled {
+                return Err(
+                    ApiError::InvalidRequest("Task can not spawn new tasks".to_string()).into(),
+                );
+            }
+            // Check user states to see if new task can be submitted
+            let user = User::Entity::find()
+                .filter(User::Column::Id.eq(task.creator_id))
+                .one(&pool.db)
+                .await
+                .map_err(|_| AuthError::WrongCredentials)?
+                .ok_or(AuthError::WrongCredentials)?;
+            if user.state != UserState::Active {
+                return Err(AuthError::PermissionDenied.into());
+            }
+            // Load group information to verify group name matches
+            let group = Group::Entity::find_by_id(task.group_id)
+                .one(&pool.db)
+                .await?
+                .ok_or(ApiError::NotFound("Group not found".to_string()))?;
+            if req.group_name != group.group_name {
+                return Err(ApiError::InvalidRequest(format!(
+                    "Group name mismatch: expected '{}', got '{}'",
+                    group.group_name, req.group_name
+                ))
+                .into());
+            }
+            // Verify worker has permission to access this group
+            GroupWorker::Entity::find()
+                .filter(GroupWorker::Column::WorkerId.eq(worker_id))
+                .filter(GroupWorker::Column::GroupId.eq(task.group_id))
+                .filter(GroupWorker::Column::Role.gt(GroupWorkerRole::Read))
+                .one(&pool.db)
+                .await?
+                .ok_or(ApiError::AuthError(
+                    crate::error::AuthError::PermissionDenied,
+                ))?;
+            let resp =
+                service::task::worker_submit_pending_task(pool, task.creator_id, task.uuid, req)
+                    .await
+                    .map_err(|e| match e {
+                        crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+                        crate::error::Error::ApiError(e) => e,
+                        _ => {
+                            tracing::error!("{}", e);
+                            ApiError::InternalServerError
+                        }
+                    })?;
+            let task = ActiveTask::ActiveModel {
+                id: Set(task_id),
+                updated_at: Set(now),
+                downstream_task_uuid: Set(Some(resp.uuid)),
+                ..Default::default()
+            };
+            task.update(&pool.db).await?;
+        }
         ReportTaskOp::Commit(res) => {
             tracing::debug!("Worker {} commit task {}", worker_id, task_id);
             if task.state != TaskState::Finished && task.state != TaskState::Cancelled {
@@ -605,6 +669,8 @@ pub async fn report_task(
                 priority: Set(task.priority),
                 spec: Set(task.spec),
                 result: Set(Some(result)),
+                upstream_task_uuid: Set(task.upstream_task_uuid),
+                downstream_task_uuid: Set(task.downstream_task_uuid),
             };
             let worker = Worker::ActiveModel {
                 id: Set(worker_id),
@@ -635,6 +701,9 @@ pub async fn report_task(
                 .await?;
             let _ = remove_task(task_id, pool)
                 .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
+            if let Some(uuid) = task.downstream_task_uuid {
+                service::task::worker_trigger_pending_task(pool, uuid).await?;
+            }
             // Worker was requested to gracefully shutdown
             if matches!(worker_state, WorkerState::GracefulShutdown)
                 && (pool

@@ -102,6 +102,12 @@ pub(crate) fn output_parsed_task_info(info: &ParsedTaskQueryInfo) {
     } else {
         tracing::info!("Task Result: None");
     }
+    if let Some(upstream_task_uuid) = info.upstream_task_uuid {
+        tracing::info!("Upstream Task UUID: {}", upstream_task_uuid);
+    }
+    if let Some(downstream_task_uuid) = info.downstream_task_uuid {
+        tracing::info!("Downstream Task UUID: {:?}", downstream_task_uuid);
+    }
 }
 
 pub(crate) fn output_task_info(info: &TaskQueryInfo) {
@@ -127,6 +133,12 @@ pub(crate) fn output_task_info(info: &TaskQueryInfo) {
         tracing::info!("Task Result: {}", result);
     } else {
         tracing::info!("Task Result: None");
+    }
+    if let Some(upstream_task_uuid) = info.upstream_task_uuid {
+        tracing::info!("Upstream Task UUID: {}", upstream_task_uuid);
+    }
+    if let Some(downstream_task_uuid) = info.downstream_task_uuid {
+        tracing::info!("Downstream Task UUID: {:?}", downstream_task_uuid);
     }
 }
 

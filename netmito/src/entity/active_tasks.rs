@@ -24,6 +24,8 @@ pub struct Model {
     pub priority: i32,
     pub spec: Json,
     pub result: Option<Json>,
+    pub upstream_task_uuid: Option<Uuid>,
+    pub downstream_task_uuid: Option<Uuid>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -78,6 +80,8 @@ impl From<Model> for super::archived_tasks::Model {
             priority: task.priority,
             spec: task.spec,
             result: task.result,
+            upstream_task_uuid: task.upstream_task_uuid,
+            downstream_task_uuid: task.downstream_task_uuid,
         }
     }
 }

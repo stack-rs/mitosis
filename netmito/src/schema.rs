@@ -124,6 +124,7 @@ pub struct WorkerTaskResp {
     pub uuid: Uuid,
     #[serde(with = "humantime_serde")]
     pub timeout: std::time::Duration,
+    pub upstream_task_uuid: Option<Uuid>,
     pub spec: TaskSpec,
 }
 
@@ -137,6 +138,7 @@ pub struct ReportTaskReq {
 pub enum ReportTaskOp {
     Finish,
     Cancel,
+    Submit(Box<SubmitTaskReq>),
     Commit(TaskResultSpec),
     Upload {
         content_type: ArtifactContentType,
@@ -218,6 +220,7 @@ pub enum TaskResultMessage {
     WatchTimeout,
     // May record the user name who cancels the task.
     UserCancellation,
+    SubmitNewTaskFailed,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -243,6 +246,8 @@ pub struct TaskQueryInfo {
     pub priority: i32,
     pub spec: serde_json::Value,
     pub result: Option<serde_json::Value>,
+    pub upstream_task_uuid: Option<Uuid>,
+    pub downstream_task_uuid: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -260,6 +265,8 @@ pub struct ParsedTaskQueryInfo {
     pub priority: i32,
     pub spec: TaskSpec,
     pub result: Option<TaskResultSpec>,
+    pub upstream_task_uuid: Option<Uuid>,
+    pub downstream_task_uuid: Option<Uuid>,
 }
 
 /// Each field in the query request is optional, and the server will return all tasks if no field is specified.

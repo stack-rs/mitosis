@@ -14,7 +14,7 @@ use crate::{config::InfraPool, schema::TaskSpec};
 
 use crate::{
     entity::{
-        active_tasks as ActiveTask, archived_tasks as ArchivedTasks, artifacts as Artifact,
+        active_tasks as ActiveTasks, archived_tasks as ArchivedTasks, artifacts as Artifact,
         group_worker as GroupWorker, groups as Group, user_group as UserGroup, users as User,
         workers as Worker,
     },
@@ -74,7 +74,7 @@ pub async fn user_submit_task(
     let uuid = Uuid::new_v4();
     check_task_spec(&task_spec)?;
     let spec = serde_json::to_value(task_spec)?;
-    let task = ActiveTask::ActiveModel {
+    let task = ActiveTasks::ActiveModel {
         creator_id: Set(creator_id),
         group_id: Set(group_id),
         task_id: Set(task_id),
@@ -95,7 +95,7 @@ pub async fn user_submit_task(
     // Batch add task to worker task queues
     let builder = pool.db.get_database_backend();
     let tasks_stmt = Query::select()
-        .column((Worker::Entity, ActiveTask::Column::Id))
+        .column((Worker::Entity, ActiveTasks::Column::Id))
         .from(Worker::Entity)
         .join(
             sea_orm::JoinType::Join,
@@ -131,6 +131,117 @@ pub async fn user_submit_task(
     }
 }
 
+pub async fn worker_submit_pending_task(
+    pool: &InfraPool,
+    creator_id: i64,
+    upstream_task_uuid: Uuid,
+    SubmitTaskReq {
+        group_name,
+        tags,
+        labels,
+        timeout,
+        priority,
+        task_spec,
+    }: SubmitTaskReq,
+) -> crate::error::Result<SubmitTaskResp> {
+    let tags = Vec::from_iter(tags);
+    let labels = Vec::from_iter(labels);
+    let now = TimeDateTimeWithTimeZone::now_utc();
+    let group = Group::Entity::update_many()
+        .col_expr(
+            Group::Column::TaskCount,
+            Expr::col(Group::Column::TaskCount).add(1),
+        )
+        .col_expr(Group::Column::UpdatedAt, Expr::value(now))
+        .filter(Group::Column::GroupName.eq(&group_name))
+        .exec_with_returning(&pool.db)
+        .await?;
+    if group.is_empty() {
+        return Err(Error::ApiError(crate::error::ApiError::NotFound(format!(
+            "User or group with name {group_name}"
+        ))));
+    }
+    let group = group.into_iter().next().unwrap();
+    let group_id = group.id;
+    let task_id = group.task_count;
+    let uuid = Uuid::new_v4();
+    check_task_spec(&task_spec)?;
+    let spec = serde_json::to_value(task_spec)?;
+    let task = ActiveTasks::ActiveModel {
+        creator_id: Set(creator_id),
+        group_id: Set(group_id),
+        task_id: Set(task_id),
+        uuid: Set(uuid),
+        tags: Set(tags),
+        labels: Set(labels),
+        created_at: Set(now),
+        updated_at: Set(now),
+        state: Set(crate::entity::state::TaskState::Pending),
+        assigned_worker: Set(None),
+        timeout: Set(timeout.as_secs() as i64),
+        priority: Set(priority),
+        spec: Set(spec),
+        result: Set(None),
+        upstream_task_uuid: Set(Some(upstream_task_uuid)),
+        ..Default::default()
+    };
+    let task = task.insert(&pool.db).await?;
+    Ok(SubmitTaskResp {
+        task_id: task.task_id,
+        uuid: task.uuid,
+    })
+}
+
+pub async fn worker_trigger_pending_task(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<()> {
+    tracing::debug!("Trigger pending task {uuid}");
+    let task = ActiveTasks::Entity::find()
+        .filter(ActiveTasks::Column::Uuid.eq(uuid))
+        .filter(ActiveTasks::Column::State.eq(TaskState::Pending))
+        .one(&pool.db)
+        .await?
+        .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
+            "Pending task with uuid {uuid}"
+        ))))?;
+    let mut task: ActiveTasks::ActiveModel = task.into();
+    task.state = Set(TaskState::Ready);
+    task.updated_at = Set(TimeDateTimeWithTimeZone::now_utc());
+    let task = task.update(&pool.db).await?;
+    // Batch add task to worker task queues
+    let builder = pool.db.get_database_backend();
+    let tasks_stmt = Query::select()
+        .column((Worker::Entity, ActiveTasks::Column::Id))
+        .from(Worker::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            GroupWorker::Entity,
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId))
+                .eq(Expr::col((Worker::Entity, Worker::Column::Id))),
+        )
+        .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::GroupId)).eq(task.group_id))
+        .and_where(
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).eq(PgFunc::any(vec![
+                GroupWorkerRole::Write,
+                GroupWorkerRole::Admin,
+            ])),
+        )
+        .and_where(Expr::col((Worker::Entity, Worker::Column::Tags)).contains(task.tags))
+        .to_owned();
+    let workers: Vec<PartialWorkerId> =
+        PartialWorkerId::find_by_statement(builder.build(&tasks_stmt))
+            .all(&pool.db)
+            .await?;
+    let op = TaskDispatcherOp::BatchAddTask(
+        workers.into_iter().map(i64::from).collect(),
+        task.id,
+        task.priority,
+    );
+    if pool.worker_task_queue_tx.send(op).is_err() {
+        Err(Error::Custom("send batch add task failed".to_string()))
+    } else {
+        Ok(())
+    }
+}
+
 pub async fn user_change_task(
     pool: &InfraPool,
     user_id: i64,
@@ -149,11 +260,11 @@ pub async fn user_change_task(
     }
     let task = pool
         .db
-        .transaction::<_, ActiveTask::Model, crate::error::Error>(|txn| {
+        .transaction::<_, ActiveTasks::Model, crate::error::Error>(|txn| {
             Box::pin(async move {
-                let task = ActiveTask::Entity::find()
-                    .filter(ActiveTask::Column::Uuid.eq(uuid))
-                    .filter(ActiveTask::Column::State.eq(TaskState::Ready))
+                let task = ActiveTasks::Entity::find()
+                    .filter(ActiveTasks::Column::Uuid.eq(uuid))
+                    .filter(ActiveTasks::Column::State.eq(TaskState::Ready))
                     .one(txn)
                     .await?
                     .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
@@ -173,7 +284,7 @@ pub async fn user_change_task(
                         return Err(Error::AuthError(crate::error::AuthError::PermissionDenied));
                     }
                 }
-                let mut task: ActiveTask::ActiveModel = task.into();
+                let mut task: ActiveTasks::ActiveModel = task.into();
                 let now = TimeDateTimeWithTimeZone::now_utc();
                 task.updated_at = Set(now);
                 if let Some(tags) = tags {
@@ -198,7 +309,7 @@ pub async fn user_change_task(
         .await?;
     let builder = pool.db.get_database_backend();
     let tasks_stmt = Query::select()
-        .column((Worker::Entity, ActiveTask::Column::Id))
+        .column((Worker::Entity, ActiveTasks::Column::Id))
         .from(Worker::Entity)
         .join(
             sea_orm::JoinType::Join,
@@ -245,8 +356,8 @@ pub async fn user_change_task_labels(
     pool.db
         .transaction::<_, (), crate::error::Error>(|txn| {
             Box::pin(async move {
-                let task = ActiveTask::Entity::find()
-                    .filter(ActiveTask::Column::Uuid.eq(uuid))
+                let task = ActiveTasks::Entity::find()
+                    .filter(ActiveTasks::Column::Uuid.eq(uuid))
                     .one(txn)
                     .await?;
                 if let Some(task) = task {
@@ -266,7 +377,7 @@ pub async fn user_change_task_labels(
                             ));
                         }
                     }
-                    let mut task: ActiveTask::ActiveModel = task.into();
+                    let mut task: ActiveTasks::ActiveModel = task.into();
                     let now = TimeDateTimeWithTimeZone::now_utc();
                     task.updated_at = Set(now);
                     task.labels = Set(labels);
@@ -317,9 +428,9 @@ pub async fn user_cancel_task(
         .db
         .transaction::<_, i64, crate::error::Error>(|txn| {
             Box::pin(async move {
-                let task = ActiveTask::Entity::find()
-                    .filter(ActiveTask::Column::Uuid.eq(uuid))
-                    .filter(ActiveTask::Column::State.eq(TaskState::Ready))
+                let task = ActiveTasks::Entity::find()
+                    .filter(ActiveTasks::Column::Uuid.eq(uuid))
+                    .filter(ActiveTasks::Column::State.eq(TaskState::Ready))
                     .one(txn)
                     .await?
                     .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
@@ -361,9 +472,11 @@ pub async fn user_cancel_task(
                     priority: Set(task.priority),
                     spec: Set(task.spec),
                     result: Set(Some(result)),
+                    upstream_task_uuid: Set(task.upstream_task_uuid),
+                    downstream_task_uuid: Set(task.downstream_task_uuid),
                 };
                 archived_task.insert(txn).await?;
-                ActiveTask::Entity::delete_by_id(task.id).exec(txn).await?;
+                ActiveTasks::Entity::delete_by_id(task.id).exec(txn).await?;
                 Ok(task.id)
             })
         })
@@ -376,17 +489,19 @@ pub async fn user_cancel_task(
 pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<TaskQueryResp> {
     let active_task_stmt = Query::select()
         .columns([
-            (ActiveTask::Entity, ActiveTask::Column::Uuid),
-            (ActiveTask::Entity, ActiveTask::Column::TaskId),
-            (ActiveTask::Entity, ActiveTask::Column::Tags),
-            (ActiveTask::Entity, ActiveTask::Column::Labels),
-            (ActiveTask::Entity, ActiveTask::Column::CreatedAt),
-            (ActiveTask::Entity, ActiveTask::Column::UpdatedAt),
-            (ActiveTask::Entity, ActiveTask::Column::State),
-            (ActiveTask::Entity, ActiveTask::Column::Timeout),
-            (ActiveTask::Entity, ActiveTask::Column::Priority),
-            (ActiveTask::Entity, ActiveTask::Column::Spec),
-            (ActiveTask::Entity, ActiveTask::Column::Result),
+            (ActiveTasks::Entity, ActiveTasks::Column::Uuid),
+            (ActiveTasks::Entity, ActiveTasks::Column::TaskId),
+            (ActiveTasks::Entity, ActiveTasks::Column::Tags),
+            (ActiveTasks::Entity, ActiveTasks::Column::Labels),
+            (ActiveTasks::Entity, ActiveTasks::Column::CreatedAt),
+            (ActiveTasks::Entity, ActiveTasks::Column::UpdatedAt),
+            (ActiveTasks::Entity, ActiveTasks::Column::State),
+            (ActiveTasks::Entity, ActiveTasks::Column::Timeout),
+            (ActiveTasks::Entity, ActiveTasks::Column::Priority),
+            (ActiveTasks::Entity, ActiveTasks::Column::Spec),
+            (ActiveTasks::Entity, ActiveTasks::Column::Result),
+            (ActiveTasks::Entity, ActiveTasks::Column::UpstreamTaskUuid),
+            (ActiveTasks::Entity, ActiveTasks::Column::DownstreamTaskUuid),
         ])
         .expr_as(
             Expr::col((User::Entity, User::Column::Username)),
@@ -396,22 +511,22 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             Expr::col((Group::Entity, Group::Column::GroupName)),
             Alias::new("group_name"),
         )
-        .from(ActiveTask::Entity)
+        .from(ActiveTasks::Entity)
         .join(
             sea_orm::JoinType::Join,
             User::Entity,
             Expr::col((User::Entity, User::Column::Id)).eq(Expr::col((
-                ActiveTask::Entity,
-                ActiveTask::Column::CreatorId,
+                ActiveTasks::Entity,
+                ActiveTasks::Column::CreatorId,
             ))),
         )
         .join(
             sea_orm::JoinType::Join,
             Group::Entity,
-            Expr::col((ActiveTask::Entity, ActiveTask::Column::GroupId))
+            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
         )
-        .and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::Uuid)).eq(uuid))
+        .and_where(Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Uuid)).eq(uuid))
         .limit(1)
         .to_owned();
     let archive_task_stmt = Query::select()
@@ -427,6 +542,14 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             (ArchivedTasks::Entity, ArchivedTasks::Column::Priority),
             (ArchivedTasks::Entity, ArchivedTasks::Column::Spec),
             (ArchivedTasks::Entity, ArchivedTasks::Column::Result),
+            (
+                ArchivedTasks::Entity,
+                ArchivedTasks::Column::UpstreamTaskUuid,
+            ),
+            (
+                ArchivedTasks::Entity,
+                ArchivedTasks::Column::DownstreamTaskUuid,
+            ),
         ])
         .expr_as(
             Expr::col((User::Entity, User::Column::Username)),
@@ -490,6 +613,8 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
         priority: info.priority,
         spec: serde_json::from_value(info.spec)?,
         result: info.result.map(serde_json::from_value).transpose()?,
+        upstream_task_uuid: info.upstream_task_uuid,
+        downstream_task_uuid: info.downstream_task_uuid,
     };
     Ok(TaskQueryResp { info, artifacts })
 }
@@ -609,21 +734,23 @@ pub async fn query_tasks_by_filter(
     check_task_list_query(user_id, pool, &mut query).await?;
     let mut active_stmt = Query::select();
     if query.count {
-        active_stmt.expr(Expr::col((ActiveTask::Entity, ActiveTask::Column::Uuid)).count());
+        active_stmt.expr(Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Uuid)).count());
     } else {
         active_stmt
             .columns([
-                (ActiveTask::Entity, ActiveTask::Column::Uuid),
-                (ActiveTask::Entity, ActiveTask::Column::TaskId),
-                (ActiveTask::Entity, ActiveTask::Column::Tags),
-                (ActiveTask::Entity, ActiveTask::Column::Labels),
-                (ActiveTask::Entity, ActiveTask::Column::CreatedAt),
-                (ActiveTask::Entity, ActiveTask::Column::UpdatedAt),
-                (ActiveTask::Entity, ActiveTask::Column::State),
-                (ActiveTask::Entity, ActiveTask::Column::Timeout),
-                (ActiveTask::Entity, ActiveTask::Column::Priority),
-                (ActiveTask::Entity, ActiveTask::Column::Spec),
-                (ActiveTask::Entity, ActiveTask::Column::Result),
+                (ActiveTasks::Entity, ActiveTasks::Column::Uuid),
+                (ActiveTasks::Entity, ActiveTasks::Column::TaskId),
+                (ActiveTasks::Entity, ActiveTasks::Column::Tags),
+                (ActiveTasks::Entity, ActiveTasks::Column::Labels),
+                (ActiveTasks::Entity, ActiveTasks::Column::CreatedAt),
+                (ActiveTasks::Entity, ActiveTasks::Column::UpdatedAt),
+                (ActiveTasks::Entity, ActiveTasks::Column::State),
+                (ActiveTasks::Entity, ActiveTasks::Column::Timeout),
+                (ActiveTasks::Entity, ActiveTasks::Column::Priority),
+                (ActiveTasks::Entity, ActiveTasks::Column::Spec),
+                (ActiveTasks::Entity, ActiveTasks::Column::Result),
+                (ActiveTasks::Entity, ActiveTasks::Column::UpstreamTaskUuid),
+                (ActiveTasks::Entity, ActiveTasks::Column::DownstreamTaskUuid),
             ])
             .expr_as(
                 Expr::col((User::Entity, User::Column::Username)),
@@ -635,19 +762,19 @@ pub async fn query_tasks_by_filter(
             );
     }
     active_stmt
-        .from(ActiveTask::Entity)
+        .from(ActiveTasks::Entity)
         .join(
             sea_orm::JoinType::Join,
             User::Entity,
             Expr::col((User::Entity, User::Column::Id)).eq(Expr::col((
-                ActiveTask::Entity,
-                ActiveTask::Column::CreatorId,
+                ActiveTasks::Entity,
+                ActiveTasks::Column::CreatorId,
             ))),
         )
         .join(
             sea_orm::JoinType::Join,
             Group::Entity,
-            Expr::col((ActiveTask::Entity, ActiveTask::Column::GroupId))
+            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
         );
     let mut archive_stmt = Query::select();
@@ -667,6 +794,14 @@ pub async fn query_tasks_by_filter(
                 (ArchivedTasks::Entity, ArchivedTasks::Column::Priority),
                 (ArchivedTasks::Entity, ArchivedTasks::Column::Spec),
                 (ArchivedTasks::Entity, ArchivedTasks::Column::Result),
+                (
+                    ArchivedTasks::Entity,
+                    ArchivedTasks::Column::UpstreamTaskUuid,
+                ),
+                (
+                    ArchivedTasks::Entity,
+                    ArchivedTasks::Column::DownstreamTaskUuid,
+                ),
             ])
             .expr_as(
                 Expr::col((User::Entity, User::Column::Username)),
@@ -712,7 +847,7 @@ pub async fn query_tasks_by_filter(
     if let Some(tags) = query.tags {
         let tags = Vec::from_iter(tags);
         active_stmt.and_where(
-            Expr::col((ActiveTask::Entity, ActiveTask::Column::Tags)).contains(tags.clone()),
+            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Tags)).contains(tags.clone()),
         );
         archive_stmt.and_where(
             Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Tags)).contains(tags),
@@ -721,7 +856,7 @@ pub async fn query_tasks_by_filter(
     if let Some(labels) = query.labels {
         let labels = Vec::from_iter(labels);
         active_stmt.and_where(
-            Expr::col((ActiveTask::Entity, ActiveTask::Column::Labels)).contains(labels.clone()),
+            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Labels)).contains(labels.clone()),
         );
         archive_stmt.and_where(
             Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Labels)).contains(labels),
@@ -730,7 +865,7 @@ pub async fn query_tasks_by_filter(
     if let Some(states) = query.states {
         let states = Vec::from_iter(states);
         active_stmt.and_where(
-            Expr::col((ActiveTask::Entity, ActiveTask::Column::State))
+            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::State))
                 .eq(PgFunc::any(states.clone())),
         );
         archive_stmt.and_where(
@@ -743,7 +878,7 @@ pub async fn query_tasks_by_filter(
         match op {
             OperatorWithNumber::Eq(e) => {
                 active_stmt.and_where(
-                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Result))
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
                         .cast_json_field("exit_status")
                         .eq(e.to_string()),
                 );
@@ -755,7 +890,7 @@ pub async fn query_tasks_by_filter(
             }
             OperatorWithNumber::Neq(e) => {
                 active_stmt.and_where(
-                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Result))
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
                         .cast_json_field("exit_status")
                         .ne(e.to_string()),
                 );
@@ -767,7 +902,7 @@ pub async fn query_tasks_by_filter(
             }
             OperatorWithNumber::Gt(e) => {
                 active_stmt.and_where(
-                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Result))
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
                         .cast_json_field("exit_status")
                         .gt(e.to_string()),
                 );
@@ -779,7 +914,7 @@ pub async fn query_tasks_by_filter(
             }
             OperatorWithNumber::Gte(e) => {
                 active_stmt.and_where(
-                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Result))
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
                         .cast_json_field("exit_status")
                         .gte(e.to_string()),
                 );
@@ -791,7 +926,7 @@ pub async fn query_tasks_by_filter(
             }
             OperatorWithNumber::Lt(e) => {
                 active_stmt.and_where(
-                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Result))
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
                         .cast_json_field("exit_status")
                         .lt(e.to_string()),
                 );
@@ -803,7 +938,7 @@ pub async fn query_tasks_by_filter(
             }
             OperatorWithNumber::Lte(e) => {
                 active_stmt.and_where(
-                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Result))
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
                         .cast_json_field("exit_status")
                         .lte(e.to_string()),
                 );
@@ -819,44 +954,48 @@ pub async fn query_tasks_by_filter(
         let op = parse_operators_with_number(&priority)?;
         match op {
             OperatorWithNumber::Eq(p) => {
-                active_stmt
-                    .and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::Priority)).eq(p));
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).eq(p),
+                );
                 archive_stmt.and_where(
                     Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).eq(p),
                 );
             }
             OperatorWithNumber::Neq(p) => {
-                active_stmt
-                    .and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::Priority)).ne(p));
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).ne(p),
+                );
                 archive_stmt.and_where(
                     Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).ne(p),
                 );
             }
             OperatorWithNumber::Gt(p) => {
-                active_stmt
-                    .and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::Priority)).gt(p));
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).gt(p),
+                );
                 archive_stmt.and_where(
                     Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).gt(p),
                 );
             }
             OperatorWithNumber::Gte(p) => {
                 active_stmt.and_where(
-                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Priority)).gte(p),
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).gte(p),
                 );
                 archive_stmt.and_where(
                     Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).gte(p),
                 );
             }
             OperatorWithNumber::Lt(p) => {
-                active_stmt
-                    .and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::Priority)).lt(p));
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).lt(p),
+                );
                 archive_stmt.and_where(
                     Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).lt(p),
                 );
             }
             OperatorWithNumber::Lte(p) => {
                 active_stmt.and_where(
-                    Expr::col((ActiveTask::Entity, ActiveTask::Column::Priority)).lte(p),
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).lte(p),
                 );
                 archive_stmt.and_where(
                     Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).lte(p),

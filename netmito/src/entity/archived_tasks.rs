@@ -24,6 +24,8 @@ pub struct Model {
     pub priority: i32,
     pub spec: Json,
     pub result: Option<Json>,
+    pub upstream_task_uuid: Option<Uuid>,
+    pub downstream_task_uuid: Option<Uuid>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

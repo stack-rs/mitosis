@@ -4,6 +4,19 @@ A Worker is a process that executes tasks.
 It is responsible for fetching tasks from the Coordinator, executing them, and reporting the results back to the Coordinator.
 The Worker is a long-running process that is typically deployed as a service.
 
+## Environment inside a Worker
+
+Before starting a Worker, we need to understand the environment inside a Worker.
+
+The Worker will spawn a new process for each task it runs and set up the following environment variables:
+
+- `MITO_TASK_UUID`: This will be set to the UUID of the task being executed.
+- `MITO_NEW_TASK`: This will be set to the path a file where you can write a new task specification (i.e., SubmitTaskReq) in json format for the Worker to submit it on behalf of you, as a downstream task of the current task.
+- `MITO_UPSTREAM_TASK_UUID`: This will be set to the UUID of the upstream task if the current task is submitted by another task while running.
+- `MITO_RESOURCE_DIR`: This will be set to the path of a directory where you can find the resources (i.e., attachments) of the task.
+- `MITO_RESULT_DIR`: This will be set to the path of a directory where you can store the results of the task. The Worker will pack the directory and upload it as the artifacts of the task if it is not empty.
+- `MITO_EXEC_DIR`: This will be set to the path of a directory where you can store execution logs. The Worker will pack the directory and upload it as the artifacts of the task if it is not empty.
+
 ## Starting a Worker
 
 To start a Worker, you need to provide a TOML file that configures the Worker.

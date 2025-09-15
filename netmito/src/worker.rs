@@ -577,7 +577,6 @@ async fn execute_task(
     task: WorkerTaskResp,
     task_executor: &mut TaskExecutor,
 ) -> crate::error::Result<()> {
-    // TODO: may set the task state to pending while downloading resources
     task_executor
         .announce_task_state_ex(&task.uuid, TaskExecState::FetchResource as i32, 360)
         .await;
@@ -885,6 +884,11 @@ async fn execute_task(
         )
         .await;
     let timeout_until = tokio::time::Instant::now() + task.timeout;
+
+    // Setup new task file path and clean up any stale file
+    let new_task_path = task_executor.task_cache_path.join("new_task.json");
+    let _ = tokio::fs::remove_file(&new_task_path).await; // Ignore errors if file doesn't exist
+
     let mut command = Command::new("/usr/bin/env");
     command
         .args(task.spec.args)
@@ -899,7 +903,11 @@ async fn execute_task(
             task_executor.task_cache_path.join("resource"),
         )
         .env("MITO_TASK_UUID", task.uuid.to_string())
+        .env("MITO_NEW_TASK", &new_task_path)
         .stdin(std::process::Stdio::null());
+    if let Some(uuid) = task.upstream_task_uuid {
+        command.env("MITO_UPSTREAM_TASK_UUID", uuid.to_string());
+    }
     if task.spec.terminal_output {
         command
             .stdout(std::process::Stdio::piped())
@@ -1391,22 +1399,31 @@ async fn process_task_result(
             task_executor
                 .announce_task_state_ex(&uuid, TaskExecState::UploadResultFinished as i32, 60)
                 .await;
+
+            // Check for new task file and submit if present
+            let new_task_scceed = submit_new_task_if_present(id, task_executor).await;
+            let msg = if is_finished {
+                if new_task_scceed {
+                    None
+                } else {
+                    Some(TaskResultMessage::SubmitNewTaskFailed)
+                }
+            } else {
+                Some(TaskResultMessage::ExecTimeout)
+            };
             // Commit the task result
             let req = ReportTaskReq {
                 id,
                 op: ReportTaskOp::Commit(TaskResultSpec {
                     exit_status: exit_status.into_raw(),
-                    msg: if is_finished {
-                        None
-                    } else {
-                        Some(TaskResultMessage::ExecTimeout)
-                    },
+                    msg
                 }),
             };
             report_task(task_executor, req).await?;
             task_executor
                 .announce_task_state_ex(&uuid, TaskExecState::TaskCommitted as i32, 60)
                 .await;
+
         }
     }
 
@@ -1476,4 +1493,55 @@ async fn report_task(
         }
     }
     Ok(())
+}
+
+async fn submit_new_task_if_present(task_id: i64, task_executor: &mut TaskExecutor) -> bool {
+    let new_task_path = task_executor.task_cache_path.join("new_task.json");
+    // Check if the new task file exists
+    if !new_task_path.exists() {
+        return true; // No new task to submit
+    }
+
+    // Read and parse the file
+    let new_task_content = match tokio::fs::read_to_string(&new_task_path).await {
+        Ok(content) if !content.trim().is_empty() => content,
+        Ok(_) => {
+            tracing::debug!("New task file exists but is empty, ignoring");
+            let _ = tokio::fs::remove_file(&new_task_path).await;
+            return true;
+        }
+        Err(e) => {
+            tracing::warn!("Failed to read new task file: {}", e);
+            let _ = tokio::fs::remove_file(&new_task_path).await;
+            return false;
+        }
+    };
+
+    // Parse JSON to SubmitTaskReq
+    let submit_req: crate::schema::SubmitTaskReq = match serde_json::from_str(&new_task_content) {
+        Ok(req) => req,
+        Err(e) => {
+            tracing::warn!("Failed to parse new task JSON: {}", e);
+            let _ = tokio::fs::remove_file(&new_task_path).await;
+            return false;
+        }
+    };
+
+    tracing::debug!(
+        "Submitting new task from completed task {} to group '{}'",
+        task_id,
+        submit_req.group_name
+    );
+    let req = ReportTaskReq {
+        id: task_id,
+        op: ReportTaskOp::Submit(Box::new(submit_req)),
+    };
+    if let Err(e) = report_task(task_executor, req).await {
+        tracing::warn!("Failed to submit new task: {}", e);
+        return false;
+    }
+
+    // Always clean up the file after processing (success or failure)
+    let _ = tokio::fs::remove_file(&new_task_path).await;
+    true
 }

@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.1](https://github.com/stack-rs/mitosis/compare/mito-v0.6.0...mito-v0.6.1) - 2025-09-15
+
+### Features
+
+- *(main)* Add entrypoint of manager - ([e9537c0](https://github.com/stack-rs/mitosis/commit/e9537c042dd2d181378a269861292e2aa34fc06f))
+- *(worker)* Allow worker to submit downstream task - ([fe6704f](https://github.com/stack-rs/mitosis/commit/fe6704f0a14553230109e50dee624c3da03da6b4))
+
+### Documentation
+
+- *(guide)* Add guidance for manager - ([35aca9a](https://github.com/stack-rs/mitosis/commit/35aca9a23d14278100d2935f1fab5003e534665c))
+
+
 ## [0.6.0](https://github.com/stack-rs/mitosis/compare/mito-v0.5.3...mito-v0.6.0) - 2025-09-11
 
 ### Features

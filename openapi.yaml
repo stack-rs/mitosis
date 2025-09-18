@@ -2663,6 +2663,14 @@ components:
           type: object
           nullable: true
           description: Task result as JSON (if completed)
+        upstream_task_uuid:
+          type: string
+          format: uuid
+          nullable: true
+        downstream_task_uuid:
+          type: string
+          format: uuid
+          nullable: true
 
     ParsedTaskQueryInfo:
       type: object
@@ -2716,6 +2724,14 @@ components:
           $ref: "#/components/schemas/TaskSpec"
         result:
           $ref: "#/components/schemas/TaskResultSpec"
+          nullable: true
+        upstream_task_uuid:
+          type: string
+          format: uuid
+          nullable: true
+        downstream_task_uuid:
+          type: string
+          format: uuid
           nullable: true
 
     TaskQueryResp:

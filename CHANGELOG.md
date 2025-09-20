@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.2](https://github.com/stack-rs/mitosis/compare/mito-v0.6.1...mito-v0.6.2) - 2025-09-20
+
+### Features
+
+- *(client)* Support parsing resources in task submit - ([67db83f](https://github.com/stack-rs/mitosis/commit/67db83fd3ef72566f4d106bfb90d1a023cde7ca0))
+
+### Documentation
+
+- *(spec)* Update openapi type definition - ([0a36524](https://github.com/stack-rs/mitosis/commit/0a3652496945462d1c7e1a502ec69db07cf43cb5))
+
+
 ## [0.6.1](https://github.com/stack-rs/mitosis/compare/mito-v0.6.0...mito-v0.6.1) - 2025-09-15
 
 ### Features

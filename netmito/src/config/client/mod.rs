@@ -8,6 +8,11 @@ use serde::{Deserialize, Serialize};
 use std::ops::Not;
 use url::Url;
 
+use crate::entity::content::ArtifactContentType;
+use crate::schema::{RemoteResource, RemoteResourceDownload};
+use std::path::PathBuf;
+use uuid::Uuid;
+
 use super::coordinator::DEFAULT_COORDINATOR_ADDR;
 
 pub mod admin;
@@ -126,6 +131,64 @@ pub struct CmdArgs {
     /// The command to run
     #[arg(last = true)]
     pub command: Vec<String>,
+}
+
+/// Parse ArtifactContentType from string
+fn parse_artifact_content_type(
+    s: &str,
+) -> Result<ArtifactContentType, Box<dyn std::error::Error + Send + Sync + 'static>> {
+    match s.to_lowercase().as_str() {
+        "result" => Ok(ArtifactContentType::Result),
+        "exec-log" | "execlog" | "exec" => Ok(ArtifactContentType::ExecLog),
+        "std-log" | "stdlog" | "std" | "terminal" => Ok(ArtifactContentType::StdLog),
+        _ => Err(format!(
+            "invalid artifact content type '{}', expected one of: result, exec-log, std-log",
+            s
+        )
+        .into()),
+    }
+}
+
+/// Parse a resource string into RemoteResourceDownload
+fn parse_resources(
+    s: &str,
+) -> Result<RemoteResourceDownload, Box<dyn std::error::Error + Send + Sync + 'static>> {
+    if let Some(rest) = s.strip_prefix("artifact=") {
+        // Parse artifact: uuid:content_type:local_path
+        let parts: Vec<&str> = rest.split(':').collect();
+        if parts.len() != 3 {
+            return Err(format!("artifact format requires exactly 3 parts separated by ':' (uuid:content_type:local_path), got {} parts in '{}'", parts.len(), rest).into());
+        }
+
+        let uuid = parts[0].parse::<Uuid>()?;
+        let content_type = parse_artifact_content_type(parts[1])?;
+        let local_path = PathBuf::from(parts[2]);
+
+        Ok(RemoteResourceDownload {
+            remote_file: RemoteResource::Artifact { uuid, content_type },
+            local_path,
+        })
+    } else if let Some(rest) = s.strip_prefix("attachment=") {
+        // Parse attachment: key:local_path
+        let parts: Vec<&str> = rest.split(':').collect();
+        if parts.len() != 2 {
+            return Err(format!("attachment format requires exactly 2 parts separated by ':' (key:local_path), got {} parts in '{}'", parts.len(), rest).into());
+        }
+
+        let key = parts[0].to_string();
+        let local_path = PathBuf::from(parts[1]);
+
+        Ok(RemoteResourceDownload {
+            remote_file: RemoteResource::Attachment { key },
+            local_path,
+        })
+    } else {
+        Err(format!(
+            "resource string must start with 'artifact=' or 'attachment=', got '{}'",
+            s
+        )
+        .into())
+    }
 }
 
 /// Parse a single key-value pair

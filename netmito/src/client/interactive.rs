@@ -148,6 +148,7 @@ pub(crate) fn output_worker_list_info<T: std::fmt::Display>(
 ) {
     tracing::info!("Worker UUID: {}", info.worker_id);
     tracing::info!("Tags: {:?}", info.tags);
+    tracing::info!("Labels: {:?}", info.labels);
     tracing::info!("State: {}", info.state);
     tracing::info!(
         "Created by user {} for group {}",
@@ -173,6 +174,7 @@ pub(crate) fn output_worker_info(
 ) {
     tracing::info!("Worker UUID: {}", info.worker_id);
     tracing::info!("Tags: {:?}", info.tags);
+    tracing::info!("Labels: {:?}", info.labels);
     tracing::info!("State: {}", info.state);
     tracing::info!("Accessible Groups: {:?}", groups);
     tracing::info!("Created by user {} ", info.creator_username,);

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
+    config::client::parse_resources,
     entity::state::{TaskExecState, TaskState},
     schema::{ChangeTaskReq, RemoteResourceDownload, TaskSpec, TasksQueryReq, UpdateTaskLabelsReq},
 };
@@ -59,7 +60,7 @@ pub struct SubmitTaskArgs {
     /// The command to run
     #[arg(last = true)]
     pub command: Vec<String>,
-    #[arg(skip)]
+    #[arg(short, long, num_args = 0.., value_delimiter = ',', value_parser = parse_resources)]
     pub resources: Vec<RemoteResourceDownload>,
     /// The UUID and the state of the task to watch before triggering this task.
     /// Should specify it as `UUID,STATE`, e.g. `123e4567-e89b-12d3-a456-426614174000,ExecSpawned`.

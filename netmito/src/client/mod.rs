@@ -522,6 +522,18 @@ impl MitoClient {
             .await
     }
 
+    pub async fn admin_users_update_group_quota(
+        &mut self,
+        args: AdminUpdateUserGroupQuotaArgs,
+    ) -> crate::error::Result<UserGroupQuotaResp> {
+        let req = ChangeUserGroupQuota {
+            group_quota: args.group_quota,
+        };
+        self.http_client
+            .admin_update_user_group_quota(&args.username, req)
+            .await
+    }
+
     pub async fn tasks_query(
         &mut self,
         args: QueryTasksArgs,
@@ -826,6 +838,19 @@ impl MitoClient {
                         match self.admin_change_user_password(args).await {
                             Ok(_) => {
                                 tracing::info!("Successfully changed password");
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        }
+                    }
+                    AdminUsersCommands::GroupQuota(args) => {
+                        match self.admin_users_update_group_quota(args).await {
+                            Ok(resp) => {
+                                tracing::info!(
+                                    "Successfully updated user group quota to {}",
+                                    resp.group_quota
+                                );
                             }
                             Err(e) => {
                                 tracing::error!("{}", e);

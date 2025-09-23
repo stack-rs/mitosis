@@ -28,6 +28,10 @@ pub fn admin_router(st: InfraPool, cancel_token: CancellationToken) -> Router<In
             "/users/{username}/password",
             post(admin_change_user_password),
         )
+        .route(
+            "/users/{username}/group-quota",
+            post(admin_change_user_group_quota),
+        )
         .route("/users/{username}/state", post(admin_change_user_state))
         .route(
             "/groups/{group_name}/storage-quota",
@@ -193,6 +197,25 @@ pub async fn admin_change_group_storage_quota(
                 }
             })?;
     Ok(Json(GroupStorageQuotaResp { storage_quota }))
+}
+
+pub async fn admin_change_user_group_quota(
+    Extension(_): Extension<AuthAdminUser>,
+    State(pool): State<InfraPool>,
+    Path(username): Path<String>,
+    Json(req): Json<ChangeUserGroupQuota>,
+) -> ApiResult<Json<UserGroupQuotaResp>> {
+    let group_quota = service::user::change_user_group_quota(&pool, username, req.group_quota)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(UserGroupQuotaResp { group_quota }))
 }
 
 pub async fn admin_shutdown_worker(

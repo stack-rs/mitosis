@@ -66,8 +66,18 @@ pub struct ChangeGroupStorageQuotaReq {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ChangeUserGroupQuota {
+    pub group_quota: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GroupStorageQuotaResp {
     pub storage_quota: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UserGroupQuotaResp {
+    pub group_quota: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

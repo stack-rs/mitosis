@@ -4,8 +4,10 @@ use argon2::{
 };
 use sea_orm::{prelude::*, Set, TransactionTrait};
 use sea_orm_migration::prelude::*;
+use std::str::FromStr;
 
 use crate::{
+    config::InfraPool,
     entity::{
         groups as Group, role::UserGroupRole, state::UserState, user_group as UserGroup,
         users as User,
@@ -127,4 +129,57 @@ where
             })
         })
         .await?)
+}
+
+fn parse_quota(quota: i32, quota_op: &str) -> crate::error::Result<i32> {
+    match quota_op {
+        s if s.starts_with('+') => {
+            let v = i32::from_str(&s[1..])?;
+            Ok(quota + v)
+        }
+        s if s.starts_with('-') => {
+            let v = i32::from_str(&s[1..])?;
+            Ok(quota - v)
+        }
+        s if s.starts_with('=') => {
+            let v = i32::from_str(&s[1..])?;
+            Ok(v)
+        }
+        s => {
+            let v = i32::from_str(s)?;
+            Ok(v)
+        }
+    }
+}
+
+pub async fn change_user_group_quota(
+    pool: &InfraPool,
+    user_name: String,
+    group_quota: String,
+) -> crate::error::Result<i32> {
+    let updated_quota = pool
+        .db
+        .transaction::<_, i32, Error>(|txn| {
+            Box::pin(async move {
+                let user = User::Entity::find()
+                    .filter(User::Column::Username.eq(&user_name))
+                    .one(txn)
+                    .await?;
+                if let Some(user) = user {
+                    let new_quota = parse_quota(user.group_quota, &group_quota)?.max(0);
+                    let user = User::ActiveModel {
+                        id: Set(user.id),
+                        group_quota: Set(new_quota),
+                        updated_at: Set(TimeDateTimeWithTimeZone::now_utc()),
+                        ..Default::default()
+                    };
+                    let u = user.update(txn).await?;
+                    Ok(u.group_quota)
+                } else {
+                    Err(DbErr::RecordNotUpdated.into())
+                }
+            })
+        })
+        .await?;
+    Ok(updated_quota)
 }

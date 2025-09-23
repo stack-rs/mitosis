@@ -1,4 +1,4 @@
-use std::string::FromUtf8Error;
+use std::{num::ParseIntError, string::FromUtf8Error};
 
 use aws_sdk_s3::{
     error::SdkError,
@@ -55,6 +55,8 @@ pub enum Error {
     ParseXmlError(#[from] roxmltree::Error),
     #[error("Parse bytesize error: {0}")]
     ParseSizeError(#[from] parse_size::Error),
+    #[error("Parse int error: {0}")]
+    ParseIntError(#[from] ParseIntError),
 }
 
 #[derive(thiserror::Error, Debug)]

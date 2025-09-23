@@ -37,6 +37,8 @@ pub enum AdminUsersCommands {
     Delete(AdminDeleteUserArgs),
     /// Change the password of a user
     ChangePassword(ChangePasswordArgs),
+    /// Update the group quota of a user
+    GroupQuota(AdminUpdateUserGroupQuotaArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -87,6 +89,12 @@ pub enum AdminGroupsCommands {
 pub struct AdminUpdateGroupStorageQuotaArgs {
     pub group_name: String,
     pub storage_quota: String,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct AdminUpdateUserGroupQuotaArgs {
+    pub username: String,
+    pub group_quota: String,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]

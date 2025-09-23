@@ -436,6 +436,32 @@ impl MitoHttpClient {
         }
     }
 
+    pub async fn admin_update_user_group_quota(
+        &mut self,
+        username: &str,
+        req: ChangeUserGroupQuota,
+    ) -> crate::error::Result<UserGroupQuotaResp> {
+        self.url
+            .set_path(&format!("admin/users/{username}/group-quota"));
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let update_resp = resp
+                .json::<UserGroupQuotaResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(update_resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn admin_update_group_storage_quota(
         &mut self,
         group_name: &str,

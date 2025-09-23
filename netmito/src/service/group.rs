@@ -89,7 +89,7 @@ where
                             .await?;
                         Ok(group)
                     }
-                    _ => Err(DbErr::RecordNotInserted.into()),
+                    _ => Err(ApiError::AlreadyExists(group_name).into()),
                 }
             })
         })

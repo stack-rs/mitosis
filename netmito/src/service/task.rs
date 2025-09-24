@@ -21,6 +21,7 @@ use crate::{
     error::Error,
 };
 
+use super::subscription::publish_task_state_change;
 use super::worker::{remove_task, TaskDispatcherOp};
 
 // XXX: Not sure if we can relax the constrains on local path checking.
@@ -92,6 +93,18 @@ pub async fn user_submit_task(
         ..Default::default()
     };
     let task = task.insert(&pool.db).await?;
+
+    // Publish task state change to Ready
+    let _ = publish_task_state_change(
+        &pool.subscription_manager_tx,
+        uuid,
+        TaskState::Unknown,
+        TaskState::Ready,
+    )
+    .inspect_err(|e| {
+        tracing::error!("Failed to publish task state change for {}: {}", uuid, e);
+    });
+
     // Batch add task to worker task queues
     let builder = pool.db.get_database_backend();
     let tasks_stmt = Query::select()
@@ -481,6 +494,18 @@ pub async fn user_cancel_task(
             })
         })
         .await?;
+
+    // Publish task state change to Cancelled
+    let _ = publish_task_state_change(
+        &pool.subscription_manager_tx,
+        uuid,
+        TaskState::Ready,
+        TaskState::Cancelled,
+    )
+    .inspect_err(|e| {
+        tracing::error!("Failed to publish task state change for {}: {}", uuid, e);
+    });
+
     let _ = remove_task(task_id, pool)
         .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
     Ok(())

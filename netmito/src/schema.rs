@@ -555,3 +555,37 @@ impl From<RawWorkerQueryInfo> for WorkerQueryInfo {
         }
     }
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TaskStateChangeNotification {
+    pub task_uuid: Uuid,
+    pub old_state: TaskExecState,
+    pub new_state: TaskExecState,
+    pub timestamp: OffsetDateTime,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SubscribeTaskReq {
+    pub session_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UnsubscribeTaskReq {
+    pub session_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TaskSubscriptionResp {
+    pub subscribed: bool,
+    pub task_uuid: Uuid,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ClientSubscriptionsResp {
+    pub subscriptions: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SessionCredentialsReq {
+    pub session_id: String,
+}

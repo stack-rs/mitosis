@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod groups;
+pub mod subscriptions;
 pub mod tasks;
 pub mod users;
 pub mod workers;
@@ -61,6 +62,10 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
             .nest("/groups", groups::groups_router(st.clone()))
             .nest("/workers", workers::workers_router(st.clone()))
             .nest("/tasks", tasks::tasks_router(st.clone()))
+            .nest(
+                "/subscriptions",
+                subscriptions::subscriptions_router(st.clone()),
+            )
             .with_state(st)
             .layer(CorsLayer::permissive())
     }
@@ -91,6 +96,10 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
             .nest("/groups", groups::groups_router(st.clone()))
             .nest("/workers", workers::workers_router(st.clone()))
             .nest("/tasks", tasks::tasks_router(st.clone()))
+            .nest(
+                "/subscriptions",
+                subscriptions::subscriptions_router(st.clone()),
+            )
             .with_state(st)
             .layer(CorsLayer::permissive())
             .layer(middleware::from_fn(print_request_addr))

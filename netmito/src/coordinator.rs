@@ -9,6 +9,7 @@ use crate::api::router;
 use crate::config::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 use crate::migration::{Migrator, MigratorTrait};
 use crate::service::s3::{setup_buckets, ARTIFACTS_BUCKET, ATTACHMENTS_BUCKET};
+use crate::service::subscription::SubscriptionManager;
 use crate::service::worker::{restore_workers, HeartbeatQueue, TaskDispatcher};
 use crate::signal::shutdown_signal;
 
@@ -16,6 +17,7 @@ pub struct MitoCoordinator {
     pub infra_pool: InfraPool,
     pub worker_task_queue: TaskDispatcher,
     pub worker_heartbeat_queue: HeartbeatQueue,
+    pub subscription_manager: SubscriptionManager,
     pub cancel_token: CancellationToken,
     pub log_dir: PathBuf,
 }
@@ -95,6 +97,11 @@ impl MitoCoordinator {
         #[cfg(feature = "crossfire-channel")]
         let (worker_heartbeat_queue_tx, worker_heartbeat_queue_rx) =
             crossfire::mpsc::unbounded_async();
+        #[cfg(not(feature = "crossfire-channel"))]
+        let (subscription_manager_tx, subscription_manager_rx) =
+            tokio::sync::mpsc::unbounded_channel();
+        #[cfg(feature = "crossfire-channel")]
+        let (subscription_manager_tx, subscription_manager_rx) = crossfire::mpsc::unbounded_async();
 
         // Setup worker task queue
         let worker_task_queue =
@@ -102,7 +109,11 @@ impl MitoCoordinator {
 
         // Setup infra pool
         let infra_pool = config
-            .build_infra_pool(worker_task_queue_tx, worker_heartbeat_queue_tx)
+            .build_infra_pool(
+                worker_task_queue_tx,
+                worker_heartbeat_queue_tx,
+                subscription_manager_tx,
+            )
             .await?;
 
         // Setup worker heartbeat queue
@@ -133,10 +144,15 @@ impl MitoCoordinator {
         log_dir.push("coordinator");
         tokio::fs::create_dir_all(&log_dir).await?;
 
+        // Setup subscription manager
+        let subscription_manager =
+            SubscriptionManager::new(cancel_token.clone(), subscription_manager_rx);
+
         Ok(Self {
             infra_pool,
             worker_task_queue,
             worker_heartbeat_queue,
+            subscription_manager,
             cancel_token,
             log_dir,
         })
@@ -148,11 +164,13 @@ impl MitoCoordinator {
             infra_pool,
             mut worker_task_queue,
             mut worker_heartbeat_queue,
+            mut subscription_manager,
             cancel_token,
             ..
         } = self;
         let task_queue_hd = tokio::spawn(async move { worker_task_queue.run().await });
         let heartbeat_hd = tokio::spawn(async move { worker_heartbeat_queue.run().await });
+        let _subscription_hd = tokio::spawn(async move { subscription_manager.run().await });
         restore_workers(&infra_pool).await?;
         let app = router(infra_pool, cancel_token.clone());
         let addr = crate::config::SERVER_CONFIG

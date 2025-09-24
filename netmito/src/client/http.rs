@@ -950,4 +950,103 @@ impl MitoHttpClient {
             Err(get_error_from_resp(resp).await.into())
         }
     }
+
+    pub async fn subscribe_to_task(
+        &mut self,
+        uuid: Uuid,
+    ) -> crate::error::Result<TaskSubscriptionResp> {
+        self.url.set_path(&format!("subscriptions/tasks/{}", uuid));
+        let req = SubscribeTaskReq {
+            session_id: "TODO: implement session management".to_string(),
+        };
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp: TaskSubscriptionResp = resp.json().await.map_err(map_reqwest_err)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn unsubscribe_from_task(
+        &mut self,
+        uuid: Uuid,
+    ) -> crate::error::Result<TaskSubscriptionResp> {
+        self.url.set_path(&format!("subscriptions/tasks/{}", uuid));
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp: TaskSubscriptionResp = resp.json().await.map_err(map_reqwest_err)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn get_task_state(
+        &mut self,
+        uuid: Uuid,
+    ) -> crate::error::Result<TaskStateChangeNotification> {
+        self.url
+            .set_path(&format!("subscriptions/tasks/{}/state", uuid));
+        let resp = self
+            .http_client
+            .get(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp: TaskStateChangeNotification = resp.json().await.map_err(map_reqwest_err)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn get_subscriptions(&mut self) -> crate::error::Result<ClientSubscriptionsResp> {
+        self.url.set_path("subscriptions");
+        let resp = self
+            .http_client
+            .get(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp: ClientSubscriptionsResp = resp.json().await.map_err(map_reqwest_err)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn unsubscribe_all(&mut self) -> crate::error::Result<ClientSubscriptionsResp> {
+        self.url.set_path("subscriptions");
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp: ClientSubscriptionsResp = resp.json().await.map_err(map_reqwest_err)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
 }

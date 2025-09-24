@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod group;
 pub mod s3;
+pub mod subscription;
 pub mod task;
 pub mod user;
 pub mod worker;

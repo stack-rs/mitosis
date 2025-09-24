@@ -810,6 +810,119 @@ impl MitoClient {
         self.download_attachment(args).await
     }
 
+    pub async fn subscribe_to_task(
+        &mut self,
+        uuid: Uuid,
+    ) -> crate::error::Result<TaskSubscriptionResp> {
+        self.http_client.subscribe_to_task(uuid).await
+    }
+
+    pub async fn unsubscribe_from_task(
+        &mut self,
+        uuid: Uuid,
+    ) -> crate::error::Result<TaskSubscriptionResp> {
+        self.http_client.unsubscribe_from_task(uuid).await
+    }
+
+    pub async fn get_task_state(
+        &mut self,
+        uuid: Uuid,
+    ) -> crate::error::Result<TaskStateChangeNotification> {
+        self.http_client.get_task_state(uuid).await
+    }
+
+    pub async fn get_subscriptions(&mut self) -> crate::error::Result<ClientSubscriptionsResp> {
+        self.http_client.get_subscriptions().await
+    }
+
+    pub async fn unsubscribe_all(&mut self) -> crate::error::Result<ClientSubscriptionsResp> {
+        self.http_client.unsubscribe_all().await
+    }
+
+    pub async fn watch_task_notifications(
+        &mut self,
+        uuids: Vec<Uuid>,
+        max_notifications: usize,
+        timeout_secs: u64,
+    ) -> crate::error::Result<()> {
+        if !uuids.is_empty() {
+            for uuid in &uuids {
+                self.async_subscribe_task_exec_state(uuid).await?;
+            }
+        }
+
+        let mut stream = self.on_task_exec_state_message().await?;
+        let mut notification_count = 0;
+        let start_time = std::time::Instant::now();
+
+        loop {
+            if max_notifications > 0 && notification_count >= max_notifications {
+                break;
+            }
+
+            if timeout_secs > 0 && start_time.elapsed().as_secs() >= timeout_secs {
+                tracing::info!("Watch timeout reached");
+                break;
+            }
+
+            // Use a timeout for receiving messages
+            let timeout_duration = if timeout_secs > 0 {
+                std::cmp::min(timeout_secs - start_time.elapsed().as_secs(), 1)
+            } else {
+                1
+            };
+
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_duration),
+                futures::stream::StreamExt::next(&mut stream),
+            )
+            .await
+            {
+                Ok(Some(msg)) => {
+                    if let Ok(channel) = msg.get_channel::<String>() {
+                        if let Ok(payload) = msg.get_payload::<String>() {
+                            if let Ok(notification) =
+                                serde_json::from_str::<TaskStateChangeNotification>(&payload)
+                            {
+                                if uuids.is_empty() || uuids.contains(&notification.task_uuid) {
+                                    tracing::info!(
+                                        "Task {} state changed: {:?} -> {:?} at {}",
+                                        notification.task_uuid,
+                                        notification.old_state,
+                                        notification.new_state,
+                                        notification.timestamp
+                                    );
+                                    notification_count += 1;
+                                }
+                            } else {
+                                tracing::debug!("Received message on {}: {}", channel, payload);
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {
+                    tracing::debug!("Stream ended");
+                    break;
+                }
+                Err(_) => {
+                    // Timeout occurred, continue the loop
+                    continue;
+                }
+            }
+        }
+
+        // Drop the stream to release the borrow
+        drop(stream);
+
+        if !uuids.is_empty() {
+            for uuid in &uuids {
+                let _ = self.async_unsubscribe_task_exec_state(uuid).await;
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn handle_command<T>(&mut self, cmd: T) -> bool
     where
         T: Into<ClientCommand>,
@@ -1326,6 +1439,90 @@ impl MitoClient {
                         }
                     }
                 },
+            },
+            ClientCommand::Subscriptions(args) => match args.command {
+                SubscriptionCommands::Subscribe(args) => {
+                    match self.subscribe_to_task(args.uuid).await {
+                        Ok(resp) => {
+                            if resp.subscribed {
+                                tracing::info!(
+                                    "Successfully subscribed to task {}",
+                                    resp.task_uuid
+                                );
+                            } else {
+                                tracing::warn!("Subscription to task {} failed", resp.task_uuid);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to subscribe to task {}: {}", args.uuid, e);
+                        }
+                    }
+                }
+                SubscriptionCommands::Unsubscribe(args) => {
+                    match self.unsubscribe_from_task(args.uuid).await {
+                        Ok(resp) => {
+                            tracing::info!(
+                                "Successfully unsubscribed from task {}",
+                                resp.task_uuid
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to unsubscribe from task {}: {}", args.uuid, e);
+                        }
+                    }
+                }
+                SubscriptionCommands::List => match self.get_subscriptions().await {
+                    Ok(resp) => {
+                        if resp.subscriptions.is_empty() {
+                            tracing::info!("No active subscriptions");
+                        } else {
+                            tracing::info!("Active subscriptions:");
+                            for uuid in resp.subscriptions {
+                                tracing::info!("  - {}", uuid);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to get subscriptions: {}", e);
+                    }
+                },
+                SubscriptionCommands::Clear => match self.unsubscribe_all().await {
+                    Ok(resp) => {
+                        if resp.subscriptions.is_empty() {
+                            tracing::info!("No subscriptions to clear");
+                        } else {
+                            tracing::info!("Cleared {} subscriptions", resp.subscriptions.len());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to clear subscriptions: {}", e);
+                    }
+                },
+                SubscriptionCommands::Watch(args) => {
+                    if let Err(e) = self.setup_async_redis_client().await {
+                        tracing::error!("Failed to setup Redis client for watching: {}", e);
+                        return true;
+                    }
+
+                    tracing::info!("Starting to watch task notifications...");
+                    if !args.uuids.is_empty() {
+                        tracing::info!("Watching specific tasks: {:?}", args.uuids);
+                    } else {
+                        tracing::info!("Watching all subscribed tasks");
+                    }
+
+                    match self
+                        .watch_task_notifications(args.uuids, args.max_notifications, args.timeout)
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::info!("Finished watching task notifications");
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to watch task notifications: {}", e);
+                        }
+                    }
+                }
             },
             ClientCommand::Quit => {
                 return false;

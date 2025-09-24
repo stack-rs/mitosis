@@ -24,7 +24,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use crate::{
     error::Error,
-    service::worker::{HeartbeatOp, HeartbeatQueue, TaskDispatcher, TaskDispatcherOp},
+    service::{
+        subscription::SubscriptionManagerOp,
+        worker::{HeartbeatOp, HeartbeatQueue, TaskDispatcher, TaskDispatcherOp},
+    },
 };
 
 use super::TracingGuard;
@@ -288,6 +291,12 @@ impl CoordinatorConfig {
         #[cfg(feature = "crossfire-channel")] worker_heartbeat_queue_tx: crossfire::MTx<
             HeartbeatOp,
         >,
+        #[cfg(not(feature = "crossfire-channel"))] subscription_manager_tx: UnboundedSender<
+            SubscriptionManagerOp,
+        >,
+        #[cfg(feature = "crossfire-channel")] subscription_manager_tx: crossfire::MTx<
+            SubscriptionManagerOp,
+        >,
     ) -> crate::error::Result<InfraPool> {
         let db = sea_orm::Database::connect(&self.db_url).await?;
         let credential = Credentials::new(
@@ -309,6 +318,7 @@ impl CoordinatorConfig {
             s3,
             worker_task_queue_tx,
             worker_heartbeat_queue_tx,
+            subscription_manager_tx,
         })
     }
 
@@ -420,6 +430,10 @@ pub struct InfraPool {
     pub worker_heartbeat_queue_tx: UnboundedSender<HeartbeatOp>,
     #[cfg(feature = "crossfire-channel")]
     pub worker_heartbeat_queue_tx: crossfire::MTx<HeartbeatOp>,
+    #[cfg(not(feature = "crossfire-channel"))]
+    pub subscription_manager_tx: UnboundedSender<SubscriptionManagerOp>,
+    #[cfg(feature = "crossfire-channel")]
+    pub subscription_manager_tx: crossfire::MTx<SubscriptionManagerOp>,
 }
 
 #[derive(Debug)]

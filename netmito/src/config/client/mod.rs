@@ -19,6 +19,7 @@ pub mod admin;
 pub mod artifacts;
 pub mod attachments;
 pub mod groups;
+pub mod subscriptions;
 pub mod tasks;
 pub mod users;
 pub mod workers;
@@ -26,6 +27,7 @@ pub use admin::*;
 pub use artifacts::*;
 pub use attachments::*;
 pub use groups::*;
+pub use subscriptions::*;
 pub use tasks::*;
 pub use users::*;
 pub use workers::*;
@@ -105,6 +107,8 @@ pub enum ClientCommand {
     Tasks(TasksArgs),
     /// Manage workers, including querying workers, cancel workers, etc.
     Workers(WorkersArgs),
+    /// Manage task subscriptions for real-time notifications
+    Subscriptions(SubscriptionArgs),
     /// Run an external command
     Cmd(CmdArgs),
     /// Quit the client's interactive mode

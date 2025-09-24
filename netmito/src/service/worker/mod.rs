@@ -32,7 +32,7 @@ use crate::{
         CountQuery, RawWorkerQueryInfo, ReportTaskOp, TaskSpec, WorkerQueryInfo, WorkerQueryResp,
         WorkerShutdownOp, WorkerTaskResp, WorkersQueryReq, WorkersQueryResp,
     },
-    service::{self, s3::group_upload_artifact},
+    service::{self, s3::group_upload_artifact, subscription::publish_task_state_change},
 };
 
 pub async fn register_worker(
@@ -518,6 +518,22 @@ pub async fn fetch_task(
                         .await?;
                     if !tasks.is_empty() {
                         let task = tasks.into_iter().next().unwrap();
+
+                        // Publish task state change from Ready to Running
+                        let _ = publish_task_state_change(
+                            &pool.subscription_manager_tx,
+                            task.uuid,
+                            TaskState::Ready,
+                            TaskState::Running,
+                        )
+                        .inspect_err(|e| {
+                            tracing::error!(
+                                "Failed to publish task state change for {}: {}",
+                                task.uuid,
+                                e
+                            );
+                        });
+
                         let worker: Worker::ActiveModel = Worker::ActiveModel {
                             id: Set(worker_id),
                             updated_at: Set(now),
@@ -563,23 +579,53 @@ pub async fn report_task(
     match op {
         ReportTaskOp::Finish => {
             tracing::debug!("Worker {} finish task {}", worker_id, task_id);
-            let task = ActiveTask::ActiveModel {
+            let task_model = ActiveTask::ActiveModel {
                 id: Set(task_id),
                 state: Set(TaskState::Finished),
                 updated_at: Set(now),
                 ..Default::default()
             };
-            task.update(&pool.db).await?;
+            task_model.update(&pool.db).await?;
+
+            // Publish task state change to Finished
+            let _ = publish_task_state_change(
+                &pool.subscription_manager_tx,
+                task.uuid,
+                TaskState::Running,
+                TaskState::Finished,
+            )
+            .inspect_err(|e| {
+                tracing::error!(
+                    "Failed to publish task state change for {}: {}",
+                    task.uuid,
+                    e
+                );
+            });
         }
         ReportTaskOp::Cancel => {
             tracing::debug!("Worker {} cancel task {}", worker_id, task_id);
-            let task = ActiveTask::ActiveModel {
+            let task_model = ActiveTask::ActiveModel {
                 id: Set(task_id),
                 state: Set(TaskState::Cancelled),
                 updated_at: Set(now),
                 ..Default::default()
             };
-            task.update(&pool.db).await?;
+            task_model.update(&pool.db).await?;
+
+            // Publish task state change to Cancelled
+            let _ = publish_task_state_change(
+                &pool.subscription_manager_tx,
+                task.uuid,
+                TaskState::Running,
+                TaskState::Cancelled,
+            )
+            .inspect_err(|e| {
+                tracing::error!(
+                    "Failed to publish task state change for {}: {}",
+                    task.uuid,
+                    e
+                );
+            });
         }
         ReportTaskOp::Submit(req) => {
             let req = *req;

@@ -201,6 +201,34 @@ impl From<i32> for TaskExecState {
     }
 }
 
+impl From<TaskExecState> for i32 {
+    fn from(val: TaskExecState) -> Self {
+        match val {
+            TaskExecState::WorkerExited => -1,
+            TaskExecState::FetchResource => 1,
+            TaskExecState::FetchResourceFinished => 2,
+            TaskExecState::FetchResourceError => 3,
+            TaskExecState::FetchResourceTimeout => 4,
+            TaskExecState::FetchResourceNotFound => 5,
+            TaskExecState::FetchResourceForbidden => 6,
+            TaskExecState::Watch => 7,
+            TaskExecState::WatchFinished => 8,
+            TaskExecState::WatchTimeout => 9,
+            TaskExecState::ExecPending => 10,
+            TaskExecState::ExecSpawned => 11,
+            TaskExecState::ExecFinished => 12,
+            TaskExecState::ExecTimeout => 13,
+            TaskExecState::UploadResult => 14,
+            TaskExecState::UploadFinishedResult => 15,
+            TaskExecState::UploadCancelledResult => 16,
+            TaskExecState::UploadResultFinished => 17,
+            TaskExecState::UploadResultTimeout => 18,
+            TaskExecState::TaskCommitted => 19,
+            TaskExecState::Unknown => -99,
+        }
+    }
+}
+
 impl FromStr for TaskExecState {
     type Err = Infallible;
 

@@ -1284,6 +1284,42 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /admin/users/{username}/group-quota:
+    post:
+      summary: Change user group quota (Admin)
+      description: Change the group quota for a user (admin only)
+      operationId: adminChangeUserGroupQuota
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+          example: johndoe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeUserGroupQuota"
+      responses:
+        "200":
+          description: User group quota changed successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserGroupQuotaResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /admin/users/{username}/state:
     post:
       summary: Change user state (Admin)
@@ -1934,6 +1970,19 @@ components:
           description: New storage quota (supports units like 1GB, 500MB)
           example: 2GB
 
+    ChangeUserGroupQuota:
+      type: object
+      required:
+        - group_quota
+      properties:
+        group_quota:
+          type: string
+          description: |-
+            New group quota for the user. Supports absolute values or relative operations:
+            - Absolute: "10" or "=10" (set to 10)
+            - Relative: "+5" (add 5), "-3" (subtract 3)
+          example: "+5"
+
     GroupStorageQuotaResp:
       type: object
       required:
@@ -1944,6 +1993,17 @@ components:
           format: int64
           description: Storage quota in bytes
           example: 2147483648
+
+    UserGroupQuotaResp:
+      type: object
+      required:
+        - group_quota
+      properties:
+        group_quota:
+          type: integer
+          format: int32
+          description: Updated group quota for the user
+          example: 15
 
     UploadAttachmentReq:
       type: object

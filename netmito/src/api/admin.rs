@@ -37,7 +37,7 @@ pub fn admin_router(st: InfraPool, cancel_token: CancellationToken) -> Router<In
             "/groups/{group_name}/storage-quota",
             post(admin_change_group_storage_quota),
         )
-        .route("/workers/{uuid}/", delete(admin_shutdown_worker))
+        .route("/workers/{uuid}", delete(admin_shutdown_worker))
         .route(
             "/groups/{group_name}/attachments/{*key}",
             delete(admin_delete_attachment),

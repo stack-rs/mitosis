@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.2](https://github.com/stack-rs/mitosis/compare/mito-v0.6.1...mito-v0.6.2) - 2025-09-26
+
+### Features
+
+- *(api)* Support change group_quota of a user - ([8dd70e4](https://github.com/stack-rs/mitosis/commit/8dd70e4d4d2d2f5929476d8ac197d7c8894692cf))
+- *(api)* Return better error for group creation - ([f3937c7](https://github.com/stack-rs/mitosis/commit/f3937c70a673ffd760111cb4014bd9a9f1527bc9))
+- *(client)* Support parsing resources in task submit - ([f2ca4ac](https://github.com/stack-rs/mitosis/commit/f2ca4ace2ffd02484402f8ad2ddf87342d9b944f))
+- *(coordinator)* Implement TaskTracker-based graceful shutdown - ([6c288a3](https://github.com/stack-rs/mitosis/commit/6c288a393e265bb416d3de4efd6d9e54ce49e707))
+
+### Bug Fixes
+
+- *(admin)* Remove typo in api path - ([636e816](https://github.com/stack-rs/mitosis/commit/636e8162388fa4003a0e1036383c207d6d3bdf27))
+
+### Documentation
+
+- *(spec)* Update openapi type/api definition - ([96c7cbf](https://github.com/stack-rs/mitosis/commit/96c7cbf3d4b9165cec11bef9e2e47092dd66172f))
+- *(spec)* Update openapi type definition - ([0a36524](https://github.com/stack-rs/mitosis/commit/0a3652496945462d1c7e1a502ec69db07cf43cb5))
+
+### Build
+
+- Use crossfire-channel as default comm - ([e4700a8](https://github.com/stack-rs/mitosis/commit/e4700a8d111064fbcd86ad06b3f5ebd8ebdecfef))
+
+
 ## [0.6.1](https://github.com/stack-rs/mitosis/compare/mito-v0.6.0...mito-v0.6.1) - 2025-09-15
 
 ### Features

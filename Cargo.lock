@@ -117,9 +117,9 @@ checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
 name = "async-compression"
-version = "0.4.31"
+version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9611ec0b6acea03372540509035db2f7f1e9f04da5d27728436fa994033c00a0"
+checksum = "5a89bce6054c720275ac2432fbba080a66a2106a44a1b804553930ca6909f4e0"
 dependencies = [
  "compression-codecs",
  "compression-core",
@@ -211,9 +211,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.14.0"
+version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94b8ff6c09cd57b16da53641caa860168b88c172a5ee163b0288d3d6eea12786"
+checksum = "879b6c89592deb404ba4dc0ae6b58ffd1795c78991cbb5b8bc441c48a070440d"
 dependencies = [
  "aws-lc-sys",
  "zeroize",
@@ -221,15 +221,16 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.31.0"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e44d16778acaf6a9ec9899b92cebd65580b83f685446bf2e1f5d3d732f99dcd"
+checksum = "ee74396bee4da70c2e27cf94762714c911725efe69d9e2672f998512a67a4ce4"
 dependencies = [
  "bindgen",
  "cc",
  "cmake",
  "dunce",
  "fs_extra",
+ "libloading",
 ]
 
 [[package]]
@@ -905,9 +906,9 @@ dependencies = [
 
 [[package]]
 name = "compression-codecs"
-version = "0.4.30"
+version = "0.4.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "485abf41ac0c8047c07c87c72c8fb3eb5197f6e9d7ded615dfd1a00ae00a0f64"
+checksum = "ef8a506ec4b81c460798f572caead636d57d3d7e940f998160f52bd254bf2d23"
 dependencies = [
  "compression-core",
  "flate2",
@@ -2482,7 +2483,7 @@ dependencies = [
 
 [[package]]
 name = "mito"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "clap",
  "netmito",
@@ -2494,7 +2495,7 @@ dependencies = [
 
 [[package]]
 name = "netmito"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "argon2",
  "async-compression",
@@ -3121,9 +3122,9 @@ dependencies = [
 
 [[package]]
 name = "redis"
-version = "0.32.5"
+version = "0.32.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cd3650deebc68526b304898b192fa4102a4ef0b9ada24da096559cb60e0eef8"
+checksum = "15965fbccb975c38a08a68beca6bdb57da9081cd0859417c5975a160d968c3cb"
 dependencies = [
  "bytes",
  "cfg-if",

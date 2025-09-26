@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use argon2::password_hash::rand_core::OsRng;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::api::router;
@@ -151,8 +151,21 @@ impl MitoCoordinator {
             cancel_token,
             ..
         } = self;
-        let task_queue_hd = tokio::spawn(async move { worker_task_queue.run().await });
-        let heartbeat_hd = tokio::spawn(async move { worker_heartbeat_queue.run().await });
+
+        // Create TaskTracker to manage background tasks
+        let task_tracker = TaskTracker::new();
+
+        // Spawn background tasks using TaskTracker
+        task_tracker.spawn(async move {
+            worker_task_queue.run().await;
+            tracing::info!("Task dispatcher stopped");
+        });
+
+        task_tracker.spawn(async move {
+            worker_heartbeat_queue.run().await;
+            tracing::info!("Heartbeat queue stopped");
+        });
+
         restore_workers(&infra_pool).await?;
         let app = router(infra_pool, cancel_token.clone());
         let addr = crate::config::SERVER_CONFIG
@@ -163,20 +176,46 @@ impl MitoCoordinator {
             .bind;
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("Coordinator is listening on: {}", addr);
+
+        // Create shutdown signal future that cancels the token
+        let shutdown_future = async move {
+            shutdown_signal(cancel_token.clone()).await;
+            tracing::info!("Shutdown signal received, cancelling tasks...");
+            cancel_token.cancel();
+        };
+
+        // Run the HTTP server with graceful shutdown
         if let Err(e) = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(shutdown_signal(cancel_token.clone()))
+        .with_graceful_shutdown(shutdown_future)
         .await
         {
             tracing::error!("Server error: {}", e);
         }
-        tracing::info!("Coordinator shutdown signal received");
-        cancel_token.cancel();
-        task_queue_hd.await?;
-        heartbeat_hd.await?;
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        tracing::info!("HTTP server stopped, waiting for background tasks...");
+
+        // Close the TaskTracker to indicate no more tasks will be added
+        task_tracker.close();
+
+        // Wait for all background tasks to complete with timeout
+        let wait_result =
+            tokio::time::timeout(std::time::Duration::from_secs(30), task_tracker.wait()).await;
+
+        match wait_result {
+            Ok(()) => {
+                tracing::info!("All background tasks completed successfully");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "Background tasks did not complete within 30 seconds, proceeding with shutdown"
+                );
+            }
+        }
+
+        tracing::info!("Coordinator shutdown complete");
         Ok(())
     }
 }

@@ -69,11 +69,41 @@ impl HeartbeatQueue {
     async fn handle_timeout(&mut self) -> crate::error::Result<()> {
         if let Some(true) = self.workers.peek().map(|(_, r)| r.0 <= Instant::now()) {
             let (worker_id, _) = self.workers.pop().unwrap();
-            if let Some(worker) = Worker::Entity::find_by_id(worker_id)
-                .one(&self.pool.db)
-                .await?
-            {
-                super::remove_worker(worker, &self.pool).await?;
+
+            // Add timeout for database operations during shutdown
+            let db_timeout = Duration::from_secs(10);
+            let find_result = tokio::time::timeout(
+                db_timeout,
+                Worker::Entity::find_by_id(worker_id).one(&self.pool.db),
+            )
+            .await;
+
+            match find_result {
+                Ok(Ok(Some(worker))) => {
+                    // Add timeout for worker removal
+                    let remove_result =
+                        tokio::time::timeout(db_timeout, super::remove_worker(worker, &self.pool))
+                            .await;
+
+                    if remove_result.is_err() {
+                        tracing::warn!("Worker {} removal timed out during shutdown", worker_id);
+                        return Err(crate::error::Error::Custom(format!(
+                            "Worker {} removal timeout",
+                            worker_id
+                        )));
+                    }
+                }
+                Ok(Ok(None)) => {
+                    tracing::debug!("Worker {} not found during timeout cleanup", worker_id);
+                }
+                Ok(Err(e)) => return Err(e.into()),
+                Err(_) => {
+                    tracing::warn!("Database query for worker {} timed out", worker_id);
+                    return Err(crate::error::Error::Custom(format!(
+                        "Worker {} database timeout",
+                        worker_id
+                    )));
+                }
             }
         }
         Ok(())
@@ -103,9 +133,14 @@ impl HeartbeatQueue {
                 },
                 _ = tokio::time::sleep(timeout_duration) => {
                     if let Err(e) = self.handle_timeout().await {
-                        tracing::error!("handle timeout failed: {:?}", e);
-                        self.cancel_token.cancel();
-                        break;
+                        if self.cancel_token.is_cancelled() {
+                            tracing::warn!("Timeout handling failed during shutdown: {:?}", e);
+                            // Don't break immediately during shutdown, just log and continue
+                        } else {
+                            tracing::error!("handle timeout failed: {:?}", e);
+                            self.cancel_token.cancel();
+                            break;
+                        }
                     }
                     timeout_duration = self
                             .workers
@@ -137,9 +172,14 @@ impl HeartbeatQueue {
                 },
                 _ = tokio::time::sleep(timeout_duration) => {
                     if let Err(e) = self.handle_timeout().await {
-                        tracing::error!("handle timeout failed: {:?}", e);
-                        self.cancel_token.cancel();
-                        break;
+                        if self.cancel_token.is_cancelled() {
+                            tracing::warn!("Timeout handling failed during shutdown: {:?}", e);
+                            // Don't break immediately during shutdown, just log and continue
+                        } else {
+                            tracing::error!("handle timeout failed: {:?}", e);
+                            self.cancel_token.cancel();
+                            break;
+                        }
                     }
                     timeout_duration = self
                             .workers

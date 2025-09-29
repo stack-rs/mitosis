@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.3](https://github.com/stack-rs/mitosis/compare/mito-v0.6.2...mito-v0.6.3) - 2025-09-29
+
+### Miscellaneous Tasks
+
+- *(release)* Update cargo-dist installer version - ([93e84c7](https://github.com/stack-rs/mitosis/commit/93e84c7e1105e5b824852fda5fc2de63b7497c3a))
+
+### Build
+
+- *(musl)* Bump aws-lc-rs and aws-lc-sys to newest - ([f6cf1ae](https://github.com/stack-rs/mitosis/commit/f6cf1ae36c7029351a40e190e992edfa0145787b))
+- *(musl)* Downgrade aws-lc-rs version - ([5b4b626](https://github.com/stack-rs/mitosis/commit/5b4b62656bcc23a8f3af14f70ec5b08625a9c398))
+
+
 ## [0.6.2](https://github.com/stack-rs/mitosis/compare/mito-v0.6.1...mito-v0.6.2) - 2025-09-26
 
 ### Features

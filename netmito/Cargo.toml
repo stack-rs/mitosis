@@ -18,7 +18,7 @@ argon2 = { version = "0.5.3", features = ["std"] }
 async-compression = { version = "0.4.30", features = ["gzip", "tokio"] }
 async-stream = "0.3.6"
 aws-sdk-s3 = { version = "1.104", features = ["behavior-version-latest"] }
-axum = { version = "0.8.4", features = ["http2"] }
+axum = { version = "0.8.6", features = ["http2"] }
 axum-extra = { version = "0.10.1", features = ["typed-header", "query"] }
 base64 = "0.22.1"
 clap = { workspace = true }

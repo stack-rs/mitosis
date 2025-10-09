@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.4](https://github.com/stack-rs/mitosis/compare/mito-v0.6.3...mito-v0.6.4) - 2025-10-09
+
+### Features
+
+- *(cli)* Unify attachment interfaces - ([a0d3030](https://github.com/stack-rs/mitosis/commit/a0d303025273be513f996409e5222a5d8878e1c2))
+
+
 ## [0.6.3](https://github.com/stack-rs/mitosis/compare/mito-v0.6.2...mito-v0.6.3) - 2025-09-29
 
 ### Miscellaneous Tasks

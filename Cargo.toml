@@ -3,7 +3,7 @@ members = [".", "netmito"]
 resolver = "2"
 
 [workspace.package]
-version = "0.6.3"
+version = "0.6.4"
 edition = "2021"
 homepage = "https://github.com/stack-rs/mitosis"
 repository = "https://github.com/stack-rs/mitosis"
@@ -52,7 +52,7 @@ categories.workspace = true
 
 [dependencies]
 clap = { workspace = true }
-netmito = { path = "netmito", version = "0.6.3" }
+netmito = { path = "netmito", version = "0.6.4" }
 shadow-rs = { version = "1.3.0", default-features = false }
 tokio = { workspace = true }
 tracing = { workspace = true }

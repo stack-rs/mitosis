@@ -487,17 +487,45 @@ impl MitoClient {
         &mut self,
         args: GetAttachmentMetaArgs,
     ) -> crate::error::Result<AttachmentMetadata> {
-        self.http_client
-            .get_attachment(&args.group_name, &args.key)
-            .await
+        let group_key_parser = || match args.group_name {
+            Some(g) => (args.key, g),
+            None => {
+                if args.smart {
+                    match args.key.split_once('/') {
+                        Some((g, key)) => {
+                            return (key.to_string(), g.to_string());
+                        }
+                        None => return (args.key, self.username.clone()),
+                    }
+                }
+                (args.key, self.username.clone())
+            }
+        };
+        let (key, group_name) = group_key_parser();
+        self.http_client.get_attachment(&group_name, &key).await
     }
 
     pub async fn groups_attachments_delete(
         &mut self,
         args: DeleteAttachmentArgs,
     ) -> crate::error::Result<()> {
+        let group_key_parser = || match args.group_name {
+            Some(g) => (args.key, g),
+            None => {
+                if args.smart {
+                    match args.key.split_once('/') {
+                        Some((g, key)) => {
+                            return (key.to_string(), g.to_string());
+                        }
+                        None => return (args.key, self.username.clone()),
+                    }
+                }
+                (args.key, self.username.clone())
+            }
+        };
+        let (key, group_name) = group_key_parser();
         self.http_client
-            .delete_attachment(&args.group_name, &args.key, false)
+            .delete_attachment(&group_name, &key, false)
             .await
     }
 
@@ -505,8 +533,23 @@ impl MitoClient {
         &mut self,
         args: DeleteAttachmentArgs,
     ) -> crate::error::Result<()> {
+        let group_key_parser = || match args.group_name {
+            Some(g) => (args.key, g),
+            None => {
+                if args.smart {
+                    match args.key.split_once('/') {
+                        Some((g, key)) => {
+                            return (key.to_string(), g.to_string());
+                        }
+                        None => return (args.key, self.username.clone()),
+                    }
+                }
+                (args.key, self.username.clone())
+            }
+        };
+        let (key, group_name) = group_key_parser();
         self.http_client
-            .delete_attachment(&args.group_name, &args.key, true)
+            .delete_attachment(&group_name, &key, true)
             .await
     }
 

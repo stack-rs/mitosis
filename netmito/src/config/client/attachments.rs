@@ -26,9 +26,14 @@ pub enum AttachmentsCommands {
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct DeleteAttachmentArgs {
     /// The group of the attachment belongs to
-    pub group_name: String,
+    #[arg(short = 'g', long = "group")]
+    pub group_name: Option<String>,
     /// The key of the attachment
     pub key: String,
+    /// Parse the command with smart mode. Will try parse the first component before first `/` in
+    /// key (if specified) as group-name (if not specified)
+    #[arg(short, long)]
+    pub smart: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -107,7 +112,12 @@ pub struct QueryAttachmentsArgs {
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct GetAttachmentMetaArgs {
     /// The group of the attachment belongs to
-    pub group_name: String,
+    #[arg(short = 'g', long = "group")]
+    pub group_name: Option<String>,
     /// The key of the attachment
     pub key: String,
+    /// Parse the command with smart mode. Will try parse the first component before first `/` in
+    /// key (if specified) as group-name (if not specified)
+    #[arg(short, long)]
+    pub smart: bool,
 }

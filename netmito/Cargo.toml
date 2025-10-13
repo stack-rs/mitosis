@@ -43,7 +43,7 @@ path-clean = "1.0.1"
 priority-queue = "2.5.0"
 rand = "0.9.2"
 redis = { workspace = true }
-reqwest = { version = "0.12.23", default-features = false, features = [
+reqwest = { version = "0.12.24", default-features = false, features = [
   "json",
   "stream",
   "http2",

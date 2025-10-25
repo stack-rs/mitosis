@@ -6,7 +6,18 @@ use serde::{Deserialize, Serialize};
 
 /// The role of a user to a group.
 #[derive(
-    EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, ValueEnum,
+    EnumIter,
+    DeriveActiveEnum,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    ValueEnum,
+    Ord,
+    PartialOrd,
 )]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum UserGroupRole {

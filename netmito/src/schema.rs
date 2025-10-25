@@ -296,6 +296,27 @@ pub struct TasksQueryReq {
     pub count: bool,
 }
 
+/// Request to cancel multiple tasks by filter criteria.
+/// Uses the same filter fields as TasksQueryReq but without pagination.
+/// Only tasks in Ready state will be cancelled.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TasksCancelByFilterReq {
+    pub creator_usernames: Option<HashSet<String>>,
+    pub group_name: Option<String>,
+    pub tags: Option<HashSet<String>>,
+    pub labels: Option<HashSet<String>>,
+    pub states: Option<HashSet<TaskState>>,
+    pub exit_status: Option<String>,
+    pub priority: Option<String>,
+}
+
+/// Response for batch cancel operation
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TasksCancelByFilterResp {
+    pub cancelled_count: u64,
+    pub group_name: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TaskQueryResp {
     pub info: ParsedTaskQueryInfo,
@@ -349,6 +370,25 @@ pub struct WorkersQueryReq {
     pub labels: Option<HashSet<String>>,
     pub creator_username: Option<String>,
     pub count: bool,
+}
+
+/// Request to shutdown multiple workers by filter criteria.
+/// Uses the same filter fields as WorkersQueryReq.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WorkersShutdownByFilterReq {
+    pub group_name: Option<String>,
+    pub role: Option<HashSet<GroupWorkerRole>>,
+    pub tags: Option<HashSet<String>>,
+    pub labels: Option<HashSet<String>>,
+    pub creator_username: Option<String>,
+    pub op: WorkerShutdownOp,
+}
+
+/// Response for batch worker shutdown operation
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WorkersShutdownByFilterResp {
+    pub shutdown_count: u64,
+    pub group_name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromQueryResult, Clone)]

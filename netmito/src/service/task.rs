@@ -1,14 +1,15 @@
 use sea_orm::sea_query::extension::postgres::PgExpr;
 use sea_orm::sea_query::{Alias, ExprTrait, PgFunc, Query};
 use sea_orm::{prelude::*, FromQueryResult, Set, TransactionTrait};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::entity::role::{GroupWorkerRole, UserGroupRole};
 use crate::entity::state::TaskState;
 use crate::schema::{
     ArtifactQueryResp, ChangeTaskReq, CountQuery, ParsedTaskQueryInfo, SubmitTaskReq,
-    SubmitTaskResp, TaskQueryInfo, TaskQueryResp, TaskResultSpec, TasksQueryReq, TasksQueryResp,
-    UpdateTaskLabelsReq,
+    SubmitTaskResp, TaskQueryInfo, TaskQueryResp, TaskResultSpec, TasksCancelByFilterReq,
+    TasksCancelByFilterResp, TasksQueryReq, TasksQueryResp, UpdateTaskLabelsReq,
 };
 use crate::{config::InfraPool, schema::TaskSpec};
 
@@ -628,6 +629,7 @@ async fn check_task_list_query(
     user_id: i64,
     pool: &InfraPool,
     query: &mut TasksQueryReq,
+    role: UserGroupRole,
 ) -> crate::error::Result<()> {
     if let Some(ref tags) = query.tags {
         if tags.is_empty() {
@@ -683,14 +685,20 @@ async fn check_task_list_query(
             .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
             .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()))
             .to_owned();
-        let role = UserGroupRoleQueryRes::find_by_statement(builder.build(&role_stmt))
+        let query_role = UserGroupRoleQueryRes::find_by_statement(builder.build(&role_stmt))
             .one(&pool.db)
             .await?
             .map(|r| r.role);
-        if role.is_none() {
-            return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
-                format!("Group with name {group_name} not found or user is not in the group"),
-            )));
+        match query_role {
+            Some(r) if r >= role => {}
+            Some(_) => {
+                return Err(Error::AuthError(crate::error::AuthError::PermissionDenied));
+            }
+            None => {
+                return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                    format!("Group with name {group_name} not found or user is not in the group"),
+                )));
+            }
         }
     }
     Ok(())
@@ -726,12 +734,205 @@ pub(crate) fn parse_operators_with_number(s: &str) -> crate::error::Result<Opera
     }
 }
 
+/// Apply task query filters to both active and archived task query statements.
+/// This helper function is shared between query and batch cancel operations.
+fn apply_task_filters(
+    active_stmt: &mut sea_orm::sea_query::SelectStatement,
+    archive_stmt: &mut sea_orm::sea_query::SelectStatement,
+    query: &TasksQueryReq,
+) -> crate::error::Result<()> {
+    if let Some(ref creator_usernames) = query.creator_usernames {
+        let creator_usernames = Vec::from_iter(creator_usernames.clone());
+        active_stmt.and_where(
+            Expr::col((User::Entity, User::Column::Username))
+                .eq(PgFunc::any(creator_usernames.clone())),
+        );
+        archive_stmt.and_where(
+            Expr::col((User::Entity, User::Column::Username)).eq(PgFunc::any(creator_usernames)),
+        );
+    }
+    if let Some(ref group_name) = query.group_name {
+        active_stmt
+            .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()));
+        archive_stmt
+            .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()));
+    }
+    if let Some(ref tags) = query.tags {
+        let tags = Vec::from_iter(tags.clone());
+        active_stmt.and_where(
+            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Tags)).contains(tags.clone()),
+        );
+        archive_stmt.and_where(
+            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Tags)).contains(tags),
+        );
+    }
+    if let Some(ref labels) = query.labels {
+        let labels = Vec::from_iter(labels.clone());
+        active_stmt.and_where(
+            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Labels)).contains(labels.clone()),
+        );
+        archive_stmt.and_where(
+            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Labels)).contains(labels),
+        );
+    }
+    if let Some(ref states) = query.states {
+        let states = Vec::from_iter(states.clone());
+        active_stmt.and_where(
+            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::State))
+                .eq(PgFunc::any(states.clone())),
+        );
+        archive_stmt.and_where(
+            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::State))
+                .eq(PgFunc::any(states)),
+        );
+    }
+    if let Some(ref exit_status) = query.exit_status {
+        let op = parse_operators_with_number(exit_status)?;
+        match op {
+            OperatorWithNumber::Eq(e) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .eq(e.to_string()),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .eq(e.to_string()),
+                );
+            }
+            OperatorWithNumber::Neq(e) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .ne(e.to_string()),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .ne(e.to_string()),
+                );
+            }
+            OperatorWithNumber::Gt(e) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .gt(e.to_string()),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .gt(e.to_string()),
+                );
+            }
+            OperatorWithNumber::Gte(e) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .gte(e.to_string()),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .gte(e.to_string()),
+                );
+            }
+            OperatorWithNumber::Lt(e) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .lt(e.to_string()),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .lt(e.to_string()),
+                );
+            }
+            OperatorWithNumber::Lte(e) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .lte(e.to_string()),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
+                        .cast_json_field("exit_status")
+                        .lte(e.to_string()),
+                );
+            }
+        }
+    }
+    if let Some(ref priority) = query.priority {
+        let op = parse_operators_with_number(priority)?;
+        match op {
+            OperatorWithNumber::Eq(p) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).eq(p),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).eq(p),
+                );
+            }
+            OperatorWithNumber::Neq(p) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).ne(p),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).ne(p),
+                );
+            }
+            OperatorWithNumber::Gt(p) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).gt(p),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).gt(p),
+                );
+            }
+            OperatorWithNumber::Gte(p) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).gte(p),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).gte(p),
+                );
+            }
+            OperatorWithNumber::Lt(p) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).lt(p),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).lt(p),
+                );
+            }
+            OperatorWithNumber::Lte(p) => {
+                active_stmt.and_where(
+                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).lte(p),
+                );
+                archive_stmt.and_where(
+                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).lte(p),
+                );
+            }
+        }
+    }
+    if let Some(limit) = query.limit {
+        active_stmt.limit(limit);
+        archive_stmt.limit(limit);
+    }
+    if let Some(offset) = query.offset {
+        active_stmt.offset(offset);
+        archive_stmt.offset(offset);
+    }
+    Ok(())
+}
+
 pub async fn query_tasks_by_filter(
     user_id: i64,
     pool: &InfraPool,
     mut query: TasksQueryReq,
 ) -> crate::error::Result<TasksQueryResp> {
-    check_task_list_query(user_id, pool, &mut query).await?;
+    check_task_list_query(user_id, pool, &mut query, UserGroupRole::Read).await?;
     let mut active_stmt = Query::select();
     if query.count {
         active_stmt.expr(Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Uuid)).count());
@@ -828,189 +1029,9 @@ pub async fn query_tasks_by_filter(
             Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
         );
-    if let Some(creator_usernames) = query.creator_usernames {
-        let creator_usernames = Vec::from_iter(creator_usernames);
-        active_stmt.and_where(
-            Expr::col((User::Entity, User::Column::Username))
-                .eq(PgFunc::any(creator_usernames.clone())),
-        );
-        archive_stmt.and_where(
-            Expr::col((User::Entity, User::Column::Username)).eq(PgFunc::any(creator_usernames)),
-        );
-    }
-    if let Some(ref group_name) = query.group_name {
-        active_stmt
-            .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()));
-        archive_stmt
-            .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()));
-    }
-    if let Some(tags) = query.tags {
-        let tags = Vec::from_iter(tags);
-        active_stmt.and_where(
-            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Tags)).contains(tags.clone()),
-        );
-        archive_stmt.and_where(
-            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Tags)).contains(tags),
-        );
-    }
-    if let Some(labels) = query.labels {
-        let labels = Vec::from_iter(labels);
-        active_stmt.and_where(
-            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Labels)).contains(labels.clone()),
-        );
-        archive_stmt.and_where(
-            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Labels)).contains(labels),
-        );
-    }
-    if let Some(states) = query.states {
-        let states = Vec::from_iter(states);
-        active_stmt.and_where(
-            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::State))
-                .eq(PgFunc::any(states.clone())),
-        );
-        archive_stmt.and_where(
-            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::State))
-                .eq(PgFunc::any(states)),
-        );
-    }
-    if let Some(exit_status) = query.exit_status {
-        let op = parse_operators_with_number(&exit_status)?;
-        match op {
-            OperatorWithNumber::Eq(e) => {
-                active_stmt.and_where(
-                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
-                        .cast_json_field("exit_status")
-                        .eq(e.to_string()),
-                );
-                archive_stmt.and_where(
-                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
-                        .cast_json_field("exit_status")
-                        .eq(e.to_string()),
-                );
-            }
-            OperatorWithNumber::Neq(e) => {
-                active_stmt.and_where(
-                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
-                        .cast_json_field("exit_status")
-                        .ne(e.to_string()),
-                );
-                archive_stmt.and_where(
-                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
-                        .cast_json_field("exit_status")
-                        .ne(e.to_string()),
-                );
-            }
-            OperatorWithNumber::Gt(e) => {
-                active_stmt.and_where(
-                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
-                        .cast_json_field("exit_status")
-                        .gt(e.to_string()),
-                );
-                archive_stmt.and_where(
-                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
-                        .cast_json_field("exit_status")
-                        .gt(e.to_string()),
-                );
-            }
-            OperatorWithNumber::Gte(e) => {
-                active_stmt.and_where(
-                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
-                        .cast_json_field("exit_status")
-                        .gte(e.to_string()),
-                );
-                archive_stmt.and_where(
-                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
-                        .cast_json_field("exit_status")
-                        .gte(e.to_string()),
-                );
-            }
-            OperatorWithNumber::Lt(e) => {
-                active_stmt.and_where(
-                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
-                        .cast_json_field("exit_status")
-                        .lt(e.to_string()),
-                );
-                archive_stmt.and_where(
-                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
-                        .cast_json_field("exit_status")
-                        .lt(e.to_string()),
-                );
-            }
-            OperatorWithNumber::Lte(e) => {
-                active_stmt.and_where(
-                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Result))
-                        .cast_json_field("exit_status")
-                        .lte(e.to_string()),
-                );
-                archive_stmt.and_where(
-                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Result))
-                        .cast_json_field("exit_status")
-                        .lte(e.to_string()),
-                );
-            }
-        }
-    }
-    if let Some(priority) = query.priority {
-        let op = parse_operators_with_number(&priority)?;
-        match op {
-            OperatorWithNumber::Eq(p) => {
-                active_stmt.and_where(
-                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).eq(p),
-                );
-                archive_stmt.and_where(
-                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).eq(p),
-                );
-            }
-            OperatorWithNumber::Neq(p) => {
-                active_stmt.and_where(
-                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).ne(p),
-                );
-                archive_stmt.and_where(
-                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).ne(p),
-                );
-            }
-            OperatorWithNumber::Gt(p) => {
-                active_stmt.and_where(
-                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).gt(p),
-                );
-                archive_stmt.and_where(
-                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).gt(p),
-                );
-            }
-            OperatorWithNumber::Gte(p) => {
-                active_stmt.and_where(
-                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).gte(p),
-                );
-                archive_stmt.and_where(
-                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).gte(p),
-                );
-            }
-            OperatorWithNumber::Lt(p) => {
-                active_stmt.and_where(
-                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).lt(p),
-                );
-                archive_stmt.and_where(
-                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).lt(p),
-                );
-            }
-            OperatorWithNumber::Lte(p) => {
-                active_stmt.and_where(
-                    Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Priority)).lte(p),
-                );
-                archive_stmt.and_where(
-                    Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Priority)).lte(p),
-                );
-            }
-        }
-    }
-    if let Some(limit) = query.limit {
-        active_stmt.limit(limit);
-        archive_stmt.limit(limit);
-    }
-    if let Some(offset) = query.offset {
-        active_stmt.offset(offset);
-        archive_stmt.offset(offset);
-    }
+
+    // Apply filters using the shared helper function
+    apply_task_filters(&mut active_stmt, &mut archive_stmt, &query)?;
     let builder = pool.db.get_database_backend();
     let resp = if query.count {
         let active_count = CountQuery::find_by_statement(builder.build(&active_stmt))
@@ -1043,6 +1064,171 @@ pub async fn query_tasks_by_filter(
         }
     };
     Ok(resp)
+}
+
+/// Cancel multiple tasks by filter criteria.
+/// Only tasks in Ready or Pending state will be cancelled.
+/// User must have Admin or Write role in the task's group (validated by check_task_list_query).
+pub async fn cancel_tasks_by_filter(
+    user_id: i64,
+    pool: &InfraPool,
+    req: TasksCancelByFilterReq,
+) -> crate::error::Result<TasksCancelByFilterResp> {
+    // Convert request to TasksQueryReq for validation and filtering
+    let mut query = TasksQueryReq {
+        creator_usernames: req.creator_usernames,
+        group_name: req.group_name,
+        tags: req.tags,
+        labels: req.labels,
+        // Filter for Ready and Pending tasks (cancellable states)
+        states: {
+            let mut states = HashSet::new();
+            // If user specified states, intersect with Ready and Pending
+            if let Some(user_states) = req.states {
+                if user_states.contains(&TaskState::Ready) {
+                    states.insert(TaskState::Ready);
+                }
+                if user_states.contains(&TaskState::Pending) {
+                    states.insert(TaskState::Pending);
+                }
+            }
+            if states.is_empty() {
+                // Default: both Ready and Pending are cancellable
+                states.insert(TaskState::Ready);
+                states.insert(TaskState::Pending);
+            }
+            Some(states)
+        },
+        exit_status: req.exit_status,
+        priority: req.priority,
+        limit: None,
+        offset: None,
+        count: false,
+    };
+
+    // Validate query and fill in defaults (also checks Write permission)
+    check_task_list_query(user_id, pool, &mut query, UserGroupRole::Write).await?;
+    let group_name = query.group_name.clone().unwrap_or_default();
+
+    // Build query statement for matching tasks
+    let mut active_stmt = Query::select();
+    active_stmt
+        .columns([
+            (ActiveTasks::Entity, ActiveTasks::Column::Id),
+            (ActiveTasks::Entity, ActiveTasks::Column::Uuid),
+            (ActiveTasks::Entity, ActiveTasks::Column::TaskId),
+            (ActiveTasks::Entity, ActiveTasks::Column::CreatorId),
+            (ActiveTasks::Entity, ActiveTasks::Column::GroupId),
+            (ActiveTasks::Entity, ActiveTasks::Column::Tags),
+            (ActiveTasks::Entity, ActiveTasks::Column::Labels),
+            (ActiveTasks::Entity, ActiveTasks::Column::CreatedAt),
+            (ActiveTasks::Entity, ActiveTasks::Column::UpdatedAt),
+            (ActiveTasks::Entity, ActiveTasks::Column::State),
+            (ActiveTasks::Entity, ActiveTasks::Column::AssignedWorker),
+            (ActiveTasks::Entity, ActiveTasks::Column::Timeout),
+            (ActiveTasks::Entity, ActiveTasks::Column::Priority),
+            (ActiveTasks::Entity, ActiveTasks::Column::Spec),
+            (ActiveTasks::Entity, ActiveTasks::Column::UpstreamTaskUuid),
+            (ActiveTasks::Entity, ActiveTasks::Column::DownstreamTaskUuid),
+        ])
+        .from(ActiveTasks::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            User::Entity,
+            Expr::col((User::Entity, User::Column::Id)).eq(Expr::col((
+                ActiveTasks::Entity,
+                ActiveTasks::Column::CreatorId,
+            ))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        );
+
+    // Apply filters (note: we don't need archive_stmt for cancellation)
+    let mut archive_stmt = Query::select().from(ArchivedTasks::Entity).to_owned();
+    apply_task_filters(&mut active_stmt, &mut archive_stmt, &query)?;
+
+    let builder = pool.db.get_database_backend();
+    let stmt = builder.build(&active_stmt);
+
+    // Execute query, delete, and insert in a single transaction
+    // Total: 3 queries (SELECT + DELETE + INSERT_MANY) regardless of task count
+    let task_ids = pool
+        .db
+        .transaction::<_, Vec<i64>, crate::error::Error>(|txn| {
+            Box::pin(async move {
+                // Query matching tasks within transaction (Query #1)
+                let tasks = ActiveTasks::Model::find_by_statement(stmt.clone())
+                    .all(txn)
+                    .await?;
+
+                if tasks.is_empty() {
+                    return Ok(vec![]);
+                }
+
+                let now = TimeDateTimeWithTimeZone::now_utc();
+                let res = TaskResultSpec {
+                    exit_status: 0,
+                    msg: Some(crate::schema::TaskResultMessage::UserCancellation),
+                };
+                let result = serde_json::to_value(res).inspect_err(|e| tracing::error!("{}", e))?;
+
+                // Collect task IDs for deletion
+                let task_ids: Vec<i64> = tasks.iter().map(|t| t.id).collect();
+
+                // Prepare archived tasks
+                let archived_tasks: Vec<ArchivedTasks::ActiveModel> = tasks
+                    .into_iter()
+                    .map(|task| ArchivedTasks::ActiveModel {
+                        id: Set(task.id),
+                        creator_id: Set(task.creator_id),
+                        group_id: Set(task.group_id),
+                        task_id: Set(task.task_id),
+                        uuid: Set(task.uuid),
+                        tags: Set(task.tags),
+                        labels: Set(task.labels),
+                        created_at: Set(task.created_at),
+                        updated_at: Set(now),
+                        state: Set(TaskState::Cancelled),
+                        assigned_worker: Set(task.assigned_worker),
+                        timeout: Set(task.timeout),
+                        priority: Set(task.priority),
+                        spec: Set(task.spec),
+                        result: Set(Some(result.clone())),
+                        upstream_task_uuid: Set(task.upstream_task_uuid),
+                        downstream_task_uuid: Set(task.downstream_task_uuid),
+                    })
+                    .collect();
+
+                // Batch delete from active_tasks (Query #2)
+                ActiveTasks::Entity::delete_many()
+                    .filter(ActiveTasks::Column::Id.is_in(task_ids.clone()))
+                    .exec(txn)
+                    .await?;
+
+                // Batch insert into archived_tasks (Query #3)
+                ArchivedTasks::Entity::insert_many(archived_tasks)
+                    .exec(txn)
+                    .await?;
+
+                Ok(task_ids)
+            })
+        })
+        .await?;
+
+    // Remove tasks from dispatch queues
+    for task_id in &task_ids {
+        let _ = remove_task(*task_id, pool)
+            .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
+    }
+
+    Ok(TasksCancelByFilterResp {
+        cancelled_count: task_ids.len() as u64,
+        group_name,
+    })
 }
 
 #[derive(Debug, Clone, FromQueryResult)]

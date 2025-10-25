@@ -737,6 +737,30 @@ impl MitoHttpClient {
         }
     }
 
+    pub async fn shutdown_workers_by_filter(
+        &mut self,
+        req: WorkersShutdownByFilterReq,
+    ) -> crate::error::Result<WorkersShutdownByFilterResp> {
+        self.url.set_path("workers/shutdown");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<WorkersShutdownByFilterResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn replace_worker_tags(
         &mut self,
         uuid: Uuid,
@@ -837,6 +861,30 @@ impl MitoHttpClient {
             .map_err(map_reqwest_err)?;
         if resp.status().is_success() {
             Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn cancel_tasks_by_filter(
+        &mut self,
+        req: TasksCancelByFilterReq,
+    ) -> crate::error::Result<TasksCancelByFilterResp> {
+        self.url.set_path("tasks/cancel");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<TasksCancelByFilterResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
         } else {
             Err(get_error_from_resp(resp).await.into())
         }

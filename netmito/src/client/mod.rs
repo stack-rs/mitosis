@@ -736,6 +736,15 @@ impl MitoClient {
             .await
     }
 
+    pub async fn workers_batch_cancel(
+        &mut self,
+        args: CancelWorkersArgs,
+    ) -> crate::error::Result<WorkersShutdownByFilterResp> {
+        self.http_client
+            .shutdown_workers_by_filter(args.into())
+            .await
+    }
+
     pub async fn workers_update_tags(
         &mut self,
         args: WorkerUpdateTagsArgs,
@@ -774,6 +783,13 @@ impl MitoClient {
 
     pub async fn tasks_cancel(&mut self, uuid: Uuid) -> crate::error::Result<()> {
         self.http_client.cancel_task_by_uuid(uuid).await
+    }
+
+    pub async fn tasks_batch_cancel(
+        &mut self,
+        args: CancelTasksArgs,
+    ) -> crate::error::Result<TasksCancelByFilterResp> {
+        self.http_client.cancel_tasks_by_filter(args.into()).await
     }
 
     pub async fn tasks_update_labels(
@@ -1007,6 +1023,18 @@ impl MitoClient {
                 WorkersCommands::Cancel(args) => match self.workers_cancel(args).await {
                     Ok(_) => {
                         tracing::info!("Worker cancelled successfully");
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                WorkersCommands::CancelMany(args) => match self.workers_batch_cancel(args).await {
+                    Ok(resp) => {
+                        tracing::info!(
+                            "Shutdown {} workers in group {}",
+                            resp.shutdown_count,
+                            resp.group_name
+                        );
                     }
                     Err(e) => {
                         tracing::error!("{}", e);
@@ -1303,6 +1331,18 @@ impl MitoClient {
                 TasksCommands::Cancel(args) => match self.tasks_cancel(args.uuid).await {
                     Ok(_) => {
                         tracing::info!("Task cancelled successfully");
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                TasksCommands::CancelMany(args) => match self.tasks_batch_cancel(args).await {
+                    Ok(resp) => {
+                        tracing::info!(
+                            "Cancelled {} tasks in group {}",
+                            resp.cancelled_count,
+                            resp.group_name
+                        );
                     }
                     Err(e) => {
                         tracing::error!("{}", e);

@@ -5,7 +5,10 @@ use uuid::Uuid;
 use crate::{
     config::client::parse_resources,
     entity::state::{TaskExecState, TaskState},
-    schema::{ChangeTaskReq, RemoteResourceDownload, TaskSpec, TasksQueryReq, UpdateTaskLabelsReq},
+    schema::{
+        ChangeTaskReq, RemoteResourceDownload, TaskSpec, TasksCancelByFilterReq, TasksQueryReq,
+        UpdateTaskLabelsReq,
+    },
 };
 
 use super::{parse_key_val, parse_watch_task, ArtifactsArgs};
@@ -26,6 +29,8 @@ pub enum TasksCommands {
     Query(QueryTasksArgs),
     /// Cancel a task
     Cancel(CancelTaskArgs),
+    /// Cancel multiple tasks subject to the filter
+    CancelMany(CancelTasksArgs),
     /// Replace labels of a task
     UpdateLabels(UpdateTaskLabelsArgs),
     /// Update the spec of a task
@@ -115,6 +120,31 @@ pub struct QueryTasksArgs {
 pub struct CancelTaskArgs {
     /// The UUID of the task
     pub uuid: Uuid,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct CancelTasksArgs {
+    /// The username of the creator who submitted the tasks
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub creators: Vec<String>,
+    /// The name of the group the tasks belong to
+    #[arg(short, long)]
+    pub group: Option<String>,
+    /// The tags of the tasks
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub tags: Vec<String>,
+    /// The labels of the tasks
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub labels: Vec<String>,
+    /// The state of the tasks
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub state: Vec<TaskState>,
+    /// The exit status of the tasks, support operators like `=`(default), `!=`, `<`, `<=`, `>`, `>=`
+    #[arg(short, long)]
+    pub exit_status: Option<String>,
+    /// The priority of the tasks, support operators like `=`(default), `!=`, `<`, `<=`, `>`, `>=`
+    #[arg(short, long)]
+    pub priority: Option<String>,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -219,6 +249,36 @@ impl From<UpdateTaskLabelsArgs> for UpdateTaskLabelsReq {
     fn from(args: UpdateTaskLabelsArgs) -> Self {
         Self {
             labels: args.labels.into_iter().collect(),
+        }
+    }
+}
+
+impl From<CancelTasksArgs> for TasksCancelByFilterReq {
+    fn from(args: CancelTasksArgs) -> Self {
+        Self {
+            creator_usernames: if args.creators.is_empty() {
+                None
+            } else {
+                Some(args.creators.into_iter().collect())
+            },
+            group_name: args.group,
+            tags: if args.tags.is_empty() {
+                None
+            } else {
+                Some(args.tags.into_iter().collect())
+            },
+            labels: if args.labels.is_empty() {
+                None
+            } else {
+                Some(args.labels.into_iter().collect())
+            },
+            states: if args.state.is_empty() {
+                None
+            } else {
+                Some(args.state.into_iter().collect())
+            },
+            exit_status: args.exit_status,
+            priority: args.priority,
         }
     }
 }

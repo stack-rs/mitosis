@@ -32,6 +32,7 @@ pub fn tasks_router(st: InfraPool) -> Router<InfraPool> {
         .route("/{uuid}/artifacts/{content_type}", delete(delete_artifact))
         .route("/{uuid}/artifacts", post(upload_artifact))
         .route("/query", post(query_tasks))
+        .route("/cancel", post(cancel_tasks))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -147,6 +148,24 @@ pub async fn query_tasks(
             }
         })?;
     Ok(Json(tasks))
+}
+
+pub async fn cancel_tasks(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Json(req): Json<TasksCancelByFilterReq>,
+) -> Result<Json<TasksCancelByFilterResp>, ApiError> {
+    let resp = service::task::cancel_tasks_by_filter(u.id, &pool, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(resp))
 }
 
 pub async fn upload_artifact(

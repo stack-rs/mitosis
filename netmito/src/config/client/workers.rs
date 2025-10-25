@@ -6,7 +6,7 @@ use crate::{
     entity::role::GroupWorkerRole,
     schema::{
         RemoveGroupWorkerRoleReq, ReplaceWorkerLabelsReq, ReplaceWorkerTagsReq,
-        UpdateGroupWorkerRoleReq, WorkersQueryReq,
+        UpdateGroupWorkerRoleReq, WorkerShutdownOp, WorkersQueryReq, WorkersShutdownByFilterReq,
     },
 };
 
@@ -22,6 +22,8 @@ pub struct WorkersArgs {
 pub enum WorkersCommands {
     /// Cancel a worker
     Cancel(CancelWorkerArgs),
+    /// Cancel multiple workers subject to the filter
+    CancelMany(CancelWorkersArgs),
     /// Replace tags of a worker
     UpdateTags(WorkerUpdateTagsArgs),
     /// Replace labels of a worker
@@ -42,6 +44,29 @@ pub struct CancelWorkerArgs {
     pub uuid: Uuid,
     /// Whether to force the worker to shutdown.
     /// If not specified, the worker will be try to shutdown gracefully
+    #[arg(short, long)]
+    pub force: bool,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct CancelWorkersArgs {
+    /// The name of the group has access to the workers
+    #[arg(short, long)]
+    pub group: Option<String>,
+    /// The role of the group on the workers
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub role: Vec<GroupWorkerRole>,
+    /// The tags of the workers
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub tags: Vec<String>,
+    /// The labels of the workers
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub labels: Vec<String>,
+    /// The username of the creator
+    #[arg(long)]
+    pub creator: Option<String>,
+    /// Whether to force the workers to shutdown.
+    /// If not specified, the workers will be try to shutdown gracefully
     #[arg(short, long)]
     pub force: bool,
 }
@@ -166,6 +191,35 @@ impl From<RemoveWorkerGroupArgs> for RemoveGroupWorkerRoleReq {
     fn from(args: RemoveWorkerGroupArgs) -> Self {
         Self {
             groups: args.groups.into_iter().collect(),
+        }
+    }
+}
+
+impl From<CancelWorkersArgs> for WorkersShutdownByFilterReq {
+    fn from(args: CancelWorkersArgs) -> Self {
+        Self {
+            group_name: args.group,
+            role: if args.role.is_empty() {
+                None
+            } else {
+                Some(args.role.into_iter().collect())
+            },
+            tags: if args.tags.is_empty() {
+                None
+            } else {
+                Some(args.tags.into_iter().collect())
+            },
+            labels: if args.labels.is_empty() {
+                None
+            } else {
+                Some(args.labels.into_iter().collect())
+            },
+            creator_username: args.creator,
+            op: if args.force {
+                WorkerShutdownOp::Force
+            } else {
+                WorkerShutdownOp::Graceful
+            },
         }
     }
 }

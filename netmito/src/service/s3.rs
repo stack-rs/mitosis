@@ -1107,7 +1107,7 @@ pub async fn query_attachments_by_filter(
     mut query: AttachmentsQueryReq,
 ) -> Result<AttachmentsQueryResp, crate::error::Error> {
     check_task_list_query(user_id, pool, &group_name).await?;
-    let key_prefix = query.key_prefix.take().unwrap_or_default();
+    let key = query.key.take().unwrap_or_default();
     let mut attachment_stmt = Query::select();
     if query.count {
         attachment_stmt.expr(Expr::col((Attachment::Entity, Attachment::Column::Id)).count());
@@ -1131,7 +1131,7 @@ pub async fn query_attachments_by_filter(
         .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()))
         .and_where(
             Expr::col((Attachment::Entity, Attachment::Column::Key))
-                .like(format!("%{key_prefix}%")),
+                .like(format!("%{key}%")),
         );
     if let Some(limit) = query.limit {
         attachment_stmt.limit(limit);
@@ -1173,7 +1173,7 @@ pub async fn batch_download_attachments_by_filter(
     query: AttachmentsDownloadByFilterReq,
 ) -> Result<AttachmentsDownloadListResp, crate::error::Error> {
     let req = AttachmentsQueryReq {
-        key_prefix: query.key,
+        key: query.key,
         limit: query.limit,
         offset: query.offset,
         count: false,

@@ -2059,7 +2059,7 @@ components:
     AttachmentsQueryReq:
       type: object
       properties:
-        key_prefix:
+        key:
           type: string
           nullable: true
           description: Filter attachments by key prefix

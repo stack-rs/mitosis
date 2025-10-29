@@ -105,7 +105,7 @@ pub struct QueryAttachmentsArgs {
     pub group: Option<String>,
     /// The prefix of the key of the attachments
     #[arg(short, long = "key")]
-    pub key_prefix: Option<String>,
+    pub key: Option<String>,
     /// The limit of the tasks to query
     #[arg(long)]
     pub limit: Option<u64>,
@@ -137,7 +137,7 @@ pub struct DownloadAttachmentsByFilterArgs {
     pub group: Option<String>,
     /// The prefix of the key of the attachments
     #[arg(short, long = "key")]
-    pub key_prefix: Option<String>,
+    pub key: Option<String>,
     /// The limit of the attachments to download
     #[arg(long)]
     pub limit: Option<u64>,
@@ -183,7 +183,7 @@ pub struct DownloadAttachmentsByListArgs {
 impl From<QueryAttachmentsArgs> for AttachmentsQueryReq {
     fn from(args: QueryAttachmentsArgs) -> Self {
         Self {
-            key_prefix: args.key_prefix,
+            key: args.key,
             limit: args.limit,
             offset: args.offset,
             count: args.count,
@@ -194,7 +194,7 @@ impl From<QueryAttachmentsArgs> for AttachmentsQueryReq {
 impl From<DownloadAttachmentsByFilterArgs> for AttachmentsDownloadByFilterReq {
     fn from(args: DownloadAttachmentsByFilterArgs) -> Self {
         Self {
-            key: args.key_prefix,
+            key: args.key,
             limit: args.limit,
             offset: args.offset,
         }

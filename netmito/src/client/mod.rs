@@ -590,7 +590,7 @@ impl MitoClient {
     ) -> crate::error::Result<AttachmentsQueryResp> {
         let group_name = args.group.unwrap_or_else(|| self.username.clone());
         let req = AttachmentsQueryReq {
-            key_prefix: args.key_prefix,
+            key: args.key,
             count: args.count,
             limit: args.limit,
             offset: args.offset,

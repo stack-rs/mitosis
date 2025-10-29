@@ -340,7 +340,7 @@ pub struct AttachmentMetadata {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AttachmentsQueryReq {
-    pub key_prefix: Option<String>,
+    pub key: Option<String>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
     pub count: bool,

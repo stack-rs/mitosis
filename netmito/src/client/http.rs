@@ -356,6 +356,141 @@ impl MitoHttpClient {
         crate::service::s3::download_file(&self.http_client, resp, local_path, show_pb).await
     }
 
+    /// Download multiple files concurrently with a specified concurrency limit
+    pub async fn concurrent_download_files(
+        &self,
+        downloads: Vec<(RemoteResourceDownloadResp, std::path::PathBuf)>,
+        concurrent: usize,
+        show_pb: bool,
+    ) -> crate::error::Result<()> {
+        use futures::stream::{self, StreamExt};
+
+        // Use a semaphore to limit concurrent downloads
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrent));
+        let client = self.http_client.clone();
+
+        let tasks = downloads.into_iter().map(|(resp, local_path)| {
+            let sem = semaphore.clone();
+            let client = client.clone();
+            async move {
+                let _permit = sem.acquire().await.unwrap();
+                crate::service::s3::download_file(&client, &resp, &local_path, show_pb).await
+            }
+        });
+
+        let results: Vec<_> = stream::iter(tasks)
+            .buffer_unordered(concurrent)
+            .collect()
+            .await;
+
+        // Check if any downloads failed
+        for result in results {
+            result?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn batch_download_artifacts_by_filter(
+        &mut self,
+        req: ArtifactsDownloadByFilterReq,
+    ) -> crate::error::Result<ArtifactsDownloadListResp> {
+        self.url.set_path("tasks/download/artifacts/filter");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let r = resp
+                .json::<ArtifactsDownloadListResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(r)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn batch_download_artifacts_by_list(
+        &mut self,
+        req: ArtifactsDownloadByUuidsReq,
+    ) -> crate::error::Result<ArtifactsDownloadListResp> {
+        self.url.set_path("tasks/download/artifacts/list");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let r = resp
+                .json::<ArtifactsDownloadListResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(r)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn batch_download_attachments_by_filter(
+        &mut self,
+        group_name: &str,
+        req: AttachmentsDownloadByFilterReq,
+    ) -> crate::error::Result<AttachmentsDownloadListResp> {
+        self.url
+            .set_path(&format!("groups/{group_name}/download/attachments/filter"));
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let r = resp
+                .json::<AttachmentsDownloadListResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(r)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn batch_download_attachments_by_list(
+        &mut self,
+        group_name: &str,
+        req: AttachmentsDownloadByKeysReq,
+    ) -> crate::error::Result<AttachmentsDownloadListResp> {
+        self.url
+            .set_path(&format!("groups/{group_name}/download/attachments/list"));
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let r = resp
+                .json::<AttachmentsDownloadListResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(r)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn delete_artifact(
         &mut self,
         uuid: Uuid,

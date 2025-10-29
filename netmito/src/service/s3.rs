@@ -14,9 +14,6 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use crate::schema::{
-    AttachmentMetadata, AttachmentsQueryResp, CountQuery, RemoteResourceDownloadResp,
-};
 use crate::{config::InfraPool, error::S3Error};
 use crate::{
     entity::StoredTaskModel,
@@ -33,7 +30,16 @@ use crate::{
 use crate::{
     entity::{content::AttachmentContentType, state::GroupState},
     error::Error,
-    schema::{AttachmentQueryInfo, AttachmentsQueryReq},
+    schema::{AttachmentQueryInfo, AttachmentsQueryReq, TasksQueryReq},
+};
+use crate::{
+    schema::{
+        ArtifactDownloadItem, ArtifactsDownloadByFilterReq, ArtifactsDownloadByUuidsReq,
+        ArtifactsDownloadListResp, AttachmentDownloadItem, AttachmentMetadata,
+        AttachmentsDownloadByFilterReq, AttachmentsDownloadByKeysReq, AttachmentsDownloadListResp,
+        AttachmentsQueryResp, CountQuery, RemoteResourceDownloadResp,
+    },
+    service::task::query_tasks_by_filter,
 };
 
 pub(crate) const UPLOAD_VALID_SECS: u64 = 3600;
@@ -104,9 +110,14 @@ pub async fn get_presigned_download_link<T: Into<String>>(
     bucket: &str,
     key: T,
     length: i64,
+    min_expires: u64,
 ) -> Result<String, S3Error> {
     // At least valid for 1 hour and at most valid for 1 day
-    let expires = Duration::from_secs(86400.min(3600.max(length as u64 / 1000000)));
+    let expires = Duration::from_secs(
+        86400
+            .min(3600.max(length as u64 / 1000000))
+            .max(min_expires),
+    );
     let resp = client
         .get_object()
         .bucket(bucket)
@@ -164,6 +175,37 @@ pub async fn delete_objects<T: Into<String>>(
     Ok(())
 }
 
+/// Helper function to generate presigned download URLs for artifacts.
+async fn generate_artifact_downloads(
+    pool: &InfraPool,
+    uuids: Vec<Uuid>,
+    content_type: ArtifactContentType,
+) -> Result<Vec<ArtifactDownloadItem>, crate::error::Error> {
+    // Query artifacts for these tasks with the specified content type
+    let artifacts = Artifact::Entity::find()
+        .filter(Artifact::Column::TaskId.is_in(uuids))
+        .filter(Artifact::Column::ContentType.eq(content_type))
+        .all(&pool.db)
+        .await?;
+
+    // Create a set of task UUIDs that have artifacts
+    let mut downloads = Vec::with_capacity(artifacts.len());
+
+    for artifact in artifacts {
+        let key = format!("{}/{}", artifact.task_id, content_type);
+        let url =
+            get_presigned_download_link(&pool.s3, ARTIFACTS_BUCKET, key, artifact.size, 86400)
+                .await?;
+        downloads.push(ArtifactDownloadItem {
+            uuid: artifact.task_id,
+            url,
+            size: artifact.size,
+        });
+    }
+
+    Ok(downloads)
+}
+
 pub async fn download_artifact_by_uuid(
     pool: &InfraPool,
     uuid: Uuid,
@@ -179,11 +221,60 @@ pub async fn download_artifact_by_uuid(
         )))?;
     let key = format!("{uuid}/{content_type}");
     let url =
-        get_presigned_download_link(&pool.s3, "mitosis-artifacts", key, artifact.size).await?;
+        get_presigned_download_link(&pool.s3, ARTIFACTS_BUCKET, key, artifact.size, 3600).await?;
     Ok(RemoteResourceDownloadResp {
         url,
         size: artifact.size,
     })
+}
+
+/// Batch download artifacts by filter criteria.
+/// Queries tasks matching the filter, then generates presigned URLs for artifacts of the specified type.
+pub async fn batch_download_artifacts_by_filter(
+    user_id: i64,
+    pool: &InfraPool,
+    req: ArtifactsDownloadByFilterReq,
+) -> Result<ArtifactsDownloadListResp, crate::error::Error> {
+    // Convert request to TasksQueryReq for validation and filtering
+    let query = TasksQueryReq {
+        creator_usernames: req.creator_usernames,
+        group_name: req.group_name,
+        tags: req.tags,
+        labels: req.labels,
+        states: req.states,
+        exit_status: req.exit_status,
+        priority: req.priority,
+        limit: None,
+        offset: None,
+        count: false,
+    };
+
+    let resp = query_tasks_by_filter(user_id, pool, query).await?;
+
+    let task_uuids: Vec<Uuid> = resp.tasks.into_iter().map(|r| r.uuid).collect();
+
+    // Use the helper function to generate download URLs
+    let downloads = generate_artifact_downloads(pool, task_uuids, req.content_type).await?;
+
+    Ok(ArtifactsDownloadListResp { downloads })
+}
+
+/// Batch download artifacts by task UUIDs.
+/// Generates presigned URLs for artifacts of the specified type for the given task UUIDs.
+pub async fn batch_download_artifacts_by_uuids(
+    pool: &InfraPool,
+    req: ArtifactsDownloadByUuidsReq,
+) -> Result<ArtifactsDownloadListResp, crate::error::Error> {
+    if req.uuids.is_empty() {
+        return Err(Error::ApiError(ApiError::InvalidRequest(
+            "UUIDs list cannot be empty".to_string(),
+        )));
+    }
+
+    // Use the helper function to generate download URLs
+    let downloads = generate_artifact_downloads(pool, req.uuids, req.content_type).await?;
+
+    Ok(ArtifactsDownloadListResp { downloads })
 }
 
 async fn find_task_by_uuid(
@@ -510,8 +601,9 @@ pub async fn worker_download_attachment(
             "Attachment of group {group_name} and key {key}"
         )))?;
     let s3_key = format!("{group_name}/{key}");
-    let url = get_presigned_download_link(&pool.s3, "mitosis-attachments", s3_key, attachment.size)
-        .await?;
+    let url =
+        get_presigned_download_link(&pool.s3, ATTACHMENTS_BUCKET, s3_key, attachment.size, 3600)
+            .await?;
     Ok(RemoteResourceDownloadResp {
         url,
         size: attachment.size,
@@ -592,6 +684,50 @@ async fn get_attachment_from_db(
     Ok(attachment)
 }
 
+/// Helper function to generate presigned download URLs for attachments.
+async fn generate_attachment_downloads(
+    pool: &InfraPool,
+    group_name: &str,
+    keys: Vec<String>,
+) -> Result<Vec<AttachmentDownloadItem>, crate::error::Error> {
+    let group = Group::Entity::find()
+        .filter(Group::Column::GroupName.eq(group_name.to_string()))
+        .one(&pool.db)
+        .await?
+        .ok_or(Error::ApiError(ApiError::NotFound(format!(
+            "Group {} not found",
+            group_name
+        ))))?;
+    // Query attachments for the specified keys
+    let attachments = Attachment::Entity::find()
+        .filter(Attachment::Column::Key.is_in(keys.clone()))
+        .filter(Attachment::Column::GroupId.eq(group.id))
+        .all(&pool.db)
+        .await?;
+
+    // Verify all attachments belong to the specified group and generate URLs
+    let mut downloads = Vec::new();
+
+    for attachment in attachments {
+        let s3_key = format!("{}/{}", group_name, attachment.key);
+        let url = get_presigned_download_link(
+            &pool.s3,
+            ATTACHMENTS_BUCKET,
+            s3_key,
+            attachment.size,
+            86400,
+        )
+        .await?;
+        downloads.push(AttachmentDownloadItem {
+            key: attachment.key,
+            url,
+            size: attachment.size,
+        });
+    }
+
+    Ok(downloads)
+}
+
 pub async fn user_get_attachment(
     pool: &InfraPool,
     user_id: i64,
@@ -602,8 +738,9 @@ pub async fn user_get_attachment(
         get_attachment_from_db(pool, user_id, group_name.clone(), key.clone(), false, false)
             .await?;
     let s3_key = format!("{group_name}/{key}");
-    let url = get_presigned_download_link(&pool.s3, "mitosis-attachments", s3_key, attachment.size)
-        .await?;
+    let url =
+        get_presigned_download_link(&pool.s3, ATTACHMENTS_BUCKET, s3_key, attachment.size, 3600)
+            .await?;
     Ok(RemoteResourceDownloadResp {
         url,
         size: attachment.size,
@@ -1025,4 +1162,58 @@ pub async fn query_attachments_by_filter(
         }
     };
     Ok(resp)
+}
+
+/// Batch download attachments by filter criteria.
+/// Queries attachments matching the filter, then generates presigned URLs.
+pub async fn batch_download_attachments_by_filter(
+    user_id: i64,
+    pool: &InfraPool,
+    group_name: String,
+    query: AttachmentsDownloadByFilterReq,
+) -> Result<AttachmentsDownloadListResp, crate::error::Error> {
+    let req = AttachmentsQueryReq {
+        key_prefix: query.key,
+        limit: query.limit,
+        offset: query.offset,
+        count: false,
+    };
+    let resp = query_attachments_by_filter(user_id, pool, group_name.clone(), req).await?;
+    let downloads = generate_attachment_downloads(
+        pool,
+        &group_name,
+        resp.attachments.into_iter().map(|a| a.key).collect(),
+    )
+    .await?;
+
+    Ok(AttachmentsDownloadListResp {
+        downloads,
+        group_name,
+    })
+}
+
+/// Batch download attachments by specific keys.
+/// Generates presigned URLs for the specified attachment keys.
+pub async fn batch_download_attachments_by_keys(
+    user_id: i64,
+    pool: &InfraPool,
+    group_name: String,
+    req: AttachmentsDownloadByKeysReq,
+) -> Result<AttachmentsDownloadListResp, crate::error::Error> {
+    // Check user has access to the group
+    check_task_list_query(user_id, pool, &group_name).await?;
+
+    if req.keys.is_empty() {
+        return Err(Error::ApiError(ApiError::InvalidRequest(
+            "Keys list cannot be empty".to_string(),
+        )));
+    }
+
+    // Use the helper function to generate download URLs
+    let downloads = generate_attachment_downloads(pool, &group_name, req.keys).await?;
+
+    Ok(AttachmentsDownloadListResp {
+        downloads,
+        group_name,
+    })
 }

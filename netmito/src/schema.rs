@@ -537,6 +537,70 @@ pub enum WorkerShutdownOp {
     Force,
 }
 
+/// Request to batch download artifacts by filter criteria.
+/// Uses the same filter fields as TasksQueryReq to find tasks, then downloads artifacts of the specified type.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ArtifactsDownloadByFilterReq {
+    pub creator_usernames: Option<HashSet<String>>,
+    pub group_name: Option<String>,
+    pub tags: Option<HashSet<String>>,
+    pub labels: Option<HashSet<String>>,
+    pub states: Option<HashSet<TaskState>>,
+    pub exit_status: Option<String>,
+    pub priority: Option<String>,
+    pub content_type: ArtifactContentType,
+}
+
+/// Request to batch download artifacts by task UUIDs.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ArtifactsDownloadByUuidsReq {
+    pub uuids: Vec<Uuid>,
+    pub content_type: ArtifactContentType,
+}
+
+/// Single artifact download item in batch response
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ArtifactDownloadItem {
+    pub uuid: Uuid,
+    pub url: String,
+    pub size: i64,
+}
+
+/// Response for batch artifact download operations
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ArtifactsDownloadListResp {
+    pub downloads: Vec<ArtifactDownloadItem>,
+}
+
+/// Request to batch download attachments by filter criteria.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AttachmentsDownloadByFilterReq {
+    pub key: Option<String>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+
+/// Request to batch download attachments by keys.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AttachmentsDownloadByKeysReq {
+    pub keys: Vec<String>,
+}
+
+/// Single attachment download item in batch response
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AttachmentDownloadItem {
+    pub key: String,
+    pub url: String,
+    pub size: i64,
+}
+
+/// Response for batch attachment download operations
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AttachmentsDownloadListResp {
+    pub downloads: Vec<AttachmentDownloadItem>,
+    pub group_name: String,
+}
+
 impl Default for WorkerShutdownOp {
     fn default() -> Self {
         Self::Graceful

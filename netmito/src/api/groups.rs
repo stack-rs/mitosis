@@ -35,6 +35,14 @@ pub fn groups_router(st: InfraPool) -> Router<InfraPool> {
         )
         .route("/{group_name}/attachments", post(upload_attachment))
         .route("/{group_name}/attachments/query", post(query_attachments))
+        .route(
+            "/{group_name}/download/attachments/filter",
+            post(batch_download_attachments_by_filter),
+        )
+        .route(
+            "/{group_name}/download/attachments/list",
+            post(batch_download_attachments_by_keys),
+        )
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -226,4 +234,42 @@ pub async fn query_attachments(
             }
         })?;
     Ok(Json(attachments))
+}
+
+pub async fn batch_download_attachments_by_filter(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(group_name): Path<String>,
+    Json(req): Json<AttachmentsDownloadByFilterReq>,
+) -> Result<Json<AttachmentsDownloadListResp>, ApiError> {
+    let resp = service::s3::batch_download_attachments_by_filter(u.id, &pool, group_name, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(resp))
+}
+
+pub async fn batch_download_attachments_by_keys(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(group_name): Path<String>,
+    Json(req): Json<AttachmentsDownloadByKeysReq>,
+) -> Result<Json<AttachmentsDownloadListResp>, ApiError> {
+    let resp = service::s3::batch_download_attachments_by_keys(u.id, &pool, group_name, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(resp))
 }

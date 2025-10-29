@@ -625,7 +625,7 @@ struct UserGroupRoleQueryRes {
     role: UserGroupRole,
 }
 
-async fn check_task_list_query(
+pub(crate) async fn check_task_list_query(
     user_id: i64,
     pool: &InfraPool,
     query: &mut TasksQueryReq,
@@ -736,7 +736,7 @@ pub(crate) fn parse_operators_with_number(s: &str) -> crate::error::Result<Opera
 
 /// Apply task query filters to both active and archived task query statements.
 /// This helper function is shared between query and batch cancel operations.
-fn apply_task_filters(
+pub(crate) fn apply_task_filters(
     active_stmt: &mut sea_orm::sea_query::SelectStatement,
     archive_stmt: &mut sea_orm::sea_query::SelectStatement,
     query: &TasksQueryReq,

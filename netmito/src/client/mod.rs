@@ -869,6 +869,276 @@ impl MitoClient {
         self.download_attachment(args).await
     }
 
+    pub async fn batch_download_artifacts_by_filter(
+        &mut self,
+        args: DownloadArtifactsByFilterArgs,
+    ) -> crate::error::Result<Vec<ResourceDownloadInfo>> {
+        let output_dir = args
+            .output_dir
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let no_download = args.no_download;
+        let show_pb = args.pb;
+        let concurrent = args.concurrent;
+
+        let resp = self
+            .http_client
+            .batch_download_artifacts_by_filter(args.into())
+            .await?;
+
+        if no_download {
+            for item in &resp.downloads {
+                tracing::info!("Task {}: {}", item.uuid, item.url);
+            }
+            return Ok(vec![]);
+        }
+
+        // Prepare download list
+        let downloads: Vec<(RemoteResourceDownloadResp, std::path::PathBuf)> = resp
+            .downloads
+            .iter()
+            .map(|item| {
+                let file_name = format!("{}.tar.gz", item.uuid);
+                let output_path = output_dir.join(file_name);
+                (
+                    RemoteResourceDownloadResp {
+                        url: item.url.clone(),
+                        size: item.size,
+                    },
+                    output_path,
+                )
+            })
+            .collect();
+
+        // Collect results for return
+        let results: Vec<ResourceDownloadInfo> = resp
+            .downloads
+            .iter()
+            .map(|item| {
+                let file_name = format!("{}.tar.gz", item.uuid);
+                let output_path = output_dir.join(file_name);
+                ResourceDownloadInfo {
+                    size: item.size,
+                    local_path: output_path,
+                }
+            })
+            .collect();
+
+        // Download concurrently
+        self.http_client
+            .concurrent_download_files(downloads, concurrent, show_pb)
+            .await?;
+
+        Ok(results)
+    }
+
+    pub async fn batch_download_artifacts_by_list(
+        &mut self,
+        args: DownloadArtifactsByListArgs,
+    ) -> crate::error::Result<Vec<ResourceDownloadInfo>> {
+        let output_dir = args
+            .output_dir
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let no_download = args.no_download;
+        let show_pb = args.pb;
+        let concurrent = args.concurrent;
+
+        let resp = self
+            .http_client
+            .batch_download_artifacts_by_list(args.into())
+            .await?;
+
+        if no_download {
+            for item in &resp.downloads {
+                tracing::info!("Task {}: {}", item.uuid, item.url);
+            }
+            return Ok(vec![]);
+        }
+
+        // Prepare download list
+        let downloads: Vec<(RemoteResourceDownloadResp, std::path::PathBuf)> = resp
+            .downloads
+            .iter()
+            .map(|item| {
+                let file_name = format!("{}.tar.gz", item.uuid);
+                let output_path = output_dir.join(file_name);
+                (
+                    RemoteResourceDownloadResp {
+                        url: item.url.clone(),
+                        size: item.size,
+                    },
+                    output_path,
+                )
+            })
+            .collect();
+
+        // Collect results for return
+        let results: Vec<ResourceDownloadInfo> = resp
+            .downloads
+            .iter()
+            .map(|item| {
+                let file_name = format!("{}.tar.gz", item.uuid);
+                let output_path = output_dir.join(file_name);
+                ResourceDownloadInfo {
+                    size: item.size,
+                    local_path: output_path,
+                }
+            })
+            .collect();
+
+        // Download concurrently
+        self.http_client
+            .concurrent_download_files(downloads, concurrent, show_pb)
+            .await?;
+
+        Ok(results)
+    }
+
+    pub async fn batch_download_attachments_by_filter(
+        &mut self,
+        args: DownloadAttachmentsByFilterArgs,
+    ) -> crate::error::Result<Vec<ResourceDownloadInfo>> {
+        let group_name = args.group.clone().unwrap_or_else(|| self.username.clone());
+        let output_dir = args
+            .output_dir
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let no_download = args.no_download;
+        let show_pb = args.pb;
+        let concurrent = args.concurrent;
+
+        let resp = self
+            .http_client
+            .batch_download_attachments_by_filter(&group_name, args.into())
+            .await?;
+
+        if no_download {
+            for item in &resp.downloads {
+                tracing::info!("Attachment {}: {}", item.key, item.url);
+            }
+            return Ok(vec![]);
+        }
+
+        // Prepare download list
+        let downloads: Vec<(RemoteResourceDownloadResp, std::path::PathBuf)> = resp
+            .downloads
+            .iter()
+            .map(|item| {
+                let fname = std::path::Path::new(&item.key)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&item.key)
+                    .to_string();
+                let output_path = output_dir.join(fname);
+                (
+                    RemoteResourceDownloadResp {
+                        url: item.url.clone(),
+                        size: item.size,
+                    },
+                    output_path,
+                )
+            })
+            .collect();
+
+        // Collect results for return
+        let results: Vec<ResourceDownloadInfo> = resp
+            .downloads
+            .iter()
+            .map(|item| {
+                let fname = std::path::Path::new(&item.key)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&item.key)
+                    .to_string();
+                let output_path = output_dir.join(fname);
+                ResourceDownloadInfo {
+                    size: item.size,
+                    local_path: output_path,
+                }
+            })
+            .collect();
+
+        // Download concurrently
+        self.http_client
+            .concurrent_download_files(downloads, concurrent, show_pb)
+            .await?;
+
+        Ok(results)
+    }
+
+    pub async fn batch_download_attachments_by_list(
+        &mut self,
+        args: DownloadAttachmentsByListArgs,
+    ) -> crate::error::Result<Vec<ResourceDownloadInfo>> {
+        let group_name = args.group.clone().unwrap_or_else(|| self.username.clone());
+        let output_dir = args
+            .output_dir
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let no_download = args.no_download;
+        let show_pb = args.pb;
+        let concurrent = args.concurrent;
+
+        let resp = self
+            .http_client
+            .batch_download_attachments_by_list(&group_name, args.into())
+            .await?;
+
+        if no_download {
+            for item in &resp.downloads {
+                tracing::info!("Attachment {}: {}", item.key, item.url);
+            }
+            return Ok(vec![]);
+        }
+
+        // Prepare download list
+        let downloads: Vec<(RemoteResourceDownloadResp, std::path::PathBuf)> = resp
+            .downloads
+            .iter()
+            .map(|item| {
+                let fname = std::path::Path::new(&item.key)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&item.key)
+                    .to_string();
+                let output_path = output_dir.join(fname);
+                (
+                    RemoteResourceDownloadResp {
+                        url: item.url.clone(),
+                        size: item.size,
+                    },
+                    output_path,
+                )
+            })
+            .collect();
+
+        // Collect results for return
+        let results: Vec<ResourceDownloadInfo> = resp
+            .downloads
+            .iter()
+            .map(|item| {
+                let fname = std::path::Path::new(&item.key)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&item.key)
+                    .to_string();
+                let output_path = output_dir.join(fname);
+                ResourceDownloadInfo {
+                    size: item.size,
+                    local_path: output_path,
+                }
+            })
+            .collect();
+
+        // Download concurrently
+        self.http_client
+            .concurrent_download_files(downloads, concurrent, show_pb)
+            .await?;
+
+        Ok(results)
+    }
+
     pub async fn handle_command<T>(&mut self, cmd: T) -> bool
     where
         T: Into<ClientCommand>,
@@ -1265,6 +1535,40 @@ impl MitoClient {
                             }
                         }
                     }
+                    AttachmentsCommands::DownloadByFilter(args) => {
+                        match self.batch_download_attachments_by_filter(args).await {
+                            Ok(infos) => {
+                                tracing::info!("Downloaded {} attachments", infos.len());
+                                for info in infos {
+                                    tracing::info!(
+                                        "  {} ({}B)",
+                                        info.local_path.display(),
+                                        info.size
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        }
+                    }
+                    AttachmentsCommands::DownloadByList(args) => {
+                        match self.batch_download_attachments_by_list(args).await {
+                            Ok(infos) => {
+                                tracing::info!("Downloaded {} attachments", infos.len());
+                                for info in infos {
+                                    tracing::info!(
+                                        "  {} ({}B)",
+                                        info.local_path.display(),
+                                        info.size
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        }
+                    }
                 },
             },
             ClientCommand::Tasks(args) => match args.command {
@@ -1405,6 +1709,40 @@ impl MitoClient {
                                 Err(e) => {
                                     tracing::error!("{}", e);
                                 }
+                            }
+                        }
+                    }
+                    ArtifactsCommands::DownloadByFilter(args) => {
+                        match self.batch_download_artifacts_by_filter(args).await {
+                            Ok(infos) => {
+                                tracing::info!("Downloaded {} artifacts", infos.len());
+                                for info in infos {
+                                    tracing::info!(
+                                        "  {} ({}B)",
+                                        info.local_path.display(),
+                                        info.size
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        }
+                    }
+                    ArtifactsCommands::DownloadByList(args) => {
+                        match self.batch_download_artifacts_by_list(args).await {
+                            Ok(infos) => {
+                                tracing::info!("Downloaded {} artifacts", infos.len());
+                                for info in infos {
+                                    tracing::info!(
+                                        "  {} ({}B)",
+                                        info.local_path.display(),
+                                        info.size
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
                             }
                         }
                     }

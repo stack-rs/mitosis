@@ -3,6 +3,10 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 
+use crate::schema::{
+    AttachmentsDownloadByFilterReq, AttachmentsDownloadByKeysReq, AttachmentsQueryReq,
+};
+
 #[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
 pub struct AttachmentsArgs {
     #[command(subcommand)]
@@ -21,6 +25,10 @@ pub enum AttachmentsCommands {
     Download(DownloadAttachmentArgs),
     /// Query attachments subject to the filter
     Query(QueryAttachmentsArgs),
+    /// Batch download attachments by filter criteria
+    DownloadByFilter(DownloadAttachmentsByFilterArgs),
+    /// Batch download attachments by keys
+    DownloadByList(DownloadAttachmentsByListArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -120,4 +128,81 @@ pub struct GetAttachmentMetaArgs {
     /// key (if specified) as group-name (if not specified)
     #[arg(short, long)]
     pub smart: bool,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct DownloadAttachmentsByFilterArgs {
+    /// The name of the group the attachments belong to
+    #[arg(short, long)]
+    pub group: Option<String>,
+    /// The prefix of the key of the attachments
+    #[arg(short, long = "key")]
+    pub key_prefix: Option<String>,
+    /// The limit of the attachments to download
+    #[arg(long)]
+    pub limit: Option<u64>,
+    /// The offset of the attachments to download
+    #[arg(long)]
+    pub offset: Option<u64>,
+    /// Specify the directory to download attachments
+    #[arg(short, long = "output")]
+    pub output_dir: Option<PathBuf>,
+    /// Only output the URLs without downloading
+    #[arg(long)]
+    pub no_download: bool,
+    /// Whether to show progress bar when downloading
+    #[arg(long)]
+    pub pb: bool,
+    /// Number of concurrent downloads (default: 1)
+    #[arg(long, default_value_t = 1)]
+    pub concurrent: usize,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct DownloadAttachmentsByListArgs {
+    /// The name of the group the attachments belong to
+    #[arg(short, long)]
+    pub group: Option<String>,
+    /// The keys of the attachments
+    #[arg(num_args = 1..)]
+    pub keys: Vec<String>,
+    /// Specify the directory to download attachments
+    #[arg(short, long = "output")]
+    pub output_dir: Option<PathBuf>,
+    /// Only output the URLs without downloading
+    #[arg(long)]
+    pub no_download: bool,
+    /// Whether to show progress bar when downloading
+    #[arg(long)]
+    pub pb: bool,
+    /// Number of concurrent downloads (default: 1)
+    #[arg(long, default_value_t = 1)]
+    pub concurrent: usize,
+}
+
+impl From<QueryAttachmentsArgs> for AttachmentsQueryReq {
+    fn from(args: QueryAttachmentsArgs) -> Self {
+        Self {
+            key_prefix: args.key_prefix,
+            limit: args.limit,
+            offset: args.offset,
+            count: args.count,
+        }
+    }
+}
+
+impl From<DownloadAttachmentsByFilterArgs> for AttachmentsDownloadByFilterReq {
+    fn from(args: DownloadAttachmentsByFilterArgs) -> Self {
+        Self {
+            key: args.key_prefix,
+            limit: args.limit,
+            offset: args.offset,
+        }
+    }
+}
+
+impl From<DownloadAttachmentsByListArgs> for AttachmentsDownloadByKeysReq {
+    fn from(args: DownloadAttachmentsByListArgs) -> Self {
+        Self { keys: args.keys }
+    }
 }

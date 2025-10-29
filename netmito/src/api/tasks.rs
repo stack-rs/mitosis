@@ -33,6 +33,14 @@ pub fn tasks_router(st: InfraPool) -> Router<InfraPool> {
         .route("/{uuid}/artifacts", post(upload_artifact))
         .route("/query", post(query_tasks))
         .route("/cancel", post(cancel_tasks))
+        .route(
+            "/download/artifacts/filter",
+            post(batch_download_artifacts_by_filter),
+        )
+        .route(
+            "/download/artifacts/list",
+            post(batch_download_artifacts_by_uuids),
+        )
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -222,4 +230,40 @@ pub async fn delete_artifact(
             }
         })?;
     Ok(())
+}
+
+pub async fn batch_download_artifacts_by_filter(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Json(req): Json<ArtifactsDownloadByFilterReq>,
+) -> Result<Json<ArtifactsDownloadListResp>, ApiError> {
+    let resp = service::s3::batch_download_artifacts_by_filter(u.id, &pool, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(resp))
+}
+
+pub async fn batch_download_artifacts_by_uuids(
+    Extension(_): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Json(req): Json<ArtifactsDownloadByUuidsReq>,
+) -> Result<Json<ArtifactsDownloadListResp>, ApiError> {
+    let resp = service::s3::batch_download_artifacts_by_uuids(&pool, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(resp))
 }

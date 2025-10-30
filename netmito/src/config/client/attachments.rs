@@ -103,7 +103,7 @@ pub struct QueryAttachmentsArgs {
     /// The name of the group the attachments belong to
     #[arg(short, long)]
     pub group: Option<String>,
-    /// The prefix of the key of the attachments
+    /// The part of the key of the attachments
     #[arg(short, long = "key")]
     pub key: Option<String>,
     /// The limit of the tasks to query
@@ -135,7 +135,7 @@ pub struct DownloadAttachmentsByFilterArgs {
     /// The name of the group the attachments belong to
     #[arg(short, long)]
     pub group: Option<String>,
-    /// The prefix of the key of the attachments
+    /// The part of the key of the attachments
     #[arg(short, long = "key")]
     pub key: Option<String>,
     /// The limit of the attachments to download

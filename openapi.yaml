@@ -485,6 +485,72 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /groups/{group_name}/download/attachments/filter:
+    post:
+      summary: Batch download attachments by filter
+      description: Get download URLs for group attachments matching filter criteria
+      operationId: batchDownloadAttachmentsByFilter
+      tags:
+        - Groups
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: group_name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttachmentsDownloadByFilterReq"
+      responses:
+        "200":
+          description: List of attachment download URLs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttachmentsDownloadListResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /groups/{group_name}/download/attachments/list:
+    post:
+      summary: Batch download attachments by keys
+      description: Get download URLs for group attachments by specific keys
+      operationId: batchDownloadAttachmentsByKeys
+      tags:
+        - Groups
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: group_name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttachmentsDownloadByKeysReq"
+      responses:
+        "200":
+          description: List of attachment download URLs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttachmentsDownloadListResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /workers:
     post:
       summary: Register worker
@@ -548,6 +614,33 @@ paths:
                 $ref: "#/components/schemas/WorkersQueryResp"
         "401":
           $ref: "#/components/responses/Unauthorized"
+
+  /workers/shutdown:
+    post:
+      summary: Batch shutdown workers
+      description: Shutdown multiple workers by filter criteria
+      operationId: shutdownWorkersByFilter
+      tags:
+        - Workers
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkersShutdownByFilterReq"
+      responses:
+        "200":
+          description: Workers shutdown successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkersShutdownByFilterResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /workers/{uuid}:
     get:
@@ -976,6 +1069,85 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TasksQueryResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /tasks/cancel:
+    post:
+      summary: Batch cancel tasks
+      description: Cancel multiple tasks by filter criteria
+      operationId: cancelTasksByFilter
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TasksCancelByFilterReq"
+      responses:
+        "200":
+          description: Tasks cancelled successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TasksCancelByFilterResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /tasks/download/artifacts/filter:
+    post:
+      summary: Batch download artifacts by filter
+      description: Get download URLs for task artifacts matching filter criteria
+      operationId: batchDownloadArtifactsByFilter
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ArtifactsDownloadByFilterReq"
+      responses:
+        "200":
+          description: List of artifact download URLs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactsDownloadListResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /tasks/download/artifacts/list:
+    post:
+      summary: Batch download artifacts by UUIDs
+      description: Get download URLs for task artifacts by specific UUIDs
+      operationId: batchDownloadArtifactsByUuids
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ArtifactsDownloadByUuidsReq"
+      responses:
+        "200":
+          description: List of artifact download URLs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactsDownloadListResp"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -2062,7 +2234,7 @@ components:
         key:
           type: string
           nullable: true
-          description: Filter attachments by key prefix
+          description: Filter attachments by part of the key
           example: datasets/
         limit:
           type: integer
@@ -2200,6 +2372,15 @@ components:
           example:
             - gpu
             - python
+        labels:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by worker labels
+          example:
+            - production
+            - us-west-2
         creator_username:
           type: string
           nullable: true
@@ -2216,6 +2397,7 @@ components:
         - worker_id
         - creator_username
         - tags
+        - labels
         - created_at
         - updated_at
         - state
@@ -2235,6 +2417,14 @@ components:
           example:
             - gpu
             - python
+        labels:
+          type: array
+          items:
+            type: string
+          description: Worker labels for organization and querying
+          example:
+            - production
+            - us-west-2
         created_at:
           type: string
           format: date-time
@@ -2577,6 +2767,7 @@ components:
         - ResourceForbidden
         - WatchTimeout
         - UserCancellation
+        - SubmitNewTaskFailed
       description: |
         Task failure reason:
         - FetchResourceTimeout: Timeout downloading resources
@@ -2586,6 +2777,7 @@ components:
         - ResourceForbidden: Access denied to resource
         - WatchTimeout: Watched task timeout
         - UserCancellation: Task cancelled by user
+        - SubmitNewTaskFailed: Failed to submit new task
 
     TasksQueryReq:
       type: object
@@ -2965,6 +3157,297 @@ components:
           type: string
           description: Secret key for shutdown authorization
           example: shutdown-secret-123
+
+    WorkerShutdownOp:
+      type: string
+      enum:
+        - Graceful
+        - Force
+      description: |
+        Worker shutdown operation type:
+        - Graceful: Wait for current task to complete
+        - Force: Stop immediately
+
+    TasksCancelByFilterReq:
+      type: object
+      properties:
+        creator_usernames:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by task creators
+        group_name:
+          type: string
+          nullable: true
+          description: Filter by group name
+        tags:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by task tags
+        labels:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by task labels
+        states:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskState"
+          nullable: true
+          description: Filter by task states
+        exit_status:
+          type: string
+          nullable: true
+          description: Filter by exit status
+        priority:
+          type: string
+          nullable: true
+          description: Filter by priority
+      description: Request to cancel multiple tasks by filter criteria
+
+    TasksCancelByFilterResp:
+      type: object
+      required:
+        - cancelled_count
+        - group_name
+      properties:
+        cancelled_count:
+          type: integer
+          format: uint64
+          description: Number of tasks cancelled
+          example: 15
+        group_name:
+          type: string
+          description: Group name where tasks were cancelled
+          example: research-team
+
+    WorkersShutdownByFilterReq:
+      type: object
+      required:
+        - op
+      properties:
+        group_name:
+          type: string
+          nullable: true
+          description: Filter by group name
+        role:
+          type: array
+          items:
+            $ref: "#/components/schemas/GroupWorkerRole"
+          nullable: true
+          description: Filter by group roles
+        tags:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by worker tags
+        labels:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by worker labels
+        creator_username:
+          type: string
+          nullable: true
+          description: Filter by creator username
+        op:
+          $ref: "#/components/schemas/WorkerShutdownOp"
+      description: Request to shutdown multiple workers by filter criteria
+
+    WorkersShutdownByFilterResp:
+      type: object
+      required:
+        - shutdown_count
+        - group_name
+      properties:
+        shutdown_count:
+          type: integer
+          format: uint64
+          description: Number of workers shutdown
+          example: 5
+        group_name:
+          type: string
+          description: Group name where workers were shutdown
+          example: research-team
+
+    ArtifactsDownloadByFilterReq:
+      type: object
+      required:
+        - content_type
+      properties:
+        creator_usernames:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by task creators
+        group_name:
+          type: string
+          nullable: true
+          description: Filter by group name
+        tags:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by task tags
+        labels:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by task labels
+        states:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskState"
+          nullable: true
+          description: Filter by task states
+        exit_status:
+          type: string
+          nullable: true
+          description: Filter by exit status
+        priority:
+          type: string
+          nullable: true
+          description: Filter by priority
+        content_type:
+          $ref: "#/components/schemas/ArtifactContentType"
+      description: Request to batch download artifacts by filter criteria
+
+    ArtifactsDownloadByUuidsReq:
+      type: object
+      required:
+        - uuids
+        - content_type
+      properties:
+        uuids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: List of task UUIDs to download artifacts from
+          example:
+            - 789e0123-e89b-12d3-a456-426614174222
+            - 123e4567-e89b-12d3-a456-426614174000
+        content_type:
+          $ref: "#/components/schemas/ArtifactContentType"
+      description: Request to batch download artifacts by task UUIDs
+
+    ArtifactDownloadItem:
+      type: object
+      required:
+        - uuid
+        - url
+        - size
+      properties:
+        uuid:
+          type: string
+          format: uuid
+          description: Task UUID
+          example: 789e0123-e89b-12d3-a456-426614174222
+        url:
+          type: string
+          format: uri
+          description: Presigned download URL
+          example: https://s3.example.com/bucket/path?signature=...
+        size:
+          type: integer
+          format: int64
+          description: Artifact size in bytes
+          example: 2048576
+
+    ArtifactsDownloadListResp:
+      type: object
+      required:
+        - downloads
+      properties:
+        downloads:
+          type: array
+          items:
+            $ref: "#/components/schemas/ArtifactDownloadItem"
+          description: List of artifact downloads
+
+    AttachmentsDownloadByFilterReq:
+      type: object
+      properties:
+        key:
+          type: string
+          nullable: true
+          description: Filter attachments by key pattern
+          example: datasets/
+        limit:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Maximum number of results
+          example: 50
+        offset:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Offset for pagination
+          example: 0
+      description: Request to batch download attachments by filter criteria
+
+    AttachmentsDownloadByKeysReq:
+      type: object
+      required:
+        - keys
+      properties:
+        keys:
+          type: array
+          items:
+            type: string
+          description: List of attachment keys to download
+          example:
+            - datasets/experiment-1.tar.gz
+            - models/checkpoint.pth
+      description: Request to batch download attachments by specific keys
+
+    AttachmentDownloadItem:
+      type: object
+      required:
+        - key
+        - url
+        - size
+      properties:
+        key:
+          type: string
+          description: Attachment key
+          example: datasets/experiment-1.tar.gz
+        url:
+          type: string
+          format: uri
+          description: Presigned download URL
+          example: https://s3.example.com/bucket/path?signature=...
+        size:
+          type: integer
+          format: int64
+          description: Attachment size in bytes
+          example: 1048576
+
+    AttachmentsDownloadListResp:
+      type: object
+      required:
+        - downloads
+        - group_name
+      properties:
+        downloads:
+          type: array
+          items:
+            $ref: "#/components/schemas/AttachmentDownloadItem"
+          description: List of attachment downloads
+        group_name:
+          type: string
+          description: Group name
+          example: research-team
 
 security:
   - bearerAuth: []

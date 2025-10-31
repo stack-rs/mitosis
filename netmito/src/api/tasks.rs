@@ -42,6 +42,12 @@ pub fn tasks_router(st: InfraPool) -> Router<InfraPool> {
             "/download/artifacts/list",
             post(batch_download_artifacts_by_uuids),
         )
+        .route("/delete/artifacts", post(batch_delete_artifacts_by_filter))
+        .route(
+            "/delete/artifacts/list",
+            post(batch_delete_artifacts_by_uuids),
+        )
+        .route("/submit", post(batch_submit_tasks))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -275,6 +281,60 @@ pub async fn batch_download_artifacts_by_uuids(
     Json(req): Json<ArtifactsDownloadByUuidsReq>,
 ) -> Result<Json<ArtifactsDownloadListResp>, ApiError> {
     let resp = service::s3::batch_download_artifacts_by_uuids(&pool, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(resp))
+}
+
+pub async fn batch_delete_artifacts_by_filter(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Json(req): Json<ArtifactsDeleteByFilterReq>,
+) -> Result<Json<ArtifactsDeleteByFilterResp>, ApiError> {
+    let resp = service::s3::batch_delete_artifacts_by_filter(u.id, &pool, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(resp))
+}
+
+pub async fn batch_delete_artifacts_by_uuids(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Json(req): Json<ArtifactsDeleteByUuidsReq>,
+) -> Result<Json<ArtifactsDeleteByUuidsResp>, ApiError> {
+    let resp = service::s3::batch_delete_artifacts_by_uuids(u.id, &pool, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(resp))
+}
+
+pub async fn batch_submit_tasks(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Json(req): Json<TasksSubmitReq>,
+) -> Result<Json<TasksSubmitResp>, ApiError> {
+    let resp = service::task::user_batch_submit_tasks(&pool, u.id, req)
         .await
         .map_err(|e| match e {
             crate::error::Error::AuthError(err) => ApiError::AuthError(err),

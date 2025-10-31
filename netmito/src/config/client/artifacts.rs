@@ -6,7 +6,10 @@ use uuid::Uuid;
 
 use crate::{
     entity::{content::ArtifactContentType, state::TaskState},
-    schema::{ArtifactsDownloadByFilterReq, ArtifactsDownloadByUuidsReq},
+    schema::{
+        ArtifactsDeleteByFilterReq, ArtifactsDeleteByUuidsReq, ArtifactsDownloadByFilterReq,
+        ArtifactsDownloadByUuidsReq,
+    },
 };
 
 #[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
@@ -24,9 +27,13 @@ pub enum ArtifactsCommands {
     /// Download an artifact of a task
     Download(DownloadArtifactArgs),
     /// Batch download artifacts by filter criteria
-    DownloadByFilter(DownloadArtifactsByFilterArgs),
+    DownloadMany(DownloadArtifactsByFilterArgs),
     /// Batch download artifacts by task UUIDs
-    DownloadByList(DownloadArtifactsByListArgs),
+    DownloadList(DownloadArtifactsByListArgs),
+    /// Batch delete artifacts by filter criteria
+    DeleteMany(DeleteArtifactsByFilterArgs),
+    /// Batch delete artifacts by task UUIDs
+    DeleteList(DeleteArtifactsByListArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -165,6 +172,84 @@ impl From<DownloadArtifactsByFilterArgs> for ArtifactsDownloadByFilterReq {
 
 impl From<DownloadArtifactsByListArgs> for ArtifactsDownloadByUuidsReq {
     fn from(args: DownloadArtifactsByListArgs) -> Self {
+        Self {
+            uuids: args.uuids,
+            content_type: args.content_type,
+        }
+    }
+}
+
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct DeleteArtifactsByFilterArgs {
+    /// The content type of the artifacts
+    #[arg(value_enum)]
+    pub content_type: ArtifactContentType,
+    /// The username of the creator who submitted the tasks
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub creators: Vec<String>,
+    /// The name of the group the tasks belong to
+    #[arg(short, long)]
+    pub group: Option<String>,
+    /// The tags of the tasks
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub tags: Vec<String>,
+    /// The labels of the tasks
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub labels: Vec<String>,
+    /// The state of the tasks
+    #[arg(short, long, num_args = 0.., value_delimiter = ',')]
+    pub state: Vec<TaskState>,
+    /// The exit status of the tasks, support operators like `=`(default), `!=`, `<`, `<=`, `>`, `>=`
+    #[arg(short, long)]
+    pub exit_status: Option<String>,
+    /// The priority of the tasks, support operators like `=`(default), `!=`, `<`, `<=`, `>`, `>=`
+    #[arg(short, long)]
+    pub priority: Option<String>,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct DeleteArtifactsByListArgs {
+    /// The content type of the artifacts
+    #[arg(value_enum)]
+    pub content_type: ArtifactContentType,
+    /// The UUIDs of the tasks
+    #[arg(num_args = 1..)]
+    pub uuids: Vec<Uuid>,
+}
+
+impl From<DeleteArtifactsByFilterArgs> for ArtifactsDeleteByFilterReq {
+    fn from(args: DeleteArtifactsByFilterArgs) -> Self {
+        Self {
+            creator_usernames: if args.creators.is_empty() {
+                None
+            } else {
+                Some(args.creators.into_iter().collect())
+            },
+            group_name: args.group,
+            tags: if args.tags.is_empty() {
+                None
+            } else {
+                Some(args.tags.into_iter().collect())
+            },
+            labels: if args.labels.is_empty() {
+                None
+            } else {
+                Some(args.labels.into_iter().collect())
+            },
+            states: if args.state.is_empty() {
+                None
+            } else {
+                Some(args.state.into_iter().collect())
+            },
+            exit_status: args.exit_status,
+            priority: args.priority,
+            content_type: args.content_type,
+        }
+    }
+}
+
+impl From<DeleteArtifactsByListArgs> for ArtifactsDeleteByUuidsReq {
+    fn from(args: DeleteArtifactsByListArgs) -> Self {
         Self {
             uuids: args.uuids,
             content_type: args.content_type,

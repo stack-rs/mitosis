@@ -139,7 +139,7 @@ pub enum ApiError {
     PresignS3Error(Box<S3Error>),
 }
 
-#[derive(Serialize, Debug, Deserialize)]
+#[derive(Serialize, Debug, Deserialize, Clone)]
 pub struct ErrorMsg {
     pub msg: String,
 }

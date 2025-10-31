@@ -6,8 +6,8 @@ use crate::{
     config::client::parse_resources,
     entity::state::{TaskExecState, TaskState},
     schema::{
-        ChangeTaskReq, RemoteResourceDownload, TaskSpec, TasksCancelByFilterReq,
-        TasksCancelByUuidsReq, TasksQueryReq, UpdateTaskLabelsReq,
+        ChangeTaskReq, RemoteResourceDownload, SubmitTaskReq, TaskSpec, TasksCancelByFilterReq,
+        TasksCancelByUuidsReq, TasksQueryReq, TasksSubmitReq, UpdateTaskLabelsReq,
     },
 };
 
@@ -23,6 +23,8 @@ pub struct TasksArgs {
 pub enum TasksCommands {
     /// Submit a task
     Submit(SubmitTaskArgs),
+    /// Submit multiple tasks at once
+    SubmitMany(SubmitTasksArgs),
     /// Get the info of a task
     Get(GetTaskArgs),
     /// Query tasks subject to the filter
@@ -295,5 +297,29 @@ impl From<CancelTasksArgs> for TasksCancelByFilterReq {
 impl From<CancelTasksByUuidsArgs> for TasksCancelByUuidsReq {
     fn from(args: CancelTasksByUuidsArgs) -> Self {
         Self { uuids: args.uuids }
+    }
+}
+
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct SubmitTasksArgs {
+    /// Path to a JSON file containing an array of task submission requests
+    #[arg(short, long)]
+    pub file: std::path::PathBuf,
+}
+
+impl SubmitTasksArgs {
+    pub fn load_tasks(&self) -> crate::error::Result<Vec<SubmitTaskReq>> {
+        let content = std::fs::read_to_string(&self.file)?;
+        let tasks: Vec<SubmitTaskReq> = serde_json::from_str(&content)?;
+        Ok(tasks)
+    }
+}
+
+impl TryFrom<SubmitTasksArgs> for TasksSubmitReq {
+    type Error = crate::error::Error;
+
+    fn try_from(args: SubmitTasksArgs) -> Result<Self, Self::Error> {
+        let tasks = args.load_tasks()?;
+        Ok(Self { tasks })
     }
 }

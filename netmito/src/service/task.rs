@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::entity::role::{GroupWorkerRole, UserGroupRole};
 use crate::entity::state::TaskState;
+use crate::error::{ApiError, ErrorMsg};
 use crate::schema::{
     ArtifactQueryResp, ChangeTaskReq, CountQuery, ParsedTaskQueryInfo, SubmitTaskReq,
     SubmitTaskResp, TaskQueryInfo, TaskQueryResp, TaskResultSpec, TasksCancelByFilterReq,
@@ -1391,4 +1392,37 @@ impl From<PartialWorkerId> for i64 {
     fn from(p: PartialWorkerId) -> Self {
         p.id
     }
+}
+
+/// Batch submit multiple tasks.
+/// Submits each task in the list and returns individual results for each (including failures).
+pub async fn user_batch_submit_tasks(
+    pool: &InfraPool,
+    user_id: i64,
+    req: crate::schema::TasksSubmitReq,
+) -> crate::error::Result<crate::schema::TasksSubmitResp> {
+    if req.tasks.is_empty() {
+        return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+            "Tasks list cannot be empty".to_string(),
+        )));
+    }
+
+    let mut results = Vec::with_capacity(req.tasks.len());
+
+    for task_req in req.tasks {
+        let result = user_submit_task(pool, user_id, task_req)
+            .await
+            .map_err(|e| match e {
+                crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+                crate::error::Error::ApiError(e) => e,
+                _ => {
+                    tracing::error!("{}", e);
+                    ApiError::InternalServerError
+                }
+            })
+            .map_err(ErrorMsg::from);
+        results.push(result);
+    }
+
+    Ok(crate::schema::TasksSubmitResp { results })
 }

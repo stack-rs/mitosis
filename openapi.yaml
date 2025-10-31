@@ -551,6 +551,76 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /groups/{group_name}/delete/attachments:
+    post:
+      summary: Batch delete attachments by filter
+      description: Delete group attachments matching filter criteria
+      operationId: batchDeleteAttachmentsByFilter
+      tags:
+        - Groups
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: group_name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttachmentsDeleteByFilterReq"
+      responses:
+        "200":
+          description: Attachment deletion results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttachmentsDeleteByFilterResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /groups/{group_name}/delete/attachments/list:
+    post:
+      summary: Batch delete attachments by keys
+      description: Delete group attachments by specific keys
+      operationId: batchDeleteAttachmentsByKeys
+      tags:
+        - Groups
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: group_name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttachmentsDeleteByKeysReq"
+      responses:
+        "200":
+          description: Attachment deletion results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttachmentsDeleteByKeysResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /workers:
     post:
       summary: Register worker
@@ -1209,6 +1279,93 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /tasks/delete/artifacts:
+    post:
+      summary: Batch delete artifacts by filter
+      description: Delete task artifacts matching filter criteria
+      operationId: batchDeleteArtifactsByFilter
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ArtifactsDeleteByFilterReq"
+      responses:
+        "200":
+          description: Artifact deletion results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactsDeleteByFilterResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /tasks/delete/artifacts/list:
+    post:
+      summary: Batch delete artifacts by UUIDs
+      description: Delete task artifacts by specific UUIDs
+      operationId: batchDeleteArtifactsByUuids
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ArtifactsDeleteByUuidsReq"
+      responses:
+        "200":
+          description: Artifact deletion results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactsDeleteByUuidsResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /tasks/submit:
+    post:
+      summary: Batch submit tasks
+      description: Submit multiple tasks at once
+      operationId: batchSubmitTasks
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TasksSubmitReq"
+      responses:
+        "200":
+          description: List of submitted task responses
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TasksSubmitResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /tasks/{uuid}:
     get:
       summary: Get task information
@@ -1814,6 +1971,16 @@ components:
                 example: Resource already exists
 
   schemas:
+    ErrorMsg:
+      type: object
+      required:
+        - msg
+      properties:
+        msg:
+          type: string
+          description: Error message
+          example: "Task not found"
+
     UserLoginReq:
       type: object
       required:
@@ -3581,6 +3748,210 @@ components:
           type: string
           description: Group name
           example: research-team
+
+    ArtifactsDeleteByFilterReq:
+      type: object
+      required:
+        - content_type
+      properties:
+        creator_usernames:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by task creators
+        group_name:
+          type: string
+          nullable: true
+          description: Filter by group name
+        tags:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by task tags
+        labels:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by task labels
+        states:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskState"
+          nullable: true
+          description: Filter by task states
+        exit_status:
+          type: string
+          nullable: true
+          description: Filter by exit status (e.g., "0", ">0", "<0")
+        priority:
+          type: string
+          nullable: true
+          description: Filter by priority (e.g., "10", ">5", "<=3")
+        content_type:
+          $ref: "#/components/schemas/ArtifactContentType"
+
+    ArtifactsDeleteByUuidsReq:
+      type: object
+      required:
+        - uuids
+        - content_type
+      properties:
+        uuids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: List of task UUIDs
+          example:
+            - 550e8400-e29b-41d4-a716-446655440000
+        content_type:
+          $ref: "#/components/schemas/ArtifactContentType"
+
+    ArtifactsDeleteByFilterResp:
+      type: object
+      required:
+        - deleted_count
+      properties:
+        deleted_count:
+          type: integer
+          format: uint64
+          description: Number of artifacts deleted
+          example: 5
+
+    ArtifactsDeleteByUuidsResp:
+      type: object
+      required:
+        - deleted_count
+        - failed_uuids
+      properties:
+        deleted_count:
+          type: integer
+          format: uint64
+          description: Number of artifacts deleted
+          example: 5
+        failed_uuids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: List of UUIDs that failed to delete
+          example:
+            - 550e8400-e29b-41d4-a716-446655440001
+
+    AttachmentsDeleteByFilterReq:
+      type: object
+      properties:
+        key:
+          type: string
+          nullable: true
+          description: Filter by key pattern (substring match)
+        limit:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Maximum number of attachments to delete
+        offset:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Offset for pagination
+
+    AttachmentsDeleteByKeysReq:
+      type: object
+      required:
+        - keys
+      properties:
+        keys:
+          type: array
+          items:
+            type: string
+          description: List of attachment keys to delete
+          example:
+            - data/input.txt
+            - config/settings.json
+
+    AttachmentsDeleteByFilterResp:
+      type: object
+      required:
+        - deleted_count
+        - group_name
+      properties:
+        deleted_count:
+          type: integer
+          format: uint64
+          description: Number of attachments deleted
+          example: 3
+        group_name:
+          type: string
+          description: Group name
+          example: research-team
+
+    AttachmentsDeleteByKeysResp:
+      type: object
+      required:
+        - deleted_count
+        - failed_keys
+        - group_name
+      properties:
+        deleted_count:
+          type: integer
+          format: uint64
+          description: Number of attachments deleted
+          example: 3
+        failed_keys:
+          type: array
+          items:
+            type: string
+          description: List of keys that failed to delete
+          example:
+            - data/missing.txt
+        group_name:
+          type: string
+          description: Group name
+          example: research-team
+
+    TasksSubmitReq:
+      type: object
+      required:
+        - tasks
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/SubmitTaskReq"
+          description: List of tasks to submit
+
+    TaskSubmitResult:
+      oneOf:
+        - type: object
+          required:
+            - Ok
+          properties:
+            Ok:
+              $ref: "#/components/schemas/SubmitTaskResp"
+          description: Successful task submission
+        - type: object
+          required:
+            - Err
+          properties:
+            Err:
+              $ref: "#/components/schemas/ErrorMsg"
+          description: Failed task submission
+      description: Result of a single task submission (Ok or Err)
+
+    TasksSubmitResp:
+      type: object
+      required:
+        - results
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskSubmitResult"
+          description: List of individual task submission results (each is either Ok or Err)
 
 security:
   - bearerAuth: []

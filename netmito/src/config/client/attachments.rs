@@ -4,7 +4,8 @@ use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{
-    AttachmentsDownloadByFilterReq, AttachmentsDownloadByKeysReq, AttachmentsQueryReq,
+    AttachmentsDeleteByFilterReq, AttachmentsDeleteByKeysReq, AttachmentsDownloadByFilterReq,
+    AttachmentsDownloadByKeysReq, AttachmentsQueryReq,
 };
 
 #[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
@@ -26,9 +27,13 @@ pub enum AttachmentsCommands {
     /// Query attachments subject to the filter
     Query(QueryAttachmentsArgs),
     /// Batch download attachments by filter criteria
-    DownloadByFilter(DownloadAttachmentsByFilterArgs),
+    DownloadMany(DownloadAttachmentsByFilterArgs),
     /// Batch download attachments by keys
-    DownloadByList(DownloadAttachmentsByListArgs),
+    DownloadList(DownloadAttachmentsByListArgs),
+    /// Batch delete attachments by filter criteria
+    DeleteMany(DeleteAttachmentsByFilterArgs),
+    /// Batch delete attachments by keys
+    DeleteList(DeleteAttachmentsByListArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -203,6 +208,48 @@ impl From<DownloadAttachmentsByFilterArgs> for AttachmentsDownloadByFilterReq {
 
 impl From<DownloadAttachmentsByListArgs> for AttachmentsDownloadByKeysReq {
     fn from(args: DownloadAttachmentsByListArgs) -> Self {
+        Self { keys: args.keys }
+    }
+}
+
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct DeleteAttachmentsByFilterArgs {
+    /// The name of the group the attachments belong to
+    #[arg(short, long)]
+    pub group: Option<String>,
+    /// The part of the key of the attachments
+    #[arg(short, long = "key")]
+    pub key: Option<String>,
+    /// The limit of the attachments to delete
+    #[arg(long)]
+    pub limit: Option<u64>,
+    /// The offset of the attachments to delete
+    #[arg(long)]
+    pub offset: Option<u64>,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct DeleteAttachmentsByListArgs {
+    /// The name of the group the attachments belong to
+    #[arg(short, long)]
+    pub group: Option<String>,
+    /// The keys of the attachments
+    #[arg(num_args = 1..)]
+    pub keys: Vec<String>,
+}
+
+impl From<DeleteAttachmentsByFilterArgs> for AttachmentsDeleteByFilterReq {
+    fn from(args: DeleteAttachmentsByFilterArgs) -> Self {
+        Self {
+            key: args.key,
+            limit: args.limit,
+            offset: args.offset,
+        }
+    }
+}
+
+impl From<DeleteAttachmentsByListArgs> for AttachmentsDeleteByKeysReq {
+    fn from(args: DeleteAttachmentsByListArgs) -> Self {
         Self { keys: args.keys }
     }
 }

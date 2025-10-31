@@ -1162,6 +1162,130 @@ impl MitoHttpClient {
         }
     }
 
+    pub async fn batch_delete_artifacts_by_filter(
+        &mut self,
+        req: ArtifactsDeleteByFilterReq,
+    ) -> crate::error::Result<ArtifactsDeleteByFilterResp> {
+        self.url.set_path("tasks/delete/artifacts");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<ArtifactsDeleteByFilterResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn batch_delete_artifacts_by_list(
+        &mut self,
+        req: ArtifactsDeleteByUuidsReq,
+    ) -> crate::error::Result<ArtifactsDeleteByUuidsResp> {
+        self.url.set_path("tasks/delete/artifacts/list");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<ArtifactsDeleteByUuidsResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn batch_delete_attachments_by_filter(
+        &mut self,
+        group_name: &str,
+        req: AttachmentsDeleteByFilterReq,
+    ) -> crate::error::Result<AttachmentsDeleteByFilterResp> {
+        self.url
+            .set_path(&format!("groups/{group_name}/delete/attachments"));
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<AttachmentsDeleteByFilterResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn batch_delete_attachments_by_list(
+        &mut self,
+        group_name: &str,
+        req: AttachmentsDeleteByKeysReq,
+    ) -> crate::error::Result<AttachmentsDeleteByKeysResp> {
+        self.url
+            .set_path(&format!("groups/{group_name}/delete/attachments/list"));
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<AttachmentsDeleteByKeysResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn batch_submit_tasks(
+        &mut self,
+        req: TasksSubmitReq,
+    ) -> crate::error::Result<TasksSubmitResp> {
+        self.url.set_path("tasks/submit");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<TasksSubmitResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn admin_shutdown_coordinator(
         &mut self,
         req: ShutdownReq,

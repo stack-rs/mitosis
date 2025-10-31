@@ -1216,3 +1216,259 @@ pub async fn batch_download_attachments_by_keys(
         group_name,
     })
 }
+
+/// Helper function to delete artifacts by UUIDs.
+/// Returns (deleted_count, failed_uuids).
+async fn delete_artifacts_by_uuids_internal(
+    user_id: i64,
+    pool: &InfraPool,
+    uuids: Vec<Uuid>,
+    content_type: ArtifactContentType,
+) -> Result<(u64, Vec<Uuid>), crate::error::Error> {
+    // Query artifacts for these tasks with the specified content type
+    let artifacts = Artifact::Entity::find()
+        .filter(Artifact::Column::TaskId.is_in(uuids.clone()))
+        .filter(Artifact::Column::ContentType.eq(content_type))
+        .all(&pool.db)
+        .await?;
+
+    let mut deleted_count = 0u64;
+    let mut deleted_uuids = std::collections::HashSet::new();
+
+    for artifact in artifacts {
+        // Find the task to check permissions
+        match find_task_by_uuid(pool, artifact.task_id).await {
+            Ok((group_id, task)) => {
+                // Check if user has permission to delete artifact
+                let user_group = UserGroup::Entity::find()
+                    .filter(UserGroup::Column::UserId.eq(user_id))
+                    .filter(UserGroup::Column::GroupId.eq(group_id))
+                    .one(&pool.db)
+                    .await?;
+
+                if let Some(user_group) = user_group {
+                    if user_group.role != UserGroupRole::Read {
+                        // Delete if updated more than an hour ago
+                        if artifact.updated_at
+                            <= TimeDateTimeWithTimeZone::now_utc()
+                                - Duration::from_secs(UPLOAD_VALID_SECS)
+                        {
+                            match delete_artifact(pool, task, content_type, false).await {
+                                Ok(_) => {
+                                    deleted_count += 1;
+                                    deleted_uuids.insert(artifact.task_id);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to delete artifact for task {}: {}",
+                                        artifact.task_id,
+                                        e
+                                    );
+                                }
+                            }
+                        } else {
+                            tracing::debug!(
+                                "Skipping artifact for task {} (updated too recently)",
+                                artifact.task_id
+                            );
+                        }
+                    } else {
+                        tracing::debug!(
+                            "Skipping artifact for task {} (insufficient permissions)",
+                            artifact.task_id
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to find task {}: {}", artifact.task_id, e);
+            }
+        }
+    }
+
+    // Calculate failed UUIDs
+    let failed_uuids: Vec<Uuid> = uuids
+        .into_iter()
+        .filter(|uuid| !deleted_uuids.contains(uuid))
+        .collect();
+
+    Ok((deleted_count, failed_uuids))
+}
+
+/// Batch delete artifacts by filter criteria.
+/// Queries tasks matching the filter, then deletes artifacts of the specified type.
+pub async fn batch_delete_artifacts_by_filter(
+    user_id: i64,
+    pool: &InfraPool,
+    req: crate::schema::ArtifactsDeleteByFilterReq,
+) -> Result<crate::schema::ArtifactsDeleteByFilterResp, crate::error::Error> {
+    // Convert request to TasksQueryReq for validation and filtering
+    let query = TasksQueryReq {
+        creator_usernames: req.creator_usernames,
+        group_name: req.group_name,
+        tags: req.tags,
+        labels: req.labels,
+        states: req.states,
+        exit_status: req.exit_status,
+        priority: req.priority,
+        limit: None,
+        offset: None,
+        count: false,
+    };
+
+    let resp = query_tasks_by_filter(user_id, pool, query).await?;
+    let task_uuids: Vec<Uuid> = resp.tasks.into_iter().map(|r| r.uuid).collect();
+
+    let (deleted_count, _) =
+        delete_artifacts_by_uuids_internal(user_id, pool, task_uuids, req.content_type).await?;
+
+    Ok(crate::schema::ArtifactsDeleteByFilterResp { deleted_count })
+}
+
+/// Batch delete artifacts by task UUIDs.
+/// Deletes artifacts of the specified type for the given task UUIDs.
+pub async fn batch_delete_artifacts_by_uuids(
+    user_id: i64,
+    pool: &InfraPool,
+    req: crate::schema::ArtifactsDeleteByUuidsReq,
+) -> Result<crate::schema::ArtifactsDeleteByUuidsResp, crate::error::Error> {
+    if req.uuids.is_empty() {
+        return Err(Error::ApiError(ApiError::InvalidRequest(
+            "UUIDs list cannot be empty".to_string(),
+        )));
+    }
+
+    let (deleted_count, failed_uuids) =
+        delete_artifacts_by_uuids_internal(user_id, pool, req.uuids, req.content_type).await?;
+
+    Ok(crate::schema::ArtifactsDeleteByUuidsResp {
+        deleted_count,
+        failed_uuids,
+    })
+}
+
+/// Helper function to delete attachments by keys.
+/// Returns (deleted_count, failed_keys).
+async fn delete_attachments_by_keys_internal(
+    user_id: i64,
+    pool: &InfraPool,
+    group_name: String,
+    keys: Vec<String>,
+) -> Result<(u64, Vec<String>), crate::error::Error> {
+    // Get group and check permissions
+    let group = Group::Entity::find()
+        .filter(Group::Column::GroupName.eq(group_name.clone()))
+        .one(&pool.db)
+        .await?
+        .ok_or(Error::ApiError(ApiError::NotFound(format!(
+            "Group {} not found",
+            group_name
+        ))))?;
+
+    // Check user has write permission
+    let user_group = UserGroup::Entity::find()
+        .filter(UserGroup::Column::UserId.eq(user_id))
+        .filter(UserGroup::Column::GroupId.eq(group.id))
+        .one(&pool.db)
+        .await?
+        .ok_or(AuthError::PermissionDenied)?;
+
+    if user_group.role == UserGroupRole::Read {
+        return Err(AuthError::PermissionDenied.into());
+    }
+
+    // Query attachments for the specified keys
+    let attachments = Attachment::Entity::find()
+        .filter(Attachment::Column::Key.is_in(keys.clone()))
+        .filter(Attachment::Column::GroupId.eq(group.id))
+        .all(&pool.db)
+        .await?;
+
+    let mut deleted_count = 0u64;
+    let mut deleted_keys = std::collections::HashSet::new();
+
+    for attachment in attachments {
+        // Delete if updated more than an hour ago
+        if attachment.updated_at
+            <= TimeDateTimeWithTimeZone::now_utc() - Duration::from_secs(UPLOAD_VALID_SECS)
+        {
+            let key = attachment.key.clone();
+            match delete_attachment(pool, attachment, group_name.clone(), key.clone()).await {
+                Ok(_) => {
+                    deleted_count += 1;
+                    deleted_keys.insert(key);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to delete attachment {}: {}", key, e);
+                }
+            }
+        } else {
+            tracing::debug!(
+                "Skipping attachment {} (updated too recently)",
+                attachment.key
+            );
+        }
+    }
+
+    // Calculate failed keys
+    let failed_keys: Vec<String> = keys
+        .into_iter()
+        .filter(|key| !deleted_keys.contains(key))
+        .collect();
+
+    Ok((deleted_count, failed_keys))
+}
+
+/// Batch delete attachments by filter criteria.
+/// Queries attachments matching the filter, then deletes them.
+pub async fn batch_delete_attachments_by_filter(
+    user_id: i64,
+    pool: &InfraPool,
+    group_name: String,
+    query: crate::schema::AttachmentsDeleteByFilterReq,
+) -> Result<crate::schema::AttachmentsDeleteByFilterResp, crate::error::Error> {
+    let req = AttachmentsQueryReq {
+        key: query.key,
+        limit: query.limit,
+        offset: query.offset,
+        count: false,
+    };
+    let resp = query_attachments_by_filter(user_id, pool, group_name.clone(), req).await?;
+
+    let keys: Vec<String> = resp.attachments.into_iter().map(|a| a.key).collect();
+
+    let (deleted_count, _) =
+        delete_attachments_by_keys_internal(user_id, pool, group_name.clone(), keys).await?;
+
+    Ok(crate::schema::AttachmentsDeleteByFilterResp {
+        deleted_count,
+        group_name,
+    })
+}
+
+/// Batch delete attachments by specific keys.
+/// Deletes attachments with the specified keys.
+pub async fn batch_delete_attachments_by_keys(
+    user_id: i64,
+    pool: &InfraPool,
+    group_name: String,
+    req: crate::schema::AttachmentsDeleteByKeysReq,
+) -> Result<crate::schema::AttachmentsDeleteByKeysResp, crate::error::Error> {
+    // Check user has access to the group
+    check_task_list_query(user_id, pool, &group_name).await?;
+
+    if req.keys.is_empty() {
+        return Err(Error::ApiError(ApiError::InvalidRequest(
+            "Keys list cannot be empty".to_string(),
+        )));
+    }
+
+    let (deleted_count, failed_keys) =
+        delete_attachments_by_keys_internal(user_id, pool, group_name.clone(), req.keys).await?;
+
+    Ok(crate::schema::AttachmentsDeleteByKeysResp {
+        deleted_count,
+        failed_keys,
+        group_name,
+    })
+}

@@ -628,6 +628,80 @@ pub struct AttachmentsDownloadListResp {
     pub group_name: String,
 }
 
+/// Request to batch delete artifacts by filter criteria.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ArtifactsDeleteByFilterReq {
+    pub creator_usernames: Option<HashSet<String>>,
+    pub group_name: Option<String>,
+    pub tags: Option<HashSet<String>>,
+    pub labels: Option<HashSet<String>>,
+    pub states: Option<HashSet<TaskState>>,
+    pub exit_status: Option<String>,
+    pub priority: Option<String>,
+    pub content_type: ArtifactContentType,
+}
+
+/// Request to batch delete artifacts by task UUIDs.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ArtifactsDeleteByUuidsReq {
+    pub uuids: Vec<Uuid>,
+    pub content_type: ArtifactContentType,
+}
+
+/// Response for batch artifact deletion by filter
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ArtifactsDeleteByFilterResp {
+    pub deleted_count: u64,
+}
+
+/// Response for batch artifact deletion by UUIDs
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ArtifactsDeleteByUuidsResp {
+    pub deleted_count: u64,
+    pub failed_uuids: Vec<Uuid>,
+}
+
+/// Request to batch delete attachments by filter criteria.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AttachmentsDeleteByFilterReq {
+    pub key: Option<String>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+
+/// Request to batch delete attachments by keys.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AttachmentsDeleteByKeysReq {
+    pub keys: Vec<String>,
+}
+
+/// Response for batch attachment deletion by filter
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AttachmentsDeleteByFilterResp {
+    pub deleted_count: u64,
+    pub group_name: String,
+}
+
+/// Response for batch attachment deletion by keys
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AttachmentsDeleteByKeysResp {
+    pub deleted_count: u64,
+    pub failed_keys: Vec<String>,
+    pub group_name: String,
+}
+
+/// Request to batch submit tasks
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TasksSubmitReq {
+    pub tasks: Vec<SubmitTaskReq>,
+}
+
+/// Response for batch task submission
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TasksSubmitResp {
+    pub results: Vec<Result<SubmitTaskResp, crate::error::ErrorMsg>>,
+}
+
 impl Default for WorkerShutdownOp {
     fn default() -> Self {
         Self::Graceful

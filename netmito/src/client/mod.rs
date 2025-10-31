@@ -1155,6 +1155,52 @@ impl MitoClient {
         Ok(results)
     }
 
+    pub async fn batch_delete_artifacts_by_filter(
+        &mut self,
+        args: DeleteArtifactsByFilterArgs,
+    ) -> crate::error::Result<ArtifactsDeleteByFilterResp> {
+        self.http_client
+            .batch_delete_artifacts_by_filter(args.into())
+            .await
+    }
+
+    pub async fn batch_delete_artifacts_by_list(
+        &mut self,
+        args: DeleteArtifactsByListArgs,
+    ) -> crate::error::Result<ArtifactsDeleteByUuidsResp> {
+        self.http_client
+            .batch_delete_artifacts_by_list(args.into())
+            .await
+    }
+
+    pub async fn batch_delete_attachments_by_filter(
+        &mut self,
+        args: DeleteAttachmentsByFilterArgs,
+    ) -> crate::error::Result<AttachmentsDeleteByFilterResp> {
+        let group_name = args.group.clone().unwrap_or_else(|| self.username.clone());
+        self.http_client
+            .batch_delete_attachments_by_filter(&group_name, args.into())
+            .await
+    }
+
+    pub async fn batch_delete_attachments_by_list(
+        &mut self,
+        args: DeleteAttachmentsByListArgs,
+    ) -> crate::error::Result<AttachmentsDeleteByKeysResp> {
+        let group_name = args.group.clone().unwrap_or_else(|| self.username.clone());
+        self.http_client
+            .batch_delete_attachments_by_list(&group_name, args.into())
+            .await
+    }
+
+    pub async fn batch_submit_tasks(
+        &mut self,
+        args: SubmitTasksArgs,
+    ) -> crate::error::Result<TasksSubmitResp> {
+        let req: TasksSubmitReq = args.try_into()?;
+        self.http_client.batch_submit_tasks(req).await
+    }
+
     pub async fn handle_command<T>(&mut self, cmd: T) -> bool
     where
         T: Into<ClientCommand>,
@@ -1568,7 +1614,7 @@ impl MitoClient {
                             }
                         }
                     }
-                    AttachmentsCommands::DownloadByFilter(args) => {
+                    AttachmentsCommands::DownloadMany(args) => {
                         match self.batch_download_attachments_by_filter(args).await {
                             Ok(infos) => {
                                 tracing::info!("Downloaded {} attachments", infos.len());
@@ -1585,7 +1631,7 @@ impl MitoClient {
                             }
                         }
                     }
-                    AttachmentsCommands::DownloadByList(args) => {
+                    AttachmentsCommands::DownloadList(args) => {
                         match self.batch_download_attachments_by_list(args).await {
                             Ok(infos) => {
                                 tracing::info!("Downloaded {} attachments", infos.len());
@@ -1594,6 +1640,41 @@ impl MitoClient {
                                         "  {} ({}B)",
                                         info.local_path.display(),
                                         info.size
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        }
+                    }
+                    AttachmentsCommands::DeleteMany(args) => {
+                        match self.batch_delete_attachments_by_filter(args).await {
+                            Ok(resp) => {
+                                tracing::info!(
+                                    "Deleted {} attachments in group {}",
+                                    resp.deleted_count,
+                                    resp.group_name
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        }
+                    }
+                    AttachmentsCommands::DeleteList(args) => {
+                        match self.batch_delete_attachments_by_list(args).await {
+                            Ok(resp) => {
+                                tracing::info!(
+                                    "Deleted {} attachments in group {}",
+                                    resp.deleted_count,
+                                    resp.group_name
+                                );
+                                if !resp.failed_keys.is_empty() {
+                                    tracing::warn!(
+                                        "Failed to delete {} attachments: {:?}",
+                                        resp.failed_keys.len(),
+                                        resp.failed_keys
                                     );
                                 }
                             }
@@ -1621,6 +1702,32 @@ impl MitoClient {
                         }
                     }
                 }
+                TasksCommands::SubmitMany(args) => match self.batch_submit_tasks(args).await {
+                    Ok(resp) => {
+                        let mut success_count = 0;
+                        let mut error_count = 0;
+                        for result in resp.results {
+                            match result {
+                                Ok(task_resp) => {
+                                    success_count += 1;
+                                    tracing::info!("Task submitted with uuid {}", task_resp.uuid);
+                                }
+                                Err(e) => {
+                                    error_count += 1;
+                                    tracing::error!("Task submission failed: {}", e.msg);
+                                }
+                            }
+                        }
+                        tracing::info!(
+                            "Batch submission completed: {} succeeded, {} failed",
+                            success_count,
+                            error_count
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
                 TasksCommands::Get(args) => match self.tasks_get(args).await {
                     Ok(resp) => {
                         output_parsed_task_info(&resp.info);
@@ -1762,7 +1869,7 @@ impl MitoClient {
                             }
                         }
                     }
-                    ArtifactsCommands::DownloadByFilter(args) => {
+                    ArtifactsCommands::DownloadMany(args) => {
                         match self.batch_download_artifacts_by_filter(args).await {
                             Ok(infos) => {
                                 tracing::info!("Downloaded {} artifacts", infos.len());
@@ -1779,7 +1886,7 @@ impl MitoClient {
                             }
                         }
                     }
-                    ArtifactsCommands::DownloadByList(args) => {
+                    ArtifactsCommands::DownloadList(args) => {
                         match self.batch_download_artifacts_by_list(args).await {
                             Ok(infos) => {
                                 tracing::info!("Downloaded {} artifacts", infos.len());
@@ -1788,6 +1895,33 @@ impl MitoClient {
                                         "  {} ({}B)",
                                         info.local_path.display(),
                                         info.size
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        }
+                    }
+                    ArtifactsCommands::DeleteMany(args) => {
+                        match self.batch_delete_artifacts_by_filter(args).await {
+                            Ok(resp) => {
+                                tracing::info!("Deleted {} artifacts", resp.deleted_count);
+                            }
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                            }
+                        }
+                    }
+                    ArtifactsCommands::DeleteList(args) => {
+                        match self.batch_delete_artifacts_by_list(args).await {
+                            Ok(resp) => {
+                                tracing::info!("Deleted {} artifacts", resp.deleted_count);
+                                if !resp.failed_uuids.is_empty() {
+                                    tracing::warn!(
+                                        "Failed to delete {} artifacts: {:?}",
+                                        resp.failed_uuids.len(),
+                                        resp.failed_uuids
                                     );
                                 }
                             }

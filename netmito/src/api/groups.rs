@@ -43,6 +43,14 @@ pub fn groups_router(st: InfraPool) -> Router<InfraPool> {
             "/{group_name}/download/attachments/list",
             post(batch_download_attachments_by_keys),
         )
+        .route(
+            "/{group_name}/delete/attachments",
+            post(batch_delete_attachments_by_filter),
+        )
+        .route(
+            "/{group_name}/delete/attachments/list",
+            post(batch_delete_attachments_by_keys),
+        )
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -262,6 +270,44 @@ pub async fn batch_download_attachments_by_keys(
     Json(req): Json<AttachmentsDownloadByKeysReq>,
 ) -> Result<Json<AttachmentsDownloadListResp>, ApiError> {
     let resp = service::s3::batch_download_attachments_by_keys(u.id, &pool, group_name, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(resp))
+}
+
+pub async fn batch_delete_attachments_by_filter(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(group_name): Path<String>,
+    Json(req): Json<AttachmentsDeleteByFilterReq>,
+) -> Result<Json<AttachmentsDeleteByFilterResp>, ApiError> {
+    let resp = service::s3::batch_delete_attachments_by_filter(u.id, &pool, group_name, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(resp))
+}
+
+pub async fn batch_delete_attachments_by_keys(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(group_name): Path<String>,
+    Json(req): Json<AttachmentsDeleteByKeysReq>,
+) -> Result<Json<AttachmentsDeleteByKeysResp>, ApiError> {
+    let resp = service::s3::batch_delete_attachments_by_keys(u.id, &pool, group_name, req)
         .await
         .map_err(|e| match e {
             crate::error::Error::AuthError(err) => ApiError::AuthError(err),

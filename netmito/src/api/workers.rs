@@ -55,6 +55,7 @@ pub fn workers_router(st: InfraPool) -> Router<InfraPool> {
         .route("/", post(user_register_worker))
         .route("/query", post(user_query_workers))
         .route("/shutdown", post(user_shutdown_workers))
+        .route("/shutdown/list", post(user_shutdown_workers_by_uuids))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -372,6 +373,24 @@ pub async fn user_shutdown_workers(
     Json(req): Json<WorkersShutdownByFilterReq>,
 ) -> Result<Json<WorkersShutdownByFilterResp>, ApiError> {
     let resp = service::worker::shutdown_workers_by_filter(u.id, &pool, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(resp))
+}
+
+pub async fn user_shutdown_workers_by_uuids(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Json(req): Json<WorkersShutdownByUuidsReq>,
+) -> Result<Json<WorkersShutdownByUuidsResp>, ApiError> {
+    let resp = service::worker::shutdown_workers_by_uuids(u.id, &pool, req)
         .await
         .map_err(|e| match e {
             crate::error::Error::AuthError(err) => ApiError::AuthError(err),

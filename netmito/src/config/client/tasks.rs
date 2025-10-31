@@ -6,8 +6,8 @@ use crate::{
     config::client::parse_resources,
     entity::state::{TaskExecState, TaskState},
     schema::{
-        ChangeTaskReq, RemoteResourceDownload, TaskSpec, TasksCancelByFilterReq, TasksQueryReq,
-        UpdateTaskLabelsReq,
+        ChangeTaskReq, RemoteResourceDownload, TaskSpec, TasksCancelByFilterReq,
+        TasksCancelByUuidsReq, TasksQueryReq, UpdateTaskLabelsReq,
     },
 };
 
@@ -31,6 +31,8 @@ pub enum TasksCommands {
     Cancel(CancelTaskArgs),
     /// Cancel multiple tasks subject to the filter
     CancelMany(CancelTasksArgs),
+    /// Cancel multiple tasks by UUIDs
+    CancelList(CancelTasksByUuidsArgs),
     /// Replace labels of a task
     UpdateLabels(UpdateTaskLabelsArgs),
     /// Update the spec of a task
@@ -145,6 +147,13 @@ pub struct CancelTasksArgs {
     /// The priority of the tasks, support operators like `=`(default), `!=`, `<`, `<=`, `>`, `>=`
     #[arg(short, long)]
     pub priority: Option<String>,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct CancelTasksByUuidsArgs {
+    /// The UUIDs of the tasks to cancel
+    #[arg(num_args = 1.., value_delimiter = ',')]
+    pub uuids: Vec<Uuid>,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -280,5 +289,11 @@ impl From<CancelTasksArgs> for TasksCancelByFilterReq {
             exit_status: args.exit_status,
             priority: args.priority,
         }
+    }
+}
+
+impl From<CancelTasksByUuidsArgs> for TasksCancelByUuidsReq {
+    fn from(args: CancelTasksByUuidsArgs) -> Self {
+        Self { uuids: args.uuids }
     }
 }

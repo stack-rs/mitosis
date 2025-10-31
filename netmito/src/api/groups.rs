@@ -36,7 +36,7 @@ pub fn groups_router(st: InfraPool) -> Router<InfraPool> {
         .route("/{group_name}/attachments", post(upload_attachment))
         .route("/{group_name}/attachments/query", post(query_attachments))
         .route(
-            "/{group_name}/download/attachments/filter",
+            "/{group_name}/download/attachments",
             post(batch_download_attachments_by_filter),
         )
         .route(

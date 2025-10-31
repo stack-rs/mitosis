@@ -33,8 +33,9 @@ pub fn tasks_router(st: InfraPool) -> Router<InfraPool> {
         .route("/{uuid}/artifacts", post(upload_artifact))
         .route("/query", post(query_tasks))
         .route("/cancel", post(cancel_tasks))
+        .route("/cancel/list", post(cancel_tasks_by_uuids))
         .route(
-            "/download/artifacts/filter",
+            "/download/artifacts",
             post(batch_download_artifacts_by_filter),
         )
         .route(
@@ -164,6 +165,24 @@ pub async fn cancel_tasks(
     Json(req): Json<TasksCancelByFilterReq>,
 ) -> Result<Json<TasksCancelByFilterResp>, ApiError> {
     let resp = service::task::cancel_tasks_by_filter(u.id, &pool, req)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+    Ok(Json(resp))
+}
+
+pub async fn cancel_tasks_by_uuids(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Json(req): Json<TasksCancelByUuidsReq>,
+) -> Result<Json<TasksCancelByUuidsResp>, ApiError> {
+    let resp = service::task::cancel_tasks_by_uuids(u.id, &pool, req)
         .await
         .map_err(|e| match e {
             crate::error::Error::AuthError(err) => ApiError::AuthError(err),

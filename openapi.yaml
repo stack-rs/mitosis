@@ -485,7 +485,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
-  /groups/{group_name}/download/attachments/filter:
+  /groups/{group_name}/download/attachments:
     post:
       summary: Batch download attachments by filter
       description: Get download URLs for group attachments matching filter criteria
@@ -637,6 +637,35 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkersShutdownByFilterResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /workers/shutdown/list:
+    post:
+      summary: Batch shutdown workers by UUIDs
+      description: Shutdown multiple workers by specific UUIDs
+      operationId: shutdownWorkersByUuids
+      tags:
+        - Workers
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkersShutdownByUuidsReq"
+      responses:
+        "200":
+          description: Workers shutdown successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkersShutdownByUuidsResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -1099,7 +1128,36 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
-  /tasks/download/artifacts/filter:
+  /tasks/cancel/list:
+    post:
+      summary: Batch cancel tasks by UUIDs
+      description: Cancel multiple tasks by specific UUIDs
+      operationId: cancelTasksByUuids
+      tags:
+        - Tasks
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TasksCancelByUuidsReq"
+      responses:
+        "200":
+          description: Tasks cancelled successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TasksCancelByUuidsResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /tasks/download/artifacts:
     post:
       summary: Batch download artifacts by filter
       description: Get download URLs for task artifacts matching filter criteria
@@ -3225,6 +3283,42 @@ components:
           description: Group name where tasks were cancelled
           example: research-team
 
+    TasksCancelByUuidsReq:
+      type: object
+      required:
+        - uuids
+      properties:
+        uuids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: List of task UUIDs to cancel
+          example:
+            - "550e8400-e29b-41d4-a716-446655440000"
+            - "550e8400-e29b-41d4-a716-446655440001"
+      description: Request to cancel multiple tasks by UUIDs
+
+    TasksCancelByUuidsResp:
+      type: object
+      required:
+        - cancelled_count
+        - failed_uuids
+      properties:
+        cancelled_count:
+          type: integer
+          format: uint64
+          description: Number of tasks successfully cancelled
+          example: 10
+        failed_uuids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: List of task UUIDs that failed to cancel (not found or no permission)
+          example:
+            - "550e8400-e29b-41d4-a716-446655440005"
+
     WorkersShutdownByFilterReq:
       type: object
       required:
@@ -3275,6 +3369,45 @@ components:
           type: string
           description: Group name where workers were shutdown
           example: research-team
+
+    WorkersShutdownByUuidsReq:
+      type: object
+      required:
+        - uuids
+        - op
+      properties:
+        uuids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: List of worker UUIDs to shutdown
+          example:
+            - "650e8400-e29b-41d4-a716-446655440000"
+            - "650e8400-e29b-41d4-a716-446655440001"
+        op:
+          $ref: "#/components/schemas/WorkerShutdownOp"
+      description: Request to shutdown multiple workers by UUIDs
+
+    WorkersShutdownByUuidsResp:
+      type: object
+      required:
+        - shutdown_count
+        - failed_uuids
+      properties:
+        shutdown_count:
+          type: integer
+          format: uint64
+          description: Number of workers successfully shutdown
+          example: 8
+        failed_uuids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: List of worker UUIDs that failed to shutdown (not found or no permission)
+          example:
+            - "650e8400-e29b-41d4-a716-446655440005"
 
     ArtifactsDownloadByFilterReq:
       type: object

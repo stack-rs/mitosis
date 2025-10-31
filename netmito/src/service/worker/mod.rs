@@ -31,7 +31,8 @@ use crate::{
     schema::{
         CountQuery, RawWorkerQueryInfo, ReportTaskOp, TaskSpec, WorkerQueryInfo, WorkerQueryResp,
         WorkerShutdownOp, WorkerTaskResp, WorkersQueryReq, WorkersQueryResp,
-        WorkersShutdownByFilterReq, WorkersShutdownByFilterResp,
+        WorkersShutdownByFilterReq, WorkersShutdownByFilterResp, WorkersShutdownByUuidsReq,
+        WorkersShutdownByUuidsResp,
     },
     service::{self, s3::group_upload_artifact},
 };
@@ -1122,6 +1123,247 @@ pub async fn shutdown_workers_by_filter(
     Ok(WorkersShutdownByFilterResp {
         shutdown_count,
         group_name,
+    })
+}
+
+pub async fn shutdown_workers_by_uuids(
+    user_id: i64,
+    pool: &InfraPool,
+    req: WorkersShutdownByUuidsReq,
+) -> crate::error::Result<WorkersShutdownByUuidsResp> {
+    // Validate UUIDs list is not empty
+    if req.uuids.is_empty() {
+        return Err(Error::ApiError(ApiError::InvalidRequest(
+            "UUIDs list cannot be empty".to_string(),
+        )));
+    }
+
+    // Query all matching workers in a single query with permission checks
+    // Join with user_group and group_worker to check Admin permission
+    let builder = pool.db.get_database_backend();
+    let stmt = Query::select()
+        .columns([
+            (Worker::Entity, Worker::Column::Id),
+            (Worker::Entity, Worker::Column::WorkerId),
+            (Worker::Entity, Worker::Column::CreatorId),
+            (Worker::Entity, Worker::Column::Tags),
+            (Worker::Entity, Worker::Column::Labels),
+            (Worker::Entity, Worker::Column::CreatedAt),
+            (Worker::Entity, Worker::Column::UpdatedAt),
+            (Worker::Entity, Worker::Column::State),
+            (Worker::Entity, Worker::Column::LastHeartbeat),
+            (Worker::Entity, Worker::Column::AssignedTaskId),
+        ])
+        .from(Worker::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            GroupWorker::Entity,
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId))
+                .eq(Expr::col((Worker::Entity, Worker::Column::Id))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            UserGroup::Entity,
+            Expr::col((UserGroup::Entity, UserGroup::Column::GroupId)).eq(Expr::col((
+                GroupWorker::Entity,
+                GroupWorker::Column::GroupId,
+            ))),
+        )
+        .and_where(Expr::col((Worker::Entity, Worker::Column::WorkerId)).is_in(req.uuids.clone()))
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+        // Only allow users with Admin role
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::Role)).eq(UserGroupRole::Admin))
+        // Only shutdown workers where the group-worker role is Admin
+        .and_where(
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).eq(GroupWorkerRole::Admin),
+        )
+        .to_owned();
+
+    let built_stmt = builder.build(&stmt);
+
+    // Execute shutdown operations in a transaction
+    let (shutdown_count, tasks_to_reassign, removed_worker_ids, found_uuids) = pool
+        .db
+        .transaction::<_, (u64, Vec<ActiveTask::Model>, Vec<i64>, HashSet<Uuid>), Error>(|txn| {
+            Box::pin(async move {
+                // Query matching workers within transaction
+                let workers = Worker::Model::find_by_statement(built_stmt.clone())
+                    .all(txn)
+                    .await?;
+
+                if workers.is_empty() {
+                    return Ok((0, vec![], vec![], HashSet::new()));
+                }
+
+                let found_uuids: HashSet<Uuid> = workers.iter().map(|w| w.worker_id).collect();
+                let mut removed_worker_ids = Vec::new();
+                let mut graceful_worker_ids = Vec::new();
+                let mut tasks_to_reassign = Vec::new();
+                let now = TimeDateTimeWithTimeZone::now_utc();
+
+                match req.op {
+                    WorkerShutdownOp::Force => {
+                        // Force shutdown: remove all workers immediately
+                        let worker_ids: Vec<i64> = workers.iter().map(|w| w.id).collect();
+
+                        // Collect task IDs that need to be reset to Ready state
+                        let task_ids: Vec<i64> =
+                            workers.iter().filter_map(|w| w.assigned_task_id).collect();
+
+                        // Batch update all assigned tasks to Ready state
+                        if !task_ids.is_empty() {
+                            tasks_to_reassign = ActiveTask::Entity::update_many()
+                                .col_expr(
+                                    ActiveTask::Column::AssignedWorker,
+                                    Expr::value(Option::<i64>::None),
+                                )
+                                .col_expr(ActiveTask::Column::State, Expr::value(TaskState::Ready))
+                                .col_expr(ActiveTask::Column::UpdatedAt, Expr::value(now))
+                                .filter(ActiveTask::Column::Id.is_in(task_ids.clone()))
+                                .exec_with_returning(txn)
+                                .await?;
+                        }
+
+                        // Batch delete group_worker relations
+                        GroupWorker::Entity::delete_many()
+                            .filter(GroupWorker::Column::WorkerId.is_in(worker_ids.clone()))
+                            .exec(txn)
+                            .await?;
+
+                        // Batch delete workers
+                        Worker::Entity::delete_many()
+                            .filter(Worker::Column::Id.is_in(worker_ids.clone()))
+                            .exec(txn)
+                            .await?;
+
+                        removed_worker_ids = worker_ids;
+                    }
+                    WorkerShutdownOp::Graceful => {
+                        // Separate workers into two groups: with and without tasks
+                        let (workers_with_tasks, workers_without_tasks): (Vec<_>, Vec<_>) = workers
+                            .into_iter()
+                            .partition(|w| w.assigned_task_id.is_some());
+
+                        let worker_ids_without_tasks: Vec<i64> =
+                            workers_without_tasks.iter().map(|w| w.id).collect();
+                        let worker_ids_with_tasks: Vec<i64> =
+                            workers_with_tasks.iter().map(|w| w.id).collect();
+
+                        // Batch delete workers without tasks
+                        if !worker_ids_without_tasks.is_empty() {
+                            GroupWorker::Entity::delete_many()
+                                .filter(
+                                    GroupWorker::Column::WorkerId
+                                        .is_in(worker_ids_without_tasks.clone()),
+                                )
+                                .exec(txn)
+                                .await?;
+
+                            Worker::Entity::delete_many()
+                                .filter(Worker::Column::Id.is_in(worker_ids_without_tasks.clone()))
+                                .exec(txn)
+                                .await?;
+
+                            removed_worker_ids = worker_ids_without_tasks;
+                        }
+
+                        // Batch update workers with tasks to GracefulShutdown state
+                        if !worker_ids_with_tasks.is_empty() {
+                            Worker::Entity::update_many()
+                                .col_expr(
+                                    Worker::Column::State,
+                                    Expr::value(WorkerState::GracefulShutdown),
+                                )
+                                .col_expr(Worker::Column::UpdatedAt, Expr::value(now))
+                                .filter(Worker::Column::Id.is_in(worker_ids_with_tasks.clone()))
+                                .exec(txn)
+                                .await?;
+
+                            graceful_worker_ids = worker_ids_with_tasks;
+                        }
+                    }
+                }
+
+                let total_count = (removed_worker_ids.len() + graceful_worker_ids.len()) as u64;
+                Ok((
+                    total_count,
+                    tasks_to_reassign,
+                    removed_worker_ids,
+                    found_uuids,
+                ))
+            })
+        })
+        .await?;
+
+    // Reassign tasks from force-removed workers (outside transaction)
+    let builder = pool.db.get_database_backend();
+    for task in tasks_to_reassign {
+        let tasks_stmt = Query::select()
+            .column((Worker::Entity, Worker::Column::Id))
+            .from(Worker::Entity)
+            .join(
+                sea_orm::JoinType::Join,
+                GroupWorker::Entity,
+                Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId))
+                    .eq(Expr::col((Worker::Entity, Worker::Column::Id))),
+            )
+            .and_where(
+                Expr::col((GroupWorker::Entity, GroupWorker::Column::GroupId)).eq(task.group_id),
+            )
+            .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).gt(0))
+            .and_where(
+                Expr::col((Worker::Entity, Worker::Column::Tags)).contains(task.tags.clone()),
+            )
+            .to_owned();
+        let workers: Vec<super::task::PartialWorkerId> =
+            super::task::PartialWorkerId::find_by_statement(builder.build(&tasks_stmt))
+                .all(&pool.db)
+                .await?;
+        let op = TaskDispatcherOp::BatchAddTask(
+            workers.into_iter().map(i64::from).collect(),
+            task.id,
+            task.priority,
+        );
+        let _ = pool
+            .worker_task_queue_tx
+            .send(op)
+            .inspect_err(|e| tracing::warn!("Failed to reassign task {}: {:?}", task.id, e));
+    }
+
+    // Send unregister operations for removed workers
+    for worker_id in removed_worker_ids {
+        let _ = pool
+            .worker_task_queue_tx
+            .send(TaskDispatcherOp::UnregisterWorker(worker_id))
+            .inspect_err(|e| {
+                tracing::warn!(
+                    "Failed to unregister worker {} from task queue: {:?}",
+                    worker_id,
+                    e
+                )
+            });
+        let _ = pool
+            .worker_heartbeat_queue_tx
+            .send(HeartbeatOp::UnregisterWorker(worker_id))
+            .inspect_err(|e| {
+                tracing::warn!(
+                    "Failed to unregister worker {} from heartbeat queue: {:?}",
+                    worker_id,
+                    e
+                )
+            });
+    }
+
+    // Determine which UUIDs failed (not found or no permission)
+    let failed_uuids: Vec<Uuid> = req
+        .uuids
+        .into_iter()
+        .filter(|uuid| !found_uuids.contains(uuid))
+        .collect();
+
+    Ok(WorkersShutdownByUuidsResp {
+        shutdown_count,
+        failed_uuids,
     })
 }
 

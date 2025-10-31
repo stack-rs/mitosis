@@ -1130,8 +1130,7 @@ pub async fn query_attachments_by_filter(
         )
         .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()))
         .and_where(
-            Expr::col((Attachment::Entity, Attachment::Column::Key))
-                .like(format!("%{key}%")),
+            Expr::col((Attachment::Entity, Attachment::Column::Key)).like(format!("%{key}%")),
         );
     if let Some(limit) = query.limit {
         attachment_stmt.limit(limit);

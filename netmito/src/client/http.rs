@@ -395,7 +395,7 @@ impl MitoHttpClient {
         &mut self,
         req: ArtifactsDownloadByFilterReq,
     ) -> crate::error::Result<ArtifactsDownloadListResp> {
-        self.url.set_path("tasks/download/artifacts/filter");
+        self.url.set_path("tasks/download/artifacts");
         let resp = self
             .http_client
             .post(self.url.as_str())
@@ -445,7 +445,7 @@ impl MitoHttpClient {
         req: AttachmentsDownloadByFilterReq,
     ) -> crate::error::Result<AttachmentsDownloadListResp> {
         self.url
-            .set_path(&format!("groups/{group_name}/download/attachments/filter"));
+            .set_path(&format!("groups/{group_name}/download/attachments"));
         let resp = self
             .http_client
             .post(self.url.as_str())
@@ -896,6 +896,30 @@ impl MitoHttpClient {
         }
     }
 
+    pub async fn shutdown_workers_by_uuids(
+        &mut self,
+        req: WorkersShutdownByUuidsReq,
+    ) -> crate::error::Result<WorkersShutdownByUuidsResp> {
+        self.url.set_path("workers/shutdown/list");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<WorkersShutdownByUuidsResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn replace_worker_tags(
         &mut self,
         uuid: Uuid,
@@ -1017,6 +1041,30 @@ impl MitoHttpClient {
         if resp.status().is_success() {
             let resp = resp
                 .json::<TasksCancelByFilterResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn cancel_tasks_by_uuids(
+        &mut self,
+        req: TasksCancelByUuidsReq,
+    ) -> crate::error::Result<TasksCancelByUuidsResp> {
+        self.url.set_path("tasks/cancel/list");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<TasksCancelByUuidsResp>()
                 .await
                 .map_err(RequestError::from)?;
             Ok(resp)

@@ -317,6 +317,19 @@ pub struct TasksCancelByFilterResp {
     pub group_name: String,
 }
 
+/// Request to cancel multiple tasks by UUIDs
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TasksCancelByUuidsReq {
+    pub uuids: Vec<Uuid>,
+}
+
+/// Response for batch cancel by UUIDs operation
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TasksCancelByUuidsResp {
+    pub cancelled_count: u64,
+    pub failed_uuids: Vec<Uuid>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TaskQueryResp {
     pub info: ParsedTaskQueryInfo,
@@ -389,6 +402,20 @@ pub struct WorkersShutdownByFilterReq {
 pub struct WorkersShutdownByFilterResp {
     pub shutdown_count: u64,
     pub group_name: String,
+}
+
+/// Request to shutdown multiple workers by UUIDs
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WorkersShutdownByUuidsReq {
+    pub uuids: Vec<Uuid>,
+    pub op: WorkerShutdownOp,
+}
+
+/// Response for batch worker shutdown by UUIDs operation
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WorkersShutdownByUuidsResp {
+    pub shutdown_count: u64,
+    pub failed_uuids: Vec<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromQueryResult, Clone)]

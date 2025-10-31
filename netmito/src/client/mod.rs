@@ -745,6 +745,15 @@ impl MitoClient {
             .await
     }
 
+    pub async fn workers_batch_cancel_by_uuids(
+        &mut self,
+        args: CancelWorkersByUuidsArgs,
+    ) -> crate::error::Result<WorkersShutdownByUuidsResp> {
+        self.http_client
+            .shutdown_workers_by_uuids(args.into())
+            .await
+    }
+
     pub async fn workers_update_tags(
         &mut self,
         args: WorkerUpdateTagsArgs,
@@ -790,6 +799,13 @@ impl MitoClient {
         args: CancelTasksArgs,
     ) -> crate::error::Result<TasksCancelByFilterResp> {
         self.http_client.cancel_tasks_by_filter(args.into()).await
+    }
+
+    pub async fn tasks_batch_cancel_by_uuids(
+        &mut self,
+        args: CancelTasksByUuidsArgs,
+    ) -> crate::error::Result<TasksCancelByUuidsResp> {
+        self.http_client.cancel_tasks_by_uuids(args.into()).await
     }
 
     pub async fn tasks_update_labels(
@@ -1310,6 +1326,23 @@ impl MitoClient {
                         tracing::error!("{}", e);
                     }
                 },
+                WorkersCommands::CancelList(args) => {
+                    match self.workers_batch_cancel_by_uuids(args).await {
+                        Ok(resp) => {
+                            tracing::info!("Shutdown {} workers", resp.shutdown_count);
+                            if !resp.failed_uuids.is_empty() {
+                                tracing::warn!(
+                                    "Failed to shutdown {} workers: {:?}",
+                                    resp.failed_uuids.len(),
+                                    resp.failed_uuids
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    }
+                }
                 WorkersCommands::UpdateTags(args) => match self.workers_update_tags(args).await {
                     Ok(_) => {
                         tracing::info!("Worker tags updated successfully");
@@ -1652,6 +1685,23 @@ impl MitoClient {
                         tracing::error!("{}", e);
                     }
                 },
+                TasksCommands::CancelList(args) => {
+                    match self.tasks_batch_cancel_by_uuids(args).await {
+                        Ok(resp) => {
+                            tracing::info!("Cancelled {} tasks", resp.cancelled_count);
+                            if !resp.failed_uuids.is_empty() {
+                                tracing::warn!(
+                                    "Failed to cancel {} tasks: {:?}",
+                                    resp.failed_uuids.len(),
+                                    resp.failed_uuids
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    }
+                }
                 TasksCommands::UpdateLabels(args) => match self.tasks_update_labels(args).await {
                     Ok(_) => {
                         tracing::info!("Task labels updated successfully");

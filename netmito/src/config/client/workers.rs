@@ -7,6 +7,7 @@ use crate::{
     schema::{
         RemoveGroupWorkerRoleReq, ReplaceWorkerLabelsReq, ReplaceWorkerTagsReq,
         UpdateGroupWorkerRoleReq, WorkerShutdownOp, WorkersQueryReq, WorkersShutdownByFilterReq,
+        WorkersShutdownByUuidsReq,
     },
 };
 
@@ -24,6 +25,8 @@ pub enum WorkersCommands {
     Cancel(CancelWorkerArgs),
     /// Cancel multiple workers subject to the filter
     CancelMany(CancelWorkersArgs),
+    /// Cancel multiple workers by UUIDs
+    CancelList(CancelWorkersByUuidsArgs),
     /// Replace tags of a worker
     UpdateTags(WorkerUpdateTagsArgs),
     /// Replace labels of a worker
@@ -65,6 +68,17 @@ pub struct CancelWorkersArgs {
     /// The username of the creator
     #[arg(long)]
     pub creator: Option<String>,
+    /// Whether to force the workers to shutdown.
+    /// If not specified, the workers will be try to shutdown gracefully
+    #[arg(short, long)]
+    pub force: bool,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct CancelWorkersByUuidsArgs {
+    /// The UUIDs of the workers to shutdown
+    #[arg(num_args = 1.., value_delimiter = ',')]
+    pub uuids: Vec<Uuid>,
     /// Whether to force the workers to shutdown.
     /// If not specified, the workers will be try to shutdown gracefully
     #[arg(short, long)]
@@ -215,6 +229,19 @@ impl From<CancelWorkersArgs> for WorkersShutdownByFilterReq {
                 Some(args.labels.into_iter().collect())
             },
             creator_username: args.creator,
+            op: if args.force {
+                WorkerShutdownOp::Force
+            } else {
+                WorkerShutdownOp::Graceful
+            },
+        }
+    }
+}
+
+impl From<CancelWorkersByUuidsArgs> for WorkersShutdownByUuidsReq {
+    fn from(args: CancelWorkersByUuidsArgs) -> Self {
+        Self {
+            uuids: args.uuids,
             op: if args.force {
                 WorkerShutdownOp::Force
             } else {

@@ -3007,6 +3007,11 @@ components:
     TasksQueryReq:
       type: object
       properties:
+        reporter_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: Filter by reporter worker UUID (archived tasks only)
         creator_usernames:
           type: array
           items:
@@ -3091,6 +3096,11 @@ components:
           type: string
           format: uuid
           example: 789e0123-e89b-12d3-a456-426614174222
+        reporter_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: UUID of the worker who committed the task (archived tasks only)
         creator_username:
           type: string
           example: johndoe
@@ -3168,6 +3178,11 @@ components:
         uuid:
           type: string
           format: uuid
+        reporter_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: UUID of the worker who committed the task (archived tasks only)
         creator_username:
           type: string
         group_name:
@@ -3581,6 +3596,11 @@ components:
       required:
         - content_type
       properties:
+        reporter_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: Filter by reporter worker UUID (archived tasks only)
         creator_usernames:
           type: array
           items:
@@ -3754,6 +3774,11 @@ components:
       required:
         - content_type
       properties:
+        reporter_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: Filter by reporter worker UUID (archived tasks only)
         creator_usernames:
           type: array
           items:

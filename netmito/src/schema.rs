@@ -258,6 +258,7 @@ pub struct TaskQueryInfo {
     pub result: Option<serde_json::Value>,
     pub upstream_task_uuid: Option<Uuid>,
     pub downstream_task_uuid: Option<Uuid>,
+    pub reporter_uuid: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -277,6 +278,7 @@ pub struct ParsedTaskQueryInfo {
     pub result: Option<TaskResultSpec>,
     pub upstream_task_uuid: Option<Uuid>,
     pub downstream_task_uuid: Option<Uuid>,
+    pub reporter_uuid: Option<Uuid>,
 }
 
 /// Each field in the query request is optional, and the server will return all tasks if no field is specified.
@@ -291,6 +293,8 @@ pub struct TasksQueryReq {
     pub states: Option<HashSet<TaskState>>,
     pub exit_status: Option<String>,
     pub priority: Option<String>,
+    /// Set reporter_uuid will automatically exclude all non-completed tasks.
+    pub reporter_uuid: Option<Uuid>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
     pub count: bool,
@@ -556,8 +560,9 @@ pub struct WorkerShutdown {
     pub op: Option<WorkerShutdownOp>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub enum WorkerShutdownOp {
+    #[default]
     #[serde(alias = "graceful")]
     Graceful,
     #[serde(alias = "force")]
@@ -575,6 +580,8 @@ pub struct ArtifactsDownloadByFilterReq {
     pub states: Option<HashSet<TaskState>>,
     pub exit_status: Option<String>,
     pub priority: Option<String>,
+    /// Set reporter_uuid will automatically exclude all non-completed tasks.
+    pub reporter_uuid: Option<Uuid>,
     pub content_type: ArtifactContentType,
 }
 
@@ -638,6 +645,8 @@ pub struct ArtifactsDeleteByFilterReq {
     pub states: Option<HashSet<TaskState>>,
     pub exit_status: Option<String>,
     pub priority: Option<String>,
+    /// Set reporter_uuid will automatically exclude all non-completed tasks.
+    pub reporter_uuid: Option<Uuid>,
     pub content_type: ArtifactContentType,
 }
 
@@ -700,12 +709,6 @@ pub struct TasksSubmitReq {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TasksSubmitResp {
     pub results: Vec<Result<SubmitTaskResp, crate::error::ErrorMsg>>,
-}
-
-impl Default for WorkerShutdownOp {
-    fn default() -> Self {
-        Self::Graceful
-    }
 }
 
 impl TaskSpec {

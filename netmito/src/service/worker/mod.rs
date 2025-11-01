@@ -546,6 +546,7 @@ pub async fn fetch_task(
 
 pub async fn report_task(
     worker_id: i64,
+    worker_uuid: Uuid,
     task_id: i64,
     op: ReportTaskOp,
     pool: &InfraPool,
@@ -673,6 +674,7 @@ pub async fn report_task(
                 result: Set(Some(result)),
                 upstream_task_uuid: Set(task.upstream_task_uuid),
                 downstream_task_uuid: Set(task.downstream_task_uuid),
+                reporter_uuid: Set(Some(worker_uuid)),
             };
             let worker = Worker::ActiveModel {
                 id: Set(worker_id),

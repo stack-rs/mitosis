@@ -150,7 +150,7 @@ pub async fn worker_report_task(
     State(pool): State<InfraPool>,
     Json(ReportTaskReq { id, op }): Json<ReportTaskReq>,
 ) -> ApiResult<Json<ReportTaskResp>> {
-    match service::worker::report_task(w.id, id, op, &pool).await {
+    match service::worker::report_task(w.id, w.uuid, id, op, &pool).await {
         Ok(url) => Ok(Json(ReportTaskResp { url })),
         Err(Error::ApiError(e)) => Err(e),
         Err(e) => {

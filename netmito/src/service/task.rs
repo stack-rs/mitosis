@@ -1,5 +1,5 @@
 use sea_orm::sea_query::extension::postgres::PgExpr;
-use sea_orm::sea_query::{Alias, ExprTrait, PgFunc, Query};
+use sea_orm::sea_query::{Alias, ExprTrait, PgFunc, Query, Value};
 use sea_orm::{prelude::*, FromQueryResult, Set, TransactionTrait};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -477,6 +477,7 @@ pub async fn user_cancel_task(
                     result: Set(Some(result)),
                     upstream_task_uuid: Set(task.upstream_task_uuid),
                     downstream_task_uuid: Set(task.downstream_task_uuid),
+                    reporter_uuid: Set(None),
                 };
                 archived_task.insert(txn).await?;
                 ActiveTasks::Entity::delete_by_id(task.id).exec(txn).await?;
@@ -506,6 +507,8 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             (ActiveTasks::Entity, ActiveTasks::Column::UpstreamTaskUuid),
             (ActiveTasks::Entity, ActiveTasks::Column::DownstreamTaskUuid),
         ])
+        // Active tasks do not have reporter_uuid; return NULL
+        .expr_as(Expr::val(Value::Uuid(None)), Alias::new("reporter_uuid"))
         .expr_as(
             Expr::col((User::Entity, User::Column::Username)),
             Alias::new("creator_username"),
@@ -553,6 +556,7 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
                 ArchivedTasks::Entity,
                 ArchivedTasks::Column::DownstreamTaskUuid,
             ),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::ReporterUuid),
         ])
         .expr_as(
             Expr::col((User::Entity, User::Column::Username)),
@@ -618,6 +622,7 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
         result: info.result.map(serde_json::from_value).transpose()?,
         upstream_task_uuid: info.upstream_task_uuid,
         downstream_task_uuid: info.downstream_task_uuid,
+        reporter_uuid: info.reporter_uuid,
     };
     Ok(TaskQueryResp { info, artifacts })
 }
@@ -743,6 +748,15 @@ pub(crate) fn apply_task_filters(
     archive_stmt: &mut sea_orm::sea_query::SelectStatement,
     query: &TasksQueryReq,
 ) -> crate::error::Result<()> {
+    if let Some(reporter_uuid) = query.reporter_uuid {
+        // reporter_uuid applies only to archived tasks. Ensure active query returns nothing.
+        // Exclude active tasks by adding a false condition.
+        active_stmt.and_where(Expr::value(false));
+        archive_stmt.and_where(
+            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::ReporterUuid))
+                .eq(reporter_uuid),
+        );
+    }
     if let Some(ref creator_usernames) = query.creator_usernames {
         let creator_usernames = Vec::from_iter(creator_usernames.clone());
         active_stmt.and_where(
@@ -955,6 +969,8 @@ pub async fn query_tasks_by_filter(
                 (ActiveTasks::Entity, ActiveTasks::Column::UpstreamTaskUuid),
                 (ActiveTasks::Entity, ActiveTasks::Column::DownstreamTaskUuid),
             ])
+            // Active tasks do not have reporter_uuid; return NULL
+            .expr_as(Expr::val(Value::Uuid(None)), Alias::new("reporter_uuid"))
             .expr_as(
                 Expr::col((User::Entity, User::Column::Username)),
                 Alias::new("creator_username"),
@@ -1005,6 +1021,7 @@ pub async fn query_tasks_by_filter(
                     ArchivedTasks::Entity,
                     ArchivedTasks::Column::DownstreamTaskUuid,
                 ),
+                (ArchivedTasks::Entity, ArchivedTasks::Column::ReporterUuid),
             ])
             .expr_as(
                 Expr::col((User::Entity, User::Column::Username)),
@@ -1082,6 +1099,7 @@ pub async fn cancel_tasks_by_filter(
         group_name: req.group_name,
         tags: req.tags,
         labels: req.labels,
+        reporter_uuid: None,
         // Filter for Ready and Pending tasks (cancellable states)
         states: {
             let mut states = HashSet::new();
@@ -1202,6 +1220,7 @@ pub async fn cancel_tasks_by_filter(
                         result: Set(Some(result.clone())),
                         upstream_task_uuid: Set(task.upstream_task_uuid),
                         downstream_task_uuid: Set(task.downstream_task_uuid),
+                        reporter_uuid: Set(None),
                     })
                     .collect();
 
@@ -1345,6 +1364,7 @@ pub async fn cancel_tasks_by_uuids(
                         result: Set(Some(result.clone())),
                         upstream_task_uuid: Set(task.upstream_task_uuid),
                         downstream_task_uuid: Set(task.downstream_task_uuid),
+                        reporter_uuid: Set(None),
                     })
                     .collect();
 

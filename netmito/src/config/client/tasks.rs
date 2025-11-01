@@ -106,6 +106,9 @@ pub struct QueryTasksArgs {
     /// The priority of the tasks, support operators like `=`(default), `!=`, `<`, `<=`, `>`, `>=`
     #[arg(short, long)]
     pub priority: Option<String>,
+    /// Filter by reporter worker UUID (only returns completed tasks reported by this worker)
+    #[arg(long)]
+    pub reporter_uuid: Option<Uuid>,
     /// The limit of the tasks to query
     #[arg(long)]
     pub limit: Option<u64>,
@@ -200,6 +203,7 @@ pub struct ChangeTaskArgs {
 impl From<QueryTasksArgs> for TasksQueryReq {
     fn from(args: QueryTasksArgs) -> Self {
         Self {
+            reporter_uuid: args.reporter_uuid,
             creator_usernames: if args.creators.is_empty() {
                 None
             } else {

@@ -108,6 +108,9 @@ pub(crate) fn output_parsed_task_info(info: &ParsedTaskQueryInfo) {
     if let Some(downstream_task_uuid) = info.downstream_task_uuid {
         tracing::info!("Downstream Task UUID: {:?}", downstream_task_uuid);
     }
+    if let Some(reporter_uuid) = info.reporter_uuid {
+        tracing::info!("Reporter UUID: {}", reporter_uuid);
+    }
 }
 
 pub(crate) fn output_task_info(info: &TaskQueryInfo) {
@@ -139,6 +142,9 @@ pub(crate) fn output_task_info(info: &TaskQueryInfo) {
     }
     if let Some(downstream_task_uuid) = info.downstream_task_uuid {
         tracing::info!("Downstream Task UUID: {:?}", downstream_task_uuid);
+    }
+    if let Some(reporter_uuid) = info.reporter_uuid {
+        tracing::info!("Reporter UUID: {}", reporter_uuid);
     }
 }
 

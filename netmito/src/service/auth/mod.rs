@@ -42,6 +42,7 @@ pub struct AuthAdminUser {
 #[derive(Debug, Clone)]
 pub struct AuthWorker {
     pub id: i64,
+    pub uuid: Uuid,
 }
 
 pub(crate) fn get_and_prompt_username(
@@ -344,5 +345,8 @@ async fn worker_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<AuthWor
         .await
         .map_err(|_| AuthError::WrongCredentials)?
         .ok_or(AuthError::WrongCredentials)?;
-    Ok(AuthWorker { id: worker.id })
+    Ok(AuthWorker {
+        id: worker.id,
+        uuid,
+    })
 }

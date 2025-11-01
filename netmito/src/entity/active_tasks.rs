@@ -62,6 +62,8 @@ impl Related<super::users::Entity> for Entity {
 
 impl ActiveModelBehavior for ActiveModel {}
 
+/// This conversion is used when archiving an active task.
+/// But do remember to set reporter_uuid separately after conversion
 impl From<Model> for super::archived_tasks::Model {
     fn from(task: Model) -> super::archived_tasks::Model {
         Self {
@@ -82,6 +84,7 @@ impl From<Model> for super::archived_tasks::Model {
             result: task.result,
             upstream_task_uuid: task.upstream_task_uuid,
             downstream_task_uuid: task.downstream_task_uuid,
+            reporter_uuid: None,
         }
     }
 }

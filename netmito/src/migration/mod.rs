@@ -6,6 +6,7 @@ mod m20250910_192001_add_performance_indices;
 mod m20250910_205347_add_labels_to_workers;
 mod m20250911_025409_add_gin_indices_on_tags;
 mod m20250915_111689_add_tasks_trigger;
+mod m20251031_000001_add_reporter_uuid_to_archived_tasks;
 
 pub struct Migrator;
 
@@ -19,6 +20,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20250910_205347_add_labels_to_workers::Migration),
             Box::new(m20250911_025409_add_gin_indices_on_tags::Migration),
             Box::new(m20250915_111689_add_tasks_trigger::Migration),
+            Box::new(m20251031_000001_add_reporter_uuid_to_archived_tasks::Migration),
         ]
     }
 }

@@ -33,7 +33,10 @@ lifetime = "7d"
 # groups are not set, default to the user's group
 # tags are not set
 file_log = false
+# shared_log is not set, default to false. When enabled, all workers share a centralized log file with daily rotation (max 3 files)
 # log_path is not set. It will use the default rolling log file path if file_log is set to true
+#   - If shared_log is enabled and log_path is not set, it will use workers.log in cache directory
+#   - If shared_log is disabled and log_path is not set, it will use {worker_uuid}.log in cache directory
 # retain is not set, default to false
 
 [client]

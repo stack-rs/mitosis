@@ -136,6 +136,9 @@ impl MitoManager {
             if worker_config.file_log {
                 cmd.arg("--file-log");
             }
+            if worker_config.shared_log {
+                cmd.arg("--shared-log");
+            }
             if let Some(lifetime) = &worker_config.lifetime {
                 cmd.arg("--lifetime").arg(lifetime);
             }

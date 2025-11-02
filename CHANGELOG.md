@@ -2,12 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.5](https://github.com/stack-rs/mitosis/compare/mito-v0.6.4...mito-v0.6.5) - 2025-11-02
+
+### Features
+
+- *(api)* Add batch operation for artifacts, attachments and tasks - ([1daa2ec](https://github.com/stack-rs/mitosis/commit/1daa2ec39ed223b752387e45cd41fbc76ecb09f0))
+- *(api)* Add batch cancellation of workers and tasks by uuid - ([00adc71](https://github.com/stack-rs/mitosis/commit/00adc7193125ba95455541210596b1efb8eb3d42))
+- *(api)* Add batch download for artifacts and attachments - ([148d064](https://github.com/stack-rs/mitosis/commit/148d0648b74c8628bb5f430aa1d15f4e2eae901d))
+- *(api)* Add batch cancellation for tasks and workers - ([fcc1ca1](https://github.com/stack-rs/mitosis/commit/fcc1ca1f1269282756412e433cddf79644eadb18))
+- *(task)* Record reporter uuid when commiting task - ([8e021f8](https://github.com/stack-rs/mitosis/commit/8e021f8bffb164003b2c9f846b743826dbf43e47))
+- *(worker)* Support shared rolling log - ([15f5109](https://github.com/stack-rs/mitosis/commit/15f51098ea824b99e800ff7e7733b01171abe2fa))
+
+### Refactor
+
+- *(schema)* [**breaking**] Rename key_prefix to key in query - ([5fe98d0](https://github.com/stack-rs/mitosis/commit/5fe98d019cd919ee443c38ecfa98e5f6d5b43e63))
+
+### Documentation
+
+- *(spec)* Update openapi type/api definition - ([224e801](https://github.com/stack-rs/mitosis/commit/224e8018830d456e8761c92bc4a94c8d27c04ad7))
+
 ## [0.6.4](https://github.com/stack-rs/mitosis/compare/mito-v0.6.3...mito-v0.6.4) - 2025-10-09
 
 ### Features
 
 - *(cli)* Unify attachment interfaces - ([a0d3030](https://github.com/stack-rs/mitosis/commit/a0d303025273be513f996409e5222a5d8878e1c2))
-
 
 ## [0.6.3](https://github.com/stack-rs/mitosis/compare/mito-v0.6.2...mito-v0.6.3) - 2025-09-29
 
@@ -19,7 +37,6 @@ All notable changes to this project will be documented in this file.
 
 - *(musl)* Bump aws-lc-rs and aws-lc-sys to newest - ([f6cf1ae](https://github.com/stack-rs/mitosis/commit/f6cf1ae36c7029351a40e190e992edfa0145787b))
 - *(musl)* Downgrade aws-lc-rs version - ([5b4b626](https://github.com/stack-rs/mitosis/commit/5b4b62656bcc23a8f3af14f70ec5b08625a9c398))
-
 
 ## [0.6.2](https://github.com/stack-rs/mitosis/compare/mito-v0.6.1...mito-v0.6.2) - 2025-09-26
 
@@ -43,7 +60,6 @@ All notable changes to this project will be documented in this file.
 
 - Use crossfire-channel as default comm - ([e4700a8](https://github.com/stack-rs/mitosis/commit/e4700a8d111064fbcd86ad06b3f5ebd8ebdecfef))
 
-
 ## [0.6.1](https://github.com/stack-rs/mitosis/compare/mito-v0.6.0...mito-v0.6.1) - 2025-09-15
 
 ### Features
@@ -54,7 +70,6 @@ All notable changes to this project will be documented in this file.
 ### Documentation
 
 - *(guide)* Add guidance for manager - ([35aca9a](https://github.com/stack-rs/mitosis/commit/35aca9a23d14278100d2935f1fab5003e534665c))
-
 
 ## [0.6.0](https://github.com/stack-rs/mitosis/compare/mito-v0.5.3...mito-v0.6.0) - 2025-09-11
 
@@ -70,7 +85,6 @@ All notable changes to this project will be documented in this file.
 
 - *(guide)* Update key concepts and usage guide - ([784938b](https://github.com/stack-rs/mitosis/commit/784938b24dcbedbcb94729804c1561ecb160c074))
 - *(spec)* Add current OpenAPI specification - ([d222a08](https://github.com/stack-rs/mitosis/commit/d222a0886b2b83c16e85cc521e4249f009996c5e))
-
 
 ## [0.5.3](https://github.com/stack-rs/mitosis/compare/mito-v0.5.2...mito-v0.5.3) - 2025-09-03
 

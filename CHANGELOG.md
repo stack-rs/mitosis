@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0](https://github.com/stack-rs/mitosis/compare/mito-v0.6.4...mito-v0.7.0) - 2025-11-02
+
+### Features
+
+- *(api)* Add batch operation for artifacts, attachments and tasks - ([1daa2ec](https://github.com/stack-rs/mitosis/commit/1daa2ec39ed223b752387e45cd41fbc76ecb09f0))
+- *(api)* Add batch cancellation of workers and tasks by uuid - ([00adc71](https://github.com/stack-rs/mitosis/commit/00adc7193125ba95455541210596b1efb8eb3d42))
+- *(api)* Add batch download for artifacts and attachments - ([148d064](https://github.com/stack-rs/mitosis/commit/148d0648b74c8628bb5f430aa1d15f4e2eae901d))
+- *(api)* Add batch cancellation for tasks and workers - ([fcc1ca1](https://github.com/stack-rs/mitosis/commit/fcc1ca1f1269282756412e433cddf79644eadb18))
+- *(task)* Record reporter uuid when commiting task - ([8e021f8](https://github.com/stack-rs/mitosis/commit/8e021f8bffb164003b2c9f846b743826dbf43e47))
+- *(worker)* Support shared rolling log - ([2b0b6d6](https://github.com/stack-rs/mitosis/commit/2b0b6d68485bdb94f82b0bf9ce67ba00fe6d23c8))
+
+### Refactor
+
+- *(schema)* [**breaking**] Rename key_prefix to key in query - ([5fe98d0](https://github.com/stack-rs/mitosis/commit/5fe98d019cd919ee443c38ecfa98e5f6d5b43e63))
+
+### Documentation
+
+- *(spec)* Update openapi type/api definition - ([224e801](https://github.com/stack-rs/mitosis/commit/224e8018830d456e8761c92bc4a94c8d27c04ad7))
+
+
 ## [0.6.4](https://github.com/stack-rs/mitosis/compare/mito-v0.6.3...mito-v0.6.4) - 2025-10-09
 
 ### Features

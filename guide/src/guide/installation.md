@@ -24,7 +24,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releas
 **For a specific version** (adjust version number as needed, found at [releases] page):
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.6.0/mito-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stack-rs/mitosis/releases/download/mito-v0.6.5/mito-installer.sh | sh
 ```
 
 The installer script will:

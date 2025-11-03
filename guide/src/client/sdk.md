@@ -9,7 +9,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-netmito = "0.6.0"
+netmito = "0.6.5"
 tokio = { version = "1.0", features = ["full"] }
 uuid = { version = "1.18", features = ["v4"] }
 ```
@@ -210,6 +210,136 @@ let args = GroupAttachmentDownloadArgs {
 };
 
 client.group_attachment_download(args).await?;
+```
+
+### Batch Operations (v0.6.5+)
+
+Starting from version 0.6.5, the SDK supports batch operations for improved efficiency when working with multiple resources:
+
+#### Batch Task Submission
+
+Submit multiple tasks at once:
+
+```rust,ignore
+use netmito::config::client::TaskSubmitArgs;
+use netmito::schema::BatchTaskSubmitReq;
+
+let tasks = vec![
+    TaskSubmitArgs {
+        command: vec!["echo".to_string(), "task1".to_string()],
+        group: Some("my-group".to_string()),
+        ..Default::default()
+    },
+    TaskSubmitArgs {
+        command: vec!["echo".to_string(), "task2".to_string()],
+        group: Some("my-group".to_string()),
+        ..Default::default()
+    },
+];
+
+let batch_req = BatchTaskSubmitReq { tasks };
+let task_ids = client.batch_submit_tasks(batch_req).await?;
+```
+
+#### Batch Task Cancellation
+
+Cancel multiple tasks by UUID or by filter:
+
+```rust,ignore
+use uuid::Uuid;
+use netmito::schema::BatchCancelByUuidsReq;
+
+// Cancel by specific UUIDs
+let task_ids = vec![
+    Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000")?,
+    Uuid::parse_str("660e8400-e29b-41d4-a716-446655440001")?,
+];
+let req = BatchCancelByUuidsReq { uuids: task_ids };
+client.tasks_batch_cancel_by_uuids(req).await?;
+
+// Or cancel by filter
+use netmito::config::client::TaskQueryArgs;
+let filter = TaskQueryArgs {
+    labels: Some(vec!["test".to_string()]),
+    status: Some("pending".to_string()),
+    ..Default::default()
+};
+client.tasks_batch_cancel(filter).await?;
+```
+
+#### Batch Artifact Download
+
+Download multiple artifacts at once:
+
+```rust,ignore
+use netmito::config::client::{TaskQueryArgs, TaskArtifactDownloadArgs};
+
+// Download artifacts by filter
+let filter = TaskQueryArgs {
+    labels: Some(vec!["experiment-1".to_string()]),
+    status: Some("completed".to_string()),
+    ..Default::default()
+};
+let download_args = TaskArtifactDownloadArgs {
+    artifact_type: "result".to_string(),
+    output_path: Some("./results/".to_string()),
+    ..Default::default()
+};
+client.batch_download_artifacts_by_filter(filter, download_args).await?;
+
+// Or download specific artifacts by task IDs
+use netmito::schema::BatchDownloadArtifactsByListReq;
+let req = BatchDownloadArtifactsByListReq {
+    task_ids: vec![task_id1, task_id2],
+    artifact_type: "result".to_string(),
+};
+client.batch_download_artifacts_by_list(req, "./results/".to_string()).await?;
+```
+
+#### Batch Attachment Operations
+
+Download or delete multiple group attachments:
+
+```rust,ignore
+use netmito::config::client::GroupAttachmentQueryArgs;
+use netmito::schema::BatchDownloadAttachmentsByListReq;
+
+// Download attachments by filter
+let filter = GroupAttachmentQueryArgs {
+    group_name: Some("my-group".to_string()),
+    key: Some("datasets/".to_string()), // prefix matching
+    ..Default::default()
+};
+client.batch_download_attachments_by_filter(filter, "./downloads/".to_string()).await?;
+
+// Delete attachments by list
+let keys = vec!["old-data-1.tar.gz".to_string(), "old-data-2.tar.gz".to_string()];
+let req = BatchDownloadAttachmentsByListReq {
+    group_name: "my-group".to_string(),
+    keys,
+};
+client.batch_delete_attachments_by_list(req).await?;
+```
+
+#### Batch Worker Cancellation
+
+Cancel multiple workers at once:
+
+```rust,ignore
+use netmito::schema::BatchCancelByUuidsReq;
+
+// Cancel workers by UUIDs
+let worker_ids = vec![worker_uuid1, worker_uuid2];
+let req = BatchCancelByUuidsReq { uuids: worker_ids };
+client.workers_batch_cancel_by_uuids(req).await?;
+
+// Or cancel by filter
+use netmito::config::client::WorkerQueryArgs;
+let filter = WorkerQueryArgs {
+    tags: Some(vec!["deprecated".to_string()]),
+    ..Default::default()
+};
+client.workers_batch_cancel(filter).await?;
 ```
 
 ## Advanced Usage

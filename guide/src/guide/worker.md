@@ -49,7 +49,10 @@ lifetime = "7d"
 # groups are not set, default to the user's group
 # tags are not set
 file_log = false
+# shared_log is not set, default to false. When enabled, all workers share a centralized log file with daily rotation (max 3 files)
 # log_path is not set. It will use the default rolling log file path if file_log is set to true
+#   - If shared_log is enabled and log_path is not set, it will use workers.log in cache directory
+#   - If shared_log is disabled and log_path is not set, it will use {worker_uuid}.log in cache directory
 # lifetime is not set, default to the coordinator's setting
 ```
 
@@ -122,4 +125,41 @@ Options:
           Print help
   -V, --version
           Print version
+```
+
+## Logging Configuration
+
+Workers support flexible logging configurations to help you track and debug task execution:
+
+### File Logging
+
+Enable file logging with the `--file-log` flag or by setting `file_log = true` in the configuration file. This will write worker logs to disk for persistent storage.
+
+### Shared Rolling Logs (v0.6.5+)
+
+Starting from version 0.6.5, workers support shared rolling logs - a centralized logging mechanism that allows multiple workers to write to the same log file with automatic daily rotation:
+
+- **Shared Mode**: When `shared_log = true`, all workers write to a single `workers.log` file in the cache directory
+- **Individual Mode**: When `shared_log = false` (default), each worker writes to its own `{worker_uuid}.log` file
+- **Rotation**: Shared logs rotate daily with a maximum of 3 log files retained
+
+This feature is particularly useful when managing multiple workers on the same machine, as it simplifies log management and aggregation.
+
+**Example configuration:**
+
+```toml
+[worker]
+file_log = true
+shared_log = true  # Enable shared rolling logs
+# log_path is optional - if not specified, uses default cache directory
+```
+
+**Note:** The cache directory location varies by platform:
+
+- Linux: `$XDG_CACHE_HOME` or `$HOME/.cache/mitosis`
+- macOS: `$HOME/Library/Caches/mitosis`
+- Windows: `{FOLDERID_LocalAppData}\mitosis`
+
+```
+
 ```

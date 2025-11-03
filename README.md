@@ -1,5 +1,12 @@
 # Mitosis: A Unified Transport Evaluation Framework
 
+[![github-repo](https://img.shields.io/badge/github-stack--rs/mitosis-f5dc23?logo=github)](https://github.com/stack-rs/mitosis)
+[![Documentation](https://img.shields.io/badge/Documentation-blue?logo=mdbook&labelColor=gray&link=https%3A%2F%2Fdocs.stack.rs%2Fmitosis)](https://docs.stack.rs/mitosis)
+[![crates.io/netmito](https://img.shields.io/crates/v/netmito.svg?logo=rust&label=netmito)](https://crates.io/crates/netmito)
+[![crates.io/mito](https://img.shields.io/crates/v/mito.svg?logo=rust&label=mito)](https://crates.io/crates/mito)
+[![docs.rs](https://img.shields.io/badge/docs.rs-netmito-34A853?logo=docsdotrs)](https://docs.rs/netmito)
+[![LICENSE Apache-2.0](https://img.shields.io/github/license/stack-rs/mitosis?logo=Apache)](https://github.com/stack-rs/mitosis/blob/main/LICENSE)
+
 **Mitosis** is a Rust library and command-line tool designed for running distributed platforms, particularly for transport research. It provides a framework for parallelizing tasks across multiple workers in a controlled, managed environment.
 It is designed for transport-layer research, but it can be used for any other purpose.
 
@@ -63,6 +70,8 @@ For setting up the whole service (including the Coordinator and the Worker), ple
 - **Role-Based Access Control**: Fine-grained permissions for users and groups
 - **Tag-Based Worker Selection**: Target specific worker capabilities
 - **Artifact Management**: Automatic collection and storage of task outputs
+- **Batch Operations**: Efficiently manage multiple tasks, workers, and artifacts at once (v0.6.5+)
+- **Shared Rolling Logs**: Centralized logging for multiple workers with automatic rotation (v0.6.5+)
 - **Interactive Client**: User-friendly CLI with both interactive and batch modes
 - **SDK Support**: Rust and Python library for programmatic integration
 

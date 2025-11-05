@@ -1,7 +1,8 @@
 # Worker Manager System - Design Overview
 
-**Status:** Design Phase
+**Status:** Design Phase - Decisions Made
 **Last Updated:** 2025-11-05
+**Version:** 0.2.0
 
 ## Table of Contents
 1. [Current Architecture Summary](#current-architecture-summary)
@@ -72,33 +73,40 @@
 A **Task Group** is a new first-class entity that groups related tasks and defines their execution environment.
 
 **Components:**
-- **Worker Scheduling Plan**: Defines how many workers to spawn, their configuration
-- **Environment Preparation**: Script/procedure to setup the environment before tasks
-- **Environment Cleanup**: Script/procedure to teardown after completion
+- **Worker Scheduling Plan**: Defines how many workers to spawn, CPU binding, and other resources
+- **Environment Preparation**: TaskSpec-like definition for environment setup
+- **Environment Cleanup**: TaskSpec-like definition for environment teardown
 - **State**: Lifecycle state (Open → Closed → Complete)
+- **Priority**: Integer priority for manager scheduling (similar to task priority)
+- **Tags/Labels**: For matching with eligible managers
 
 **Properties:**
 - Tasks are submitted **into** a task group (not just to a regular group)
-- Task groups have completion criteria (TBD - see [Open Questions](#open-questions))
+- Task groups have **hybrid completion**: explicit close API OR configurable timeout
 - Task groups belong to regular Groups (inherit permissions)
+- Efficient timeout via database triggers or event-based mechanism (not polling)
 
 ### 2. Worker Manager
 A **Worker Manager** is a new service component that:
 
 **Responsibilities:**
 - Runs on a physical device/server
-- Manages local worker processes according to task group scheduling plans
-- Controls device-level resources
+- Manages local worker processes according to task group scheduling plans (acts as a managed worker pool)
+- Controls device-level resources (CPU core binding)
 - Executes environment preparation/cleanup
 - Proxies communication between managed workers and coordinator
+- **Auto-recovery**: Re-spawns workers if they die accidentally
 
 **Scheduling Behavior:**
 - Managers execute **one task group at a time** (exclusive execution)
 - After completing a task group, manager picks the next eligible one
-- Similar to worker-task scheduling, but at task group granularity
+- Task group assignment uses **priority-based scheduling** (similar to task-worker matching)
+- Matches based on task group tags/labels and manager capabilities
+- No hard limit on workers per manager (defined by scheduling plan)
 
 **Authentication:**
-- Managers register with coordinator (similar to workers)
+- Managers register with coordinator (receive JWT token)
+- **Only managers authenticate** with coordinator (not individual workers)
 - Managers belong to groups with permissions
 - Only execute task groups they're authorized for
 
@@ -110,10 +118,13 @@ A **Worker Manager** is a new service component that:
 - No local manager involvement
 
 #### Managed Mode (New)
-- Worker launched by local Worker Manager
+- Worker spawned by local Worker Manager as local process
+- **Anonymous to coordinator** (not registered, invisible in DB)
 - Communicates with Manager via **iceoryx2 IPC** (not HTTP)
-- Manager proxies requests to coordinator on worker's behalf
+- Manager proxies requests to coordinator using **manager's JWT**
 - Worker lifecycle tied to task group execution
+- Code and mechanisms reused from independent workers
+- If worker dies, manager auto-respawns replacement
 
 ---
 
@@ -213,15 +224,22 @@ CREATE TABLE task_groups (
     group_id BIGINT NOT NULL REFERENCES groups(id),  -- Parent group for permissions
     creator_id BIGINT NOT NULL REFERENCES users(id),
 
-    -- Scheduling plan (JSON)
-    worker_schedule JSONB NOT NULL,  -- {worker_count, tags, labels, resources}
+    -- Scheduling attributes
+    tags TEXT[] NOT NULL,   -- For matching with managers
+    labels TEXT[] NOT NULL, -- User-defined labels
+    priority INTEGER NOT NULL,  -- Scheduling priority
 
-    -- Lifecycle hooks (JSON)
-    env_preparation JSONB,  -- Script/command to run before workers start
-    env_cleanup JSONB,      -- Script/command to run after completion
+    -- Scheduling plan (JSON)
+    worker_schedule JSONB NOT NULL,  -- {worker_count, cpu_binding: {cores: [0,1,2]}}
+
+    -- Lifecycle hooks (TaskSpec-like format, JSON)
+    env_preparation JSONB,  -- {args, envs, resources, timeout}
+    env_cleanup JSONB,      -- {args, envs, resources, timeout}
 
     -- State management
     state INTEGER NOT NULL DEFAULT 0,  -- Open=0, Closed=1, Complete=2
+    auto_close_timeout BIGINT,  -- Timeout in seconds for auto-close (NULL = no timeout)
+    last_task_submitted_at TIMESTAMPTZ,  -- For timeout calculation
 
     -- Timestamps
     created_at TIMESTAMPTZ NOT NULL,
@@ -233,6 +251,11 @@ CREATE TABLE task_groups (
 
     UNIQUE(group_id, name)
 );
+
+-- Index for efficient timeout queries
+CREATE INDEX idx_task_groups_auto_close
+    ON task_groups(last_task_submitted_at)
+    WHERE state = 0 AND auto_close_timeout IS NOT NULL;
 ```
 
 #### 2. `worker_managers` Table
@@ -289,23 +312,52 @@ ADD COLUMN task_group_id BIGINT REFERENCES task_groups(id);
 pub struct CreateTaskGroupReq {
     pub name: String,
     pub group_name: String,  // Parent group
+    pub tags: HashSet<String>,  // For manager matching
+    pub labels: HashSet<String>,
+    pub priority: i32,
     pub worker_schedule: WorkerSchedulePlan,
-    pub env_preparation: Option<EnvHook>,
-    pub env_cleanup: Option<EnvHook>,
+    pub env_preparation: Option<EnvHookSpec>,
+    pub env_cleanup: Option<EnvHookSpec>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub auto_close_timeout: Option<Duration>,  // Auto-close if no tasks for this duration
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct WorkerSchedulePlan {
     pub worker_count: u32,
-    pub tags: HashSet<String>,
-    pub labels: HashSet<String>,
-    pub resources: HashMap<String, String>,  // e.g., {"gpu": "1", "memory": "16GB"}
+    pub cpu_binding: Option<CpuBinding>,
+    // Future: memory limits, GPU assignment, etc.
 }
 
 #[derive(Serialize, Deserialize)]
-pub enum EnvHook {
-    Script { content: String },
-    Command { args: Vec<String> },
+pub struct CpuBinding {
+    pub cores: Vec<usize>,  // CPU core IDs to bind workers to
+    pub strategy: CpuBindingStrategy,
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum CpuBindingStrategy {
+    RoundRobin,  // Distribute workers across cores
+    Exclusive,   // Each worker gets dedicated core(s)
+    Shared,      // All workers share all cores
+}
+
+// Environment hook specification (similar to TaskSpec)
+#[derive(Serialize, Deserialize)]
+pub struct EnvHookSpec {
+    pub args: Vec<String>,  // Command to execute
+    #[serde(default)]
+    pub envs: HashMap<String, String>,
+    #[serde(default)]
+    pub resources: Vec<RemoteResourceDownload>,  // Can download files from S3
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
+    // Context available via environment variables:
+    // - MITOSIS_TASK_GROUP_UUID
+    // - MITOSIS_TASK_GROUP_NAME
+    // - MITOSIS_GROUP_NAME
+    // - MITOSIS_WORKER_COUNT
 }
 
 // Task submission update
@@ -362,8 +414,9 @@ pub struct RegisterManagerResp {
    - Similar to worker heartbeat
 
 5. **Proxy Task Operations** (on behalf of managed workers)
-   - `GET /managers/{manager_id}/tasks` - Fetch task for a managed worker
-   - `POST /managers/{manager_id}/tasks` - Report task result
+   - `GET /managers/tasks` - Fetch task for a managed worker (uses manager JWT)
+   - `POST /managers/tasks` - Report task result (uses manager JWT)
+   - Note: Workers are anonymous, manager authenticates for all operations
 
 ### Manager ↔ Worker (iceoryx2 IPC)
 
@@ -373,7 +426,7 @@ pub struct RegisterManagerResp {
    ```rust
    // Worker sends request
    struct FetchTaskRequest {
-       worker_id: Uuid,
+       worker_local_id: u32,  // Local worker ID (0, 1, 2, ...), not UUID
    }
 
    // Manager responds
@@ -385,7 +438,7 @@ pub struct RegisterManagerResp {
 2. **Task Reporting Service**
    ```rust
    struct ReportTaskRequest {
-       worker_id: Uuid,
+       worker_local_id: u32,
        task_id: i64,
        op: ReportTaskOp,
    }
@@ -396,16 +449,17 @@ pub struct RegisterManagerResp {
    }
    ```
 
-3. **Heartbeat Service**
+3. **Heartbeat Service** (Manager ↔ Workers, optional)
    ```rust
    struct HeartbeatRequest {
-       worker_id: Uuid,
+       worker_local_id: u32,
    }
 
    struct HeartbeatResponse {
        ack: bool,
    }
    ```
+   Note: Manager tracks worker process health, not forwarded to coordinator
 
 #### Pub-Sub Topics
 
@@ -465,35 +519,57 @@ pub struct RegisterManagerResp {
    - If match found, assign task group to manager
 
 3. **Environment Preparation**
-   - Manager executes `env_preparation` hook
-   - If fails, report error, release task group
-   - If succeeds, proceed to worker spawning
+   - Manager executes `env_preparation` hook (TaskSpec-like)
+   - Downloads required resources from S3
+   - Executes preparation command with context env vars
+   - **If fails**: Manager aborts task group, reports failure, tries next eligible group
+   - **If succeeds**: Proceed to worker spawning
 
 4. **Worker Spawning**
-   - Manager spawns N workers according to `worker_schedule`
-   - Workers launched with IPC mode (not HTTP mode)
+   - Manager spawns N workers according to `worker_schedule.worker_count`
+   - **CPU Binding**: Applies CPU core affinity based on `cpu_binding` strategy
+   - Workers launched as **anonymous local processes** (no coordinator registration)
+   - Workers configured for IPC mode (not HTTP mode)
    - Manager sets up iceoryx2 services (request-response + pub-sub)
+   - **Auto-recovery**: If worker crashes, manager detects and respawns replacement
 
 5. **Task Execution Loop**
-   - Workers request tasks via IPC
-   - Manager proxies requests to coordinator
-   - Workers execute tasks, report results via IPC
-   - Manager proxies results to coordinator
+   - Workers request tasks via IPC (`FetchTaskRequest`)
+   - Manager proxies to coordinator using **manager's JWT** (`GET /managers/tasks`)
+   - Workers execute tasks locally
+   - Workers report results via IPC (`ReportTaskRequest`)
+   - Manager proxies to coordinator (`POST /managers/tasks`)
+   - Manager tracks which worker is executing which task
 
-6. **Completion Detection**
-   - **OPTION A**: User explicitly closes task group → state = CLOSED
-   - **OPTION B**: Timeout-based (no new tasks for X minutes)
-   - **OPTION C**: Task count-based (all N tasks completed)
-   - When CLOSED + all tasks finished → state = COMPLETE
+6. **Completion Detection (Hybrid)**
+   - **Explicit Close**: User calls `POST /task-groups/{id}/close` → state = CLOSED
+   - **Auto-Close**: Efficient timeout mechanism (see below) → state = CLOSED
+   - **Completion**: When CLOSED + all tasks finished → state = COMPLETE
+
+   **Efficient Timeout Mechanism** (no polling):
+   - On task submission: Update `task_groups.last_task_submitted_at`
+   - Background coordinator task uses indexed query:
+     ```sql
+     SELECT id FROM task_groups
+     WHERE state = 0  -- OPEN
+       AND auto_close_timeout IS NOT NULL
+       AND NOW() - last_task_submitted_at > (auto_close_timeout * INTERVAL '1 second')
+     LIMIT 100;
+     ```
+   - Runs every minute, marks expired task groups as CLOSED
+   - Alternative: PostgreSQL `pg_cron` or database trigger for even lower overhead
 
 7. **Environment Cleanup**
-   - Manager executes `env_cleanup` hook
-   - Shuts down all managed workers (graceful shutdown via pub-sub)
+   - Manager executes `env_cleanup` hook (TaskSpec-like)
+   - Downloads required resources from S3
+   - Executes cleanup command with context env vars
+   - **If fails**: Log error, mark task group as "degraded complete" (still complete)
+   - Shuts down all managed workers (graceful shutdown via pub-sub control topic)
    - Reports completion to coordinator
 
 8. **Next Assignment**
    - Manager returns to idle state
-   - Polls for next eligible task group
+   - Polls for next eligible task group (priority-based matching)
    - Repeat from step 2
 
 ### Worker Lifecycle (Managed Mode)
@@ -517,126 +593,201 @@ pub struct RegisterManagerResp {
 
 ---
 
-## Open Questions
+## Design Decisions
 
-### 1. Task Group Completion Criteria
-**Question:** How should we determine when a task group is "complete"?
+This section documents the key design decisions made for the Worker Manager system.
 
-**Options:**
-- **A. Explicit Close**: User calls API to close task group, no new tasks accepted
-  - Pros: Clear user intent
-  - Cons: Requires user action, may forget to close
+### ✅ 1. Task Group Completion - Hybrid Approach
+**Decision:** Implement hybrid completion mechanism with efficient timeout.
 
-- **B. Timeout-Based**: Auto-close after N minutes of no new task submissions
-  - Pros: Automatic, no user action needed
-  - Cons: May close prematurely if user slow to submit
+**Details:**
+- **Explicit Close API**: `POST /task-groups/{id}/close` sets state to CLOSED
+- **Auto-Close Timeout**: Configurable per task group (e.g., 30 minutes of inactivity)
+- **Efficient Implementation**: Indexed database query (no polling loop)
+  - Update `last_task_submitted_at` on every task submission
+  - Background task runs every minute with indexed query
+  - Query only task groups with non-null `auto_close_timeout`
+- **Completion**: When CLOSED and all tasks finished → state = COMPLETE
 
-- **C. Task Count**: User specifies expected task count upfront
-  - Pros: Deterministic completion
-  - Cons: Less flexible, need to know count ahead
+### ✅ 2. Worker Anonymity - No Registration
+**Decision:** Managed workers are anonymous to coordinator.
 
-- **D. Hybrid**: Explicit close OR timeout (whichever first)
-  - Pros: Flexible
-  - Cons: More complex
+**Rationale:**
+- Manager acts as a managed worker pool
+- Workers are local processes, logically identical
+- Manager handles worker crashes and respawning
+- Simpler architecture, fewer database entries
 
-**Recommendation:** Start with **Option D (Hybrid)** - support explicit close API, plus configurable timeout as fallback.
+**Details:**
+- Workers use local IDs (0, 1, 2, ...) for manager tracking
+- No worker UUIDs, no JWT tokens, no DB registration
+- Manager proxies all worker requests using **manager's JWT**
 
-### 2. Manager-Coordinator Communication for Task Proxying
-**Question:** When manager proxies worker task requests, should it:
+### ✅ 3. Authentication - Manager Only
+**Decision:** Only managers authenticate with coordinator.
 
-**Options:**
-- **A. Use manager's JWT**: Manager authenticates on behalf of workers
-  - Pros: Simpler, fewer tokens
-  - Cons: Manager impersonates workers, audit trail lost
+**Details:**
+- Manager receives JWT token on registration
+- Manager uses own token for all proxied worker requests
+- Workers are just local processes reusing existing code/mechanisms
+- Simpler token management, suitable for managed worker pool model
 
-- **B. Issue worker JWTs**: Manager requests individual JWT for each spawned worker
-  - Pros: Better audit trail, worker identity preserved
-  - Cons: More complex token management
+### ✅ 4. Environment Hooks - TaskSpec-like Format
+**Decision:** Hooks use TaskSpec-like structure for consistency.
 
-**Recommendation:** **Option B** - Manager requests worker tokens during spawning, better for auditing.
+**Format:**
+```rust
+struct EnvHookSpec {
+    args: Vec<String>,           // Command to execute
+    envs: HashMap<String, String>, // Environment variables
+    resources: Vec<RemoteResourceDownload>, // S3 resources
+    timeout: Duration,           // Execution timeout
+}
+```
 
-### 3. Environment Preparation/Cleanup Execution
-**Question:** Where and how do env hooks execute?
+**Context:** Hooks receive task group context via environment variables:
+- `MITOSIS_TASK_GROUP_UUID`
+- `MITOSIS_TASK_GROUP_NAME`
+- `MITOSIS_GROUP_NAME`
+- `MITOSIS_WORKER_COUNT`
 
-**Options:**
-- **A. Manager Process**: Hooks run as subprocess of manager
-  - Pros: Simple, manager controls environment
-  - Cons: Manager needs execution permissions
+**Execution:** Manager runs hooks as subprocesses
 
-- **B. Dedicated Hook Executor**: Separate service executes hooks
-  - Pros: Isolation, better security
-  - Cons: More complex architecture
+### ✅ 5. Resource Specification - CPU Binding Focus
+**Decision:** Initial implementation focuses on CPU core binding.
 
-**Recommendation:** **Option A** for initial implementation, migrate to B if needed.
+**Details:**
+```rust
+struct CpuBinding {
+    cores: Vec<usize>,  // CPU core IDs
+    strategy: CpuBindingStrategy, // RoundRobin | Exclusive | Shared
+}
+```
 
-### 4. Multiple Managers for Same Task Group
-**Question:** Can multiple managers execute the same task group concurrently?
+**Strategies:**
+- **RoundRobin**: Distribute workers across cores evenly
+- **Exclusive**: Each worker gets dedicated core(s)
+- **Shared**: All workers share all specified cores
 
-**Options:**
-- **A. Exclusive**: One manager at a time (like current worker-task model)
-  - Pros: Simpler, no coordination needed
-  - Cons: Less parallelism
+**Future:** Can extend to memory limits, GPU assignment, etc.
 
-- **B. Concurrent**: Multiple managers can work on same task group
-  - Pros: Higher throughput
-  - Cons: Need coordination, may conflict in env prep/cleanup
+### ✅ 6. Failure Handling
+**Decisions:**
 
-**Recommendation:** **Option A** initially - exclusive assignment. Task group scheduling should be sufficient for most use cases.
+| Scenario | Handling |
+|----------|----------|
+| **Manager crashes** | Coordinator detects via heartbeat timeout → marks offline → returns task group to queue |
+| **Worker crashes** | Manager detects → respawns replacement worker automatically |
+| **Env preparation fails** | Manager aborts task group → reports failure → tries next eligible group |
+| **Env cleanup fails** | Log error → mark as "degraded complete" → manager proceeds to next task group |
 
-### 5. Worker Identity in Managed Mode
-**Question:** Should managed workers register with coordinator?
+### ✅ 7. Task Group Attributes - Priority and Tags/Labels
+**Decision:** Task groups have scheduling attributes like tasks.
 
-**Options:**
-- **A. No Registration**: Workers are anonymous to coordinator, only manager visible
-  - Pros: Simpler, fewer DB entries
-  - Cons: No visibility into individual worker status
+**Attributes:**
+- **Priority** (i32): For scheduling order (higher = higher priority)
+- **Tags** (HashSet<String>): For matching with manager capabilities
+- **Labels** (HashSet<String>): User-defined metadata
 
-- **B. Transparent Registration**: Manager registers workers on their behalf
-  - Pros: Full visibility, can query worker status
-  - Cons: More DB overhead
+**Scheduling:** Coordinator matches task groups to managers based on:
+- Priority (higher first)
+- Tags (must match manager tags)
+- Group permissions (manager must have access)
 
-**Recommendation:** **Option B** - Manager registers workers with special flag (e.g., `managed_by: manager_id`), enables better monitoring.
+### ✅ 8. Manager Capacity - No Hard Limits
+**Decision:** No hard limit on workers per manager.
 
-### 6. Failure Handling
-**Question:** What happens if manager crashes during task group execution?
+**Rationale:**
+- Worker count defined by task group's `worker_schedule.worker_count`
+- Manager handles whatever the scheduling plan specifies
+- Device resource limits naturally constrain capacity
+- Flexibility for different use cases (small vs. large batches)
 
-**Scenarios:**
-- Manager crashes → managed workers orphaned
-- Worker crashes → manager detects via missing heartbeat
-- Env preparation fails → abort task group
-- Env cleanup fails → log error, mark task group as degraded?
+### ✅ 9. Dynamic Worker Scaling - Via Scheduling Method
+**Decision:** Worker scaling is static per task group, defined in scheduling plan.
 
-**Recommendation:** Need to design failure recovery:
-- Manager heartbeat timeout → coordinator marks manager offline, task group returned to queue
-- Orphaned workers → coordinator detects via heartbeat timeout, cleans up
-- Failed hooks → configurable retry policy, eventual failure marks task group as failed
+**Current:** `worker_count` is fixed when task group is created
+**Future:** Could add dynamic scaling APIs if needed (e.g., `PUT /task-groups/{id}/scale`)
 
-### 7. Backward Compatibility and Migration
-**Question:** How to ensure existing independent workers continue to work?
+### ✅ 10. Backward Compatibility
+**Decision:** Full backward compatibility with independent workers.
 
-**Approach:**
-- Independent workers continue using existing HTTP endpoints (`POST /workers`, `GET /workers/tasks`)
-- Task submission API extended with optional `task_group_name` field
+**Details:**
+- Independent workers unchanged: `POST /workers`, `GET /workers/tasks`
+- Task submission API extended with optional `task_group_name`
 - Tasks without `task_group_name` → assigned to independent workers (current behavior)
 - Tasks with `task_group_name` → assigned to managed workers via managers
+- Both modes coexist seamlessly
 
-### 8. IPC Service Discovery
-**Question:** How do workers discover manager's iceoryx2 services?
+### ✅ 11. IPC Service Discovery - Predictable Names
+**Decision:** Use predictable iceoryx2 service names based on manager ID.
+
+**Naming Convention:**
+- Task Fetch: `manager_{manager_id}/fetch_task`
+- Task Report: `manager_{manager_id}/report_task`
+- Heartbeat: `manager_{manager_id}/heartbeat`
+- Control Topic: `manager_{manager_id}/control`
+- Config Topic: `manager_{manager_id}/config`
+
+**Benefits:**
+- Zero configuration needed
+- Workers launched with manager ID in environment
+- Deterministic, no coordination required
+
+### ✅ 12. Task Group Assignment - Exclusive
+**Decision:** One manager executes one task group at a time (exclusive).
+
+**Rationale:**
+- Simpler coordination
+- Prevents conflicts in env preparation/cleanup
+- Similar to current worker-task assignment model
+- Sufficient parallelism for most use cases
+
+**Future:** Could add concurrent execution if needed (requires careful coordination)
+
+---
+
+## Remaining Open Questions
+
+### 1. Hook Retry Policy
+**Question:** Should env hooks support automatic retries?
 
 **Options:**
-- **A. Environment Variables**: Manager passes IPC service names via env vars
-  - Pros: Simple
-  - Cons: Environment pollution
+- No retries (fail fast)
+- Configurable retry count with backoff
+- Retry only on specific error codes
 
-- **B. Config File**: Manager writes config file, workers read
-  - Pros: Clean, structured
-  - Cons: File I/O, coordination
+**Impact:** Affects reliability but adds complexity. Need to decide retry strategy.
 
-- **C. Hardcoded Names**: Use predictable service names (e.g., `manager_{manager_id}/task_fetch`)
-  - Pros: No coordination needed
-  - Cons: Less flexible
+### 2. Task Group State Transitions
+**Question:** Should we allow reopening a CLOSED task group?
 
-**Recommendation:** **Option C** with manager_id in service names - predictable and zero-config.
+**Options:**
+- A. Allow reopen (CLOSED → OPEN)
+- B. Disallow (CLOSED is terminal before COMPLETE)
+
+**Consideration:** Flexibility vs. simplicity
+
+### 3. Manager Health Metrics
+**Question:** What metrics should managers report?
+
+**Candidates:**
+- Worker spawn count / crash count
+- Task throughput
+- Resource utilization (CPU, memory)
+- Hook execution times
+
+**Impact:** Monitoring and debugging capabilities
+
+### 4. Multi-Manager Coordination (Future)
+**Question:** If we support concurrent task group execution by multiple managers, how do we coordinate?
+
+**Challenges:**
+- Env prep/cleanup coordination
+- Task distribution across managers
+- Failure handling with partial completion
+
+**Status:** Deferred - start with exclusive assignment
 
 ---
 
@@ -708,24 +859,49 @@ pub struct RegisterManagerResp {
 
 ## Next Steps
 
+### Phase 1: Finalize Remaining Decisions
 **Immediate Actions:**
-1. Review and discuss open questions above
-2. Make decisions on:
-   - Task group completion criteria
-   - Manager-worker token strategy
-   - Failure handling approach
-3. Validate IPC service schema design
-4. Decide on implementation priorities (which phases first?)
+1. ✅ Review and decide on remaining open questions:
+   - Hook retry policy
+   - Task group state transitions (allow reopen?)
+   - Manager health metrics
+2. Validate and refine IPC service schema design
+3. Review and approve implementation plan phases
 
-**Questions for Discussion:**
-- Are there any additional use cases we should consider?
-- Should we support dynamic worker scaling (add/remove workers mid-execution)?
-- Do we need manager-to-manager communication for future HA scenarios?
-- Should task groups support priority levels like tasks?
-- How should we handle resource limits (max managers per device, max workers per manager)?
+### Phase 2: Begin Implementation
+**Priority Order:**
+1. **Phase 1** (Core Data Models): Database schema, migrations, basic CRUD APIs
+2. **Phase 4** (Coordinator Extensions): Task group scheduling, manager queue
+3. **Phase 2** (Manager Service): Standalone manager binary
+4. **Phase 3** (IPC Integration): iceoryx2 communication
+5. **Phase 5** (Testing): End-to-end validation
+
+**Rationale:** Start with database foundation, then coordinator logic, then manager implementation.
+
+### Phase 3: Technical Exploration
+**Tasks:**
+- Prototype iceoryx2 request-response and pub-sub patterns
+- Test CPU core binding mechanisms (taskset, sched_setaffinity)
+- Benchmark IPC vs HTTP performance
+- Design manager state machine implementation
+
+### Discussion Topics for Next Session
+1. **Hook Retry Strategy**: Should hooks retry automatically? How many times?
+2. **Task Group Reopening**: Allow CLOSED → OPEN transition?
+3. **Metrics & Observability**: What should we expose for monitoring?
+4. **Edge Cases**: What happens when manager runs out of disk space? Network partitions?
+5. **Testing Strategy**: Unit tests, integration tests, chaos testing?
+
+### Additional Considerations
+- **Documentation**: User guide for creating task groups
+- **Migration Path**: How do existing users adopt this feature?
+- **Performance**: Expected overhead of IPC vs HTTP
+- **Security**: Any additional security considerations for managed workers?
 
 ---
 
-**Document Version:** 0.1.0
-**Contributors:** Claude (Design), [Your Name]
-**Feedback:** Please review and provide input on open questions and design decisions.
+**Document Version:** 0.2.0
+**Last Review:** 2025-11-05
+**Status:** Design decisions finalized, ready for implementation planning
+**Contributors:** User, Claude
+**Next Review:** After remaining open questions are resolved

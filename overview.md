@@ -240,6 +240,7 @@ CREATE TABLE task_groups (
     state INTEGER NOT NULL DEFAULT 0,  -- Open=0, Closed=1, Complete=2
     auto_close_timeout BIGINT,  -- Timeout in seconds for auto-close (NULL = no timeout)
     last_task_submitted_at TIMESTAMPTZ,  -- For timeout calculation
+    pending_task_count INTEGER NOT NULL DEFAULT 0,  -- Number of pending tasks (for auto-complete)
 
     -- Timestamps
     created_at TIMESTAMPTZ NOT NULL,
@@ -256,6 +257,11 @@ CREATE TABLE task_groups (
 CREATE INDEX idx_task_groups_auto_close
     ON task_groups(last_task_submitted_at)
     WHERE state = 0 AND auto_close_timeout IS NOT NULL;
+
+-- Index for pending task count
+CREATE INDEX idx_task_groups_pending_tasks
+    ON task_groups(pending_task_count)
+    WHERE state IN (0, 1);  -- OPEN or CLOSED
 ```
 
 #### 2. `worker_managers` Table
@@ -301,6 +307,45 @@ Add foreign key to task_group:
 ALTER TABLE active_tasks
 ADD COLUMN task_group_id BIGINT REFERENCES task_groups(id);
 ```
+
+#### 5. `task_execution_failures` Table
+Track task execution failures per manager for abort logic:
+```sql
+CREATE TABLE task_execution_failures (
+    id BIGSERIAL PRIMARY KEY,
+    task_id BIGINT NOT NULL,
+    task_uuid UUID NOT NULL,
+    task_group_id BIGINT NOT NULL REFERENCES task_groups(id),
+    manager_id BIGINT NOT NULL REFERENCES worker_managers(id),
+
+    -- Failure details
+    failure_count INTEGER NOT NULL DEFAULT 1,
+    last_failure_at TIMESTAMPTZ NOT NULL,
+    error_messages TEXT[],  -- Array of error messages from each failure
+
+    -- Worker that failed
+    worker_local_id INTEGER,
+
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+
+    UNIQUE(task_uuid, manager_id)
+);
+
+-- Index for querying failures by task
+CREATE INDEX idx_task_failures_task_uuid
+    ON task_execution_failures(task_uuid);
+
+-- Index for querying failures by manager
+CREATE INDEX idx_task_failures_manager_id
+    ON task_execution_failures(manager_id);
+```
+
+**Purpose:**
+- Track how many times a task has failed on each manager
+- Prevent infinite retry loops on unsuitable machines
+- Allow coordinator to reassign to different managers
+- Clean up on successful execution
 
 ### API Schema Updates
 
@@ -486,20 +531,75 @@ pub struct RegisterManagerResp {
 
 ### Task Group Lifecycle
 
+**Dynamic State Machine:**
+
 ```
-┌──────────┐
-│  OPEN    │ ← Tasks can be submitted
-└────┬─────┘
-     │ User closes task group
-     ▼
-┌──────────┐
-│ CLOSED   │ ← No new tasks, existing tasks can complete
-└────┬─────┘
-     │ All tasks finished OR timeout OR manual complete
-     ▼
-┌──────────┐
-│ COMPLETE │ ← Manager released, cleanup executed
-└──────────┘
+         ┌──────────────────────────────────────────┐
+         │                                          │
+         │  New task submitted                      │  New task submitted
+         │  (first task)                            │  after completion
+         │                                          │
+         ▼                                          │
+    ┌─────────┐                               ┌──────────┐
+    │  OPEN   │ ◄──────────────────────────── │ COMPLETE │
+    └────┬────┘  New task submitted           └─────▲────┘
+         │       (reopens from CLOSED)              │
+         │                                          │
+         │ Auto-close timeout                       │ All tasks
+         │ (e.g., 3 min of inactivity)              │ finished
+         │                                          │
+         ▼                                          │
+    ┌─────────┐                                     │
+    │ CLOSED  │ ────────────────────────────────────┘
+    └─────────┘  Manager finds no pending tasks
+```
+
+**State Definitions:**
+
+| State | Description | Task Submission | Manager Behavior |
+|-------|-------------|-----------------|------------------|
+| **OPEN** | Active, accepting new tasks | Allowed | Manager stays assigned if leased, fetches tasks |
+| **CLOSED** | Inactive due to timeout | Automatically reopens to OPEN | Manager can switch if no pending tasks |
+| **COMPLETE** | All tasks finished | Automatically reopens to OPEN | Manager releases, performs cleanup |
+
+**State Transitions:**
+
+1. **Creation → OPEN**: When task group is created and first task submitted
+2. **OPEN → CLOSED**: After `auto_close_timeout` (e.g., 3 minutes) with no new task submissions
+3. **CLOSED → OPEN**: When new task is submitted while in CLOSED state
+4. **CLOSED → COMPLETE**: When all tasks are finished (no pending tasks)
+5. **COMPLETE → OPEN**: When new task is submitted while in COMPLETE state
+6. **OPEN → COMPLETE**: Direct transition if tasks finish before timeout
+
+**Key Behaviors:**
+
+- **Auto-close is temporary**: Task groups don't stay CLOSED forever; they reopen on new submissions
+- **Task groups are long-lived**: Same task group can cycle through OPEN → CLOSED → COMPLETE → OPEN multiple times
+- **Manager switching**: Managers only switch away when task group is CLOSED and no pending tasks
+- **No manual close API needed**: State transitions are fully automatic based on activity
+
+**Timeout Tracking:**
+
+```rust
+// On every task submission
+UPDATE task_groups
+SET
+    last_task_submitted_at = NOW(),
+    state = 0  -- Reopen to OPEN if currently CLOSED or COMPLETE
+WHERE id = ?;
+
+// Background coordinator task (runs every 30 seconds)
+UPDATE task_groups
+SET state = 1  -- CLOSED
+WHERE state = 0  -- OPEN
+  AND auto_close_timeout IS NOT NULL
+  AND NOW() - last_task_submitted_at > (auto_close_timeout * INTERVAL '1 second')
+  AND pending_task_count > 0;  -- Only close if tasks still pending
+
+UPDATE task_groups
+SET state = 2  -- COMPLETE
+WHERE state IN (0, 1)  -- OPEN or CLOSED
+  AND pending_task_count = 0;  -- All tasks finished
 ```
 
 ### Manager Execution Flow
@@ -541,23 +641,27 @@ pub struct RegisterManagerResp {
    - Manager proxies to coordinator (`POST /managers/tasks`)
    - Manager tracks which worker is executing which task
 
-6. **Completion Detection (Hybrid)**
-   - **Explicit Close**: User calls `POST /task-groups/{id}/close` → state = CLOSED
-   - **Auto-Close**: Efficient timeout mechanism (see below) → state = CLOSED
-   - **Completion**: When CLOSED + all tasks finished → state = COMPLETE
-
-   **Efficient Timeout Mechanism** (no polling):
-   - On task submission: Update `task_groups.last_task_submitted_at`
-   - Background coordinator task uses indexed query:
+6. **Completion Detection (Dynamic State Transitions)**
+   - **Auto-Close**: Background task detects inactivity
      ```sql
-     SELECT id FROM task_groups
-     WHERE state = 0  -- OPEN
-       AND auto_close_timeout IS NOT NULL
-       AND NOW() - last_task_submitted_at > (auto_close_timeout * INTERVAL '1 second')
-     LIMIT 100;
+     -- Runs every 30 seconds
+     UPDATE task_groups SET state = 1  -- CLOSED
+     WHERE state = 0
+       AND NOW() - last_task_submitted_at > auto_close_timeout * INTERVAL '1 second'
+       AND pending_task_count > 0;
      ```
-   - Runs every minute, marks expired task groups as CLOSED
-   - Alternative: PostgreSQL `pg_cron` or database trigger for even lower overhead
+   - **Auto-Complete**: When all tasks finished
+     ```sql
+     UPDATE task_groups SET state = 2  -- COMPLETE
+     WHERE state IN (0, 1) AND pending_task_count = 0;
+     ```
+   - **Auto-Reopen**: On new task submission
+     ```sql
+     UPDATE task_groups
+     SET state = 0, last_task_submitted_at = NOW()
+     WHERE id = ? AND state IN (1, 2);  -- From CLOSED or COMPLETE
+     ```
+   - **Manager Switch Decision**: If state = CLOSED and no pending tasks → switch to other group
 
 7. **Environment Cleanup**
    - Manager executes `env_cleanup` hook (TaskSpec-like)
@@ -590,6 +694,322 @@ pub struct RegisterManagerResp {
    - Receive shutdown message on control topic
    - Graceful: finish current task, then exit
    - Force: immediate exit
+
+---
+
+## Task Abort and Retry Mechanism
+
+### Problem Statement
+
+Some tasks may consistently fail on specific managers due to:
+- Missing dependencies or incompatible environment
+- Hardware incompatibility (e.g., AVX instructions not supported)
+- Resource constraints (insufficient memory, disk space)
+- Network configuration issues
+
+**Goal:** Prevent infinite retry loops on unsuitable machines while allowing other managers to succeed.
+
+### Abort Logic
+
+#### 1. Worker Death Detection
+
+When a worker dies unexpectedly while executing a task:
+
+```rust
+// Manager detects worker process exit
+if worker.exit_status().is_err() || worker.is_killed_by_signal() {
+    let task_id = worker.current_task_id;
+
+    // Record failure
+    manager.record_task_failure(task_id, worker.local_id).await?;
+
+    // Check failure count
+    let failure_count = manager.get_task_failure_count(task_id).await?;
+
+    if failure_count >= 3 {
+        // Abort: return task to coordinator
+        manager.abort_task(task_id, "Worker died 3 times on this manager").await?;
+    } else {
+        // Retry: respawn worker, task remains in queue
+        manager.respawn_worker(worker.local_id).await?;
+    }
+}
+```
+
+#### 2. Failure Tracking
+
+**Manager-side tracking:**
+```rust
+struct TaskFailureTracker {
+    failures: HashMap<i64, TaskFailureInfo>,  // task_id → failure info
+}
+
+struct TaskFailureInfo {
+    count: u32,
+    last_failure_at: OffsetDateTime,
+    error_messages: Vec<String>,
+    failed_worker_ids: Vec<u32>,
+}
+
+impl Manager {
+    async fn record_task_failure(&mut self, task_id: i64, worker_id: u32) -> Result<()> {
+        let info = self.failure_tracker
+            .failures
+            .entry(task_id)
+            .or_insert_with(|| TaskFailureInfo::default());
+
+        info.count += 1;
+        info.last_failure_at = OffsetDateTime::now_utc();
+        info.failed_worker_ids.push(worker_id);
+
+        // Also persist to database via coordinator
+        self.coordinator_client.report_task_failure(
+            task_id,
+            self.manager_id,
+            info.count,
+            format!("Worker {} died during execution", worker_id),
+        ).await?;
+
+        Ok(())
+    }
+
+    async fn get_task_failure_count(&self, task_id: i64) -> Result<u32> {
+        Ok(self.failure_tracker
+            .failures
+            .get(&task_id)
+            .map(|info| info.count)
+            .unwrap_or(0))
+    }
+
+    async fn abort_task(&mut self, task_id: i64, reason: &str) -> Result<()> {
+        // Return task to coordinator with abort status
+        self.coordinator_client.abort_task(
+            task_id,
+            self.manager_id,
+            reason,
+        ).await?;
+
+        // Remove from local failure tracking
+        self.failure_tracker.failures.remove(&task_id);
+
+        tracing::warn!(
+            task_id = task_id,
+            reason = reason,
+            "Aborted task after repeated failures"
+        );
+
+        Ok(())
+    }
+}
+```
+
+#### 3. Coordinator-side Tracking
+
+**Database operations:**
+```sql
+-- Record failure (called by manager)
+INSERT INTO task_execution_failures (
+    task_id, task_uuid, task_group_id, manager_id,
+    failure_count, last_failure_at, error_messages, worker_local_id
+)
+VALUES ($1, $2, $3, $4, 1, NOW(), ARRAY[$5], $6)
+ON CONFLICT (task_uuid, manager_id)
+DO UPDATE SET
+    failure_count = task_execution_failures.failure_count + 1,
+    last_failure_at = NOW(),
+    error_messages = array_append(task_execution_failures.error_messages, $5),
+    updated_at = NOW();
+
+-- Query failures for task assignment (avoid failed managers)
+SELECT manager_id, failure_count
+FROM task_execution_failures
+WHERE task_uuid = $1
+  AND failure_count >= 3;
+
+-- Clean up on successful execution
+DELETE FROM task_execution_failures
+WHERE task_uuid = $1;
+```
+
+**Task assignment logic:**
+```rust
+impl Coordinator {
+    async fn assign_task_to_manager(
+        &self,
+        task_id: i64,
+        task_uuid: Uuid,
+    ) -> Result<Option<ManagerId>> {
+        // Get list of managers that have failed this task 3+ times
+        let failed_manager_ids = self.db
+            .query_failed_managers(task_uuid)
+            .await?;
+
+        // Find eligible manager (not in failed list)
+        let eligible_managers = self.manager_queue
+            .get_idle_managers()
+            .into_iter()
+            .filter(|m| !failed_manager_ids.contains(&m.id))
+            .collect::<Vec<_>>();
+
+        if eligible_managers.is_empty() {
+            // All managers have failed this task 3+ times
+            tracing::error!(
+                task_uuid = ?task_uuid,
+                "No eligible managers for task - all have failed 3+ times"
+            );
+            return Ok(None);
+        }
+
+        // Assign to highest priority eligible manager
+        let manager = eligible_managers.into_iter()
+            .max_by_key(|m| m.priority)
+            .unwrap();
+
+        Ok(Some(manager.id))
+    }
+}
+```
+
+### Abort and Reassign Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Manager A                                                    │
+│                                                               │
+│  Task 123 → Worker 1 (dies)     failure_count = 1           │
+│  Task 123 → Worker 2 (dies)     failure_count = 2           │
+│  Task 123 → Worker 3 (dies)     failure_count = 3           │
+│                                                               │
+│  ❌ ABORT: Return task 123 to coordinator                    │
+│            Reason: "Worker died 3 times on this manager"     │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            │ POST /managers/tasks/abort
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Coordinator                                                  │
+│                                                               │
+│  1. Mark task 123 as Ready (re-add to queue)                │
+│  2. Record Manager A failed task 123 (3 failures)           │
+│  3. Find eligible managers (exclude Manager A)              │
+│  4. Assign task 123 to Manager B                            │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            │ Task 123 assigned
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Manager B                                                    │
+│                                                               │
+│  Task 123 → Worker 1 (succeeds) ✅                           │
+│                                                               │
+│  Report success to coordinator                               │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            │ POST /managers/tasks (Commit)
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Coordinator                                                  │
+│                                                               │
+│  1. Mark task 123 as Completed                              │
+│  2. Delete all failure records for task 123                 │
+│     (Manager A's failures cleared)                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Failure Scenarios
+
+| Scenario | Behavior |
+|----------|----------|
+| **Task fails 3 times on Manager A** | Manager A aborts, returns to coordinator |
+| **Coordinator reassigns to Manager B** | Coordinator excludes Manager A from assignment |
+| **Task succeeds on Manager B** | Failure records deleted, Manager A can retry in future |
+| **Task fails 3 times on ALL managers** | Task remains in queue, logged as unexecutable |
+| **Manager A restarts** | In-memory failure tracking lost, but DB persists history |
+
+### API Endpoints
+
+#### Abort Task
+```
+POST /managers/tasks/abort
+Authorization: Bearer <manager_jwt>
+
+Request Body:
+{
+  "task_id": 123,
+  "task_uuid": "uuid",
+  "manager_id": "manager_uuid",
+  "failure_count": 3,
+  "reason": "Worker died 3 times during execution",
+  "error_messages": [
+    "Worker 1: Segmentation fault",
+    "Worker 2: Out of memory",
+    "Worker 3: Illegal instruction"
+  ]
+}
+
+Response: 200 OK
+```
+
+#### Report Task Failure
+```
+POST /managers/tasks/failure
+Authorization: Bearer <manager_jwt>
+
+Request Body:
+{
+  "task_id": 123,
+  "task_uuid": "uuid",
+  "manager_id": "manager_uuid",
+  "worker_local_id": 1,
+  "failure_count": 1,
+  "error_message": "Worker died: Segmentation fault"
+}
+
+Response: 200 OK
+```
+
+### Metrics
+
+Add to manager metrics:
+
+```rust
+struct WorkerPoolMetrics {
+    // Existing fields...
+
+    // Task failure tracking
+    tasks_aborted_total: u64,
+    tasks_failed_per_task: HashMap<i64, u32>,  // task_id → failure count
+    worker_deaths_total: u64,
+    worker_deaths_per_task: HashMap<i64, u32>,  // task_id → death count
+}
+```
+
+### Configuration
+
+```rust
+struct ManagerConfig {
+    // Existing fields...
+
+    /// Maximum failures before aborting task
+    max_task_failures: u32,  // Default: 3
+
+    /// Whether to track failure history in database
+    persist_failures: bool,  // Default: true
+}
+```
+
+### Edge Cases
+
+| Case | Handling |
+|------|----------|
+| **Manager crashes during task** | Coordinator reassigns, failure count persists in DB |
+| **Network partition during abort** | Manager retries abort API call, idempotent |
+| **Task deleted before abort** | Abort API returns 404, manager continues |
+| **All managers fail task** | Task remains in queue, admin intervention needed |
+| **Task succeeds after previous failures** | All failure records deleted |
 
 ---
 
@@ -760,7 +1180,55 @@ enum HookError {
 - Workers launched with manager ID in environment
 - Deterministic, no coordination required
 
-### ✅ 13. Task Group Assignment - Sticky Affinity Scheduling
+### ✅ 13. Task Group State Transitions - Dynamic Lifecycle
+**Decision:** Task groups have fully automatic, activity-based state transitions.
+
+**State Machine:**
+- **OPEN**: Active, accepting tasks
+- **CLOSED**: Inactive (auto-closed after timeout), automatically reopens on new task
+- **COMPLETE**: All tasks finished, automatically reopens on new task
+
+**Transitions:**
+- OPEN → CLOSED: After `auto_close_timeout` (e.g., 3 minutes) of no submissions
+- CLOSED → OPEN: Automatically when new task submitted
+- CLOSED → COMPLETE: When all tasks finished
+- COMPLETE → OPEN: Automatically when new task submitted
+
+**Key Benefits:**
+- **Long-lived task groups**: Same task group reused across multiple submission cycles
+- **No manual management**: Users don't need to explicitly close or reopen
+- **Manager efficiency**: Managers switch away only when CLOSED + no pending tasks
+- **Automatic cleanup**: Cleanup runs when COMPLETE, before next cycle
+
+**Rationale:** This makes task groups feel like permanent work queues rather than one-time batches. Users can submit tasks whenever needed without worrying about state management.
+
+### ✅ 14. Task Abort and Failure Tracking
+**Decision:** Implement per-manager failure tracking with abort threshold.
+
+**Mechanism:**
+1. **Worker death detected** → Manager records failure
+2. **3 failures on same manager** → Manager aborts task, returns to coordinator
+3. **Coordinator reassigns** → Excludes managers that already failed this task
+4. **Task succeeds elsewhere** → All failure records deleted
+
+**Database Tracking:**
+- Table: `task_execution_failures`
+- Key: `(task_uuid, manager_id)` unique constraint
+- Tracks failure count, timestamps, error messages per (task, manager) pair
+
+**Benefits:**
+- Prevents infinite retry loops on unsuitable machines
+- Allows other managers to succeed
+- Historical tracking survives manager restarts
+- Automatic cleanup on success
+
+**Configuration:**
+- `max_task_failures`: Default 3
+- Coordinator avoids reassigning to managers with ≥3 failures
+
+**Rationale:** Some tasks may have machine-specific incompatibilities (missing dependencies, hardware requirements). This prevents wasting resources retrying on unsuitable managers while allowing recovery on compatible ones.
+
+### ✅ 15. Task Group Assignment - Sticky Affinity Scheduling
 **Decision:** Implement work-conserving sticky scheduling to minimize context switching.
 
 **Problem:**
@@ -1717,8 +2185,52 @@ Before full implementation, consider prototyping:
 
 ---
 
-**Document Version:** 0.3.0
+**Document Version:** 0.4.0
 **Last Updated:** 2025-11-05
 **Status:** ✅ Design Complete - Ready for Implementation
 **Contributors:** User, Claude
 **Next Review:** During Phase 1 implementation (revise as needed)
+
+---
+
+## Changelog
+
+### v0.4.0 (2025-11-05)
+**Major Changes:**
+- **Dynamic Task Group State Transitions**: Task groups now automatically transition between OPEN/CLOSED/COMPLETE based on activity
+  - Auto-close after timeout (e.g., 3 minutes of no submissions)
+  - Auto-reopen when new task submitted (from CLOSED or COMPLETE)
+  - Auto-complete when all tasks finished
+  - Long-lived task groups can cycle through states multiple times
+- **Task Abort and Failure Tracking**: Comprehensive mechanism to prevent infinite retry loops
+  - Manager tracks task failures (max 3 per task)
+  - After 3 failures, manager aborts and returns task to coordinator
+  - Coordinator maintains failure history per (task, manager) pair
+  - Coordinator excludes managers that failed a task from reassignment
+  - Success on any manager clears all failure records
+- **Database Schema Updates**:
+  - Added `pending_task_count` to `task_groups` table
+  - Added `task_execution_failures` table for failure tracking
+  - Added indexes for efficient state transition queries
+- **API Additions**:
+  - `POST /managers/tasks/abort` - Manager aborts task after repeated failures
+  - `POST /managers/tasks/failure` - Manager reports task failure
+- **Decision Updates**:
+  - Decision #13: Dynamic task group state transitions
+  - Decision #14: Task abort and failure tracking
+  - Renumbered Decision #15: Sticky affinity scheduling (previously #13)
+
+**Impact**: These changes make task groups more flexible and robust, enabling long-lived work queues and preventing resource waste on incompatible machines.
+
+### v0.3.0 (2025-11-05)
+- Initial complete design with 13 decisions
+- Comprehensive metrics, IPC architecture, CPU binding
+- Sticky affinity scheduling with lease mechanism
+
+### v0.2.0 (2025-11-05)
+- Finalized major design decisions
+- Added hook retry strategy, failure handling
+
+### v0.1.0 (2025-11-05)
+- Initial design document
+- Core concepts and architecture

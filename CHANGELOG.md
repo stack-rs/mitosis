@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.6](https://github.com/stack-rs/mitosis/compare/mito-v0.6.5...mito-v0.6.6) - 2025-11-11
+
+### Features
+
+- *(s3)* Make bucket names configurable - ([36e114f](https://github.com/stack-rs/mitosis/commit/36e114f125257efd2662909ef4e56da38003c636))
+
+### Documentation
+
+- *(guide)* Update guidance to include new features - ([c765e80](https://github.com/stack-rs/mitosis/commit/c765e8068eb74a0108ad4570e66a183c453b5c24))
+
+### Dosc
+
+- *(readme)* Add badges - ([2c8ecaf](https://github.com/stack-rs/mitosis/commit/2c8ecaf2edcc25f57cb785820dbf560cc7bcd105))
+
+
 ## [0.6.5](https://github.com/stack-rs/mitosis/compare/mito-v0.6.4...mito-v0.6.5) - 2025-11-02
 
 ### Features

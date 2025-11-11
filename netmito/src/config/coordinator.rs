@@ -43,6 +43,10 @@ pub struct CoordinatorConfig {
     pub(crate) s3_region: String,
     #[serde(default)]
     pub(crate) s3_force_path_style: bool,
+    #[serde(default = "default_artifacts_bucket")]
+    pub(crate) artifacts_bucket: String,
+    #[serde(default = "default_attachments_bucket")]
+    pub(crate) attachments_bucket: String,
     pub(crate) redis_url: Option<String>,
     pub(crate) redis_worker_password: Option<String>,
     pub(crate) redis_client_password: Option<String>,
@@ -62,6 +66,14 @@ pub struct CoordinatorConfig {
 
 fn default_mitosis_region() -> String {
     "mitosis".to_string()
+}
+
+fn default_artifacts_bucket() -> String {
+    "mitosis-artifacts".to_string()
+}
+
+fn default_attachments_bucket() -> String {
+    "mitosis-attachments".to_string()
 }
 
 #[derive(Args, Debug, Serialize, Default)]
@@ -146,6 +158,14 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "<&bool>::not")]
     pub file_log: bool,
+    /// The artifacts bucket name (default: mitosis-artifacts)
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub artifacts_bucket: Option<String>,
+    /// The attachments bucket name (default: mitosis-attachments)
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub attachments_bucket: Option<String>,
 }
 
 impl Default for CoordinatorConfig {
@@ -162,6 +182,8 @@ impl Default for CoordinatorConfig {
             s3_secret_key: "mitosis_secret".to_string(),
             s3_region: default_mitosis_region(),
             s3_force_path_style: false,
+            artifacts_bucket: default_artifacts_bucket(),
+            attachments_bucket: default_attachments_bucket(),
             admin_user: "mitosis_admin".to_string(),
             admin_password: "mitosis_admin".to_string(),
             access_token_private_path: "private.pem".to_string().into(),
@@ -307,6 +329,8 @@ impl CoordinatorConfig {
         Ok(InfraPool {
             db,
             s3,
+            artifacts_bucket: self.artifacts_bucket.clone(),
+            attachments_bucket: self.attachments_bucket.clone(),
             worker_task_queue_tx,
             worker_heartbeat_queue_tx,
         })
@@ -412,6 +436,8 @@ impl CoordinatorConfig {
 pub struct InfraPool {
     pub db: DatabaseConnection,
     pub s3: S3Client,
+    pub artifacts_bucket: String,
+    pub attachments_bucket: String,
     #[cfg(not(feature = "crossfire-channel"))]
     pub worker_task_queue_tx: UnboundedSender<TaskDispatcherOp>,
     #[cfg(feature = "crossfire-channel")]

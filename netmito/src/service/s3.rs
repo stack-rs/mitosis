@@ -43,8 +43,6 @@ use crate::{
 };
 
 pub(crate) const UPLOAD_VALID_SECS: u64 = 3600;
-pub const ARTIFACTS_BUCKET: &str = "mitosis-artifacts";
-pub const ATTACHMENTS_BUCKET: &str = "mitosis-attachments";
 
 pub async fn setup_buckets(client: &Client, bucket_names: Vec<String>) -> Result<(), S3Error> {
     match client.list_buckets().send().await {
@@ -193,9 +191,14 @@ async fn generate_artifact_downloads(
 
     for artifact in artifacts {
         let key = format!("{}/{}", artifact.task_id, content_type);
-        let url =
-            get_presigned_download_link(&pool.s3, ARTIFACTS_BUCKET, key, artifact.size, 86400)
-                .await?;
+        let url = get_presigned_download_link(
+            &pool.s3,
+            &pool.artifacts_bucket,
+            key,
+            artifact.size,
+            86400,
+        )
+        .await?;
         downloads.push(ArtifactDownloadItem {
             uuid: artifact.task_id,
             url,
@@ -221,7 +224,8 @@ pub async fn download_artifact_by_uuid(
         )))?;
     let key = format!("{uuid}/{content_type}");
     let url =
-        get_presigned_download_link(&pool.s3, ARTIFACTS_BUCKET, key, artifact.size, 3600).await?;
+        get_presigned_download_link(&pool.s3, &pool.artifacts_bucket, key, artifact.size, 3600)
+            .await?;
     Ok(RemoteResourceDownloadResp {
         url,
         size: artifact.size,
@@ -330,10 +334,11 @@ async fn delete_artifact(
     }
     let s3_key = format!("{uuid}/{content_type}");
     let s3_client = pool.s3.clone();
+    let artifacts_bucket = pool.artifacts_bucket.clone();
     pool.db
         .transaction::<_, (), crate::error::Error>(|txn| {
             Box::pin(async move {
-                delete_object(&s3_client, "mitosis-artifacts", s3_key)
+                delete_object(&s3_client, &artifacts_bucket, s3_key)
                     .await
                     .inspect_err(|e| tracing::debug!("delete object error: {}", e))?;
                 let group = Group::Entity::find_by_id(group_id).one(txn).await?.ok_or(
@@ -412,6 +417,7 @@ pub(crate) async fn group_upload_artifact(
         return Err(ApiError::InvalidRequest("Group is not active".to_string()).into());
     }
     let s3_client = pool.s3.clone();
+    let artifacts_bucket = pool.artifacts_bucket.clone();
     let url = pool
         .db
         .transaction::<_, String, Error>(|txn| {
@@ -453,7 +459,7 @@ pub(crate) async fn group_upload_artifact(
                         }
                         url = get_presigned_upload_link(
                             &s3_client,
-                            "mitosis-artifacts",
+                            &artifacts_bucket,
                             s3_object_key,
                             content_length,
                         )
@@ -481,7 +487,7 @@ pub(crate) async fn group_upload_artifact(
                         }
                         url = get_presigned_upload_link(
                             &s3_client,
-                            "mitosis-artifacts",
+                            &artifacts_bucket,
                             s3_object_key,
                             content_length,
                         )
@@ -602,9 +608,14 @@ pub async fn worker_download_attachment(
             "Attachment of group {group_name} and key {key}"
         )))?;
     let s3_key = format!("{group_name}/{key}");
-    let url =
-        get_presigned_download_link(&pool.s3, ATTACHMENTS_BUCKET, s3_key, attachment.size, 3600)
-            .await?;
+    let url = get_presigned_download_link(
+        &pool.s3,
+        &pool.attachments_bucket,
+        s3_key,
+        attachment.size,
+        3600,
+    )
+    .await?;
     Ok(RemoteResourceDownloadResp {
         url,
         size: attachment.size,
@@ -713,7 +724,7 @@ async fn generate_attachment_downloads(
         let s3_key = format!("{}/{}", group_name, attachment.key);
         let url = get_presigned_download_link(
             &pool.s3,
-            ATTACHMENTS_BUCKET,
+            &pool.attachments_bucket,
             s3_key,
             attachment.size,
             86400,
@@ -739,9 +750,14 @@ pub async fn user_get_attachment(
         get_attachment_from_db(pool, user_id, group_name.clone(), key.clone(), false, false)
             .await?;
     let s3_key = format!("{group_name}/{key}");
-    let url =
-        get_presigned_download_link(&pool.s3, ATTACHMENTS_BUCKET, s3_key, attachment.size, 3600)
-            .await?;
+    let url = get_presigned_download_link(
+        &pool.s3,
+        &pool.attachments_bucket,
+        s3_key,
+        attachment.size,
+        3600,
+    )
+    .await?;
     Ok(RemoteResourceDownloadResp {
         url,
         size: attachment.size,
@@ -755,12 +771,13 @@ async fn delete_attachment(
     key: String,
 ) -> Result<(), crate::error::Error> {
     let s3_client = pool.s3.clone();
+    let attachments_bucket = pool.attachments_bucket.clone();
     pool.db
         .transaction::<_, (), crate::error::Error>(|txn| {
             Box::pin(async move {
                 delete_object(
                     &s3_client,
-                    "mitosis-attachments",
+                    &attachments_bucket,
                     format!("{group_name}/{key}"),
                 )
                 .await
@@ -847,6 +864,7 @@ pub async fn user_upload_attachment(
     let content_length = content_length as i64;
     let s3_client = pool.s3.clone();
     let now = TimeDateTimeWithTimeZone::now_utc();
+    let attachments_bucket = pool.attachments_bucket.clone();
     let uri = pool
         .db
         .transaction::<_, String, crate::error::Error>(|txn| {
@@ -884,7 +902,7 @@ pub async fn user_upload_attachment(
                         }
                         url = get_presigned_upload_link(
                             &s3_client,
-                            "mitosis-attachments",
+                            &attachments_bucket,
                             s3_object_key,
                             content_length,
                         )
@@ -912,7 +930,7 @@ pub async fn user_upload_attachment(
                         }
                         url = get_presigned_upload_link(
                             &s3_client,
-                            "mitosis-attachments",
+                            &attachments_bucket,
                             s3_object_key,
                             content_length,
                         )

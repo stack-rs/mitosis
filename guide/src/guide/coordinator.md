@@ -64,6 +64,12 @@ db_url = "postgres://mitosis:mitosis@localhost/mitosis"
 s3_url = "http://127.0.0.1:9000"
 s3_access_key = "mitosis_access"
 s3_secret_key = "mitosis_secret"
+# Optional S3 settings
+# s3_region = "mitosis"           # default region
+# s3_force_path_style = false      # default path style
+# Bucket names for storing artifacts and attachments
+# artifacts_bucket is not set by default. Default to "mitosis-artifacts"
+# attachments_bucket is not set by default. Default to "mitosis-attachments"
 # redis_url is not set. It should be in format like "redis://:mitosis@localhost"
 # redis_worker_password is not set by default and will be generated randomly
 # redis_client_password is not set by default and will be generated randomly
@@ -115,6 +121,10 @@ Options:
           The S3 access key
       --s3-secret-key <S3_SECRET_KEY>
           The S3 secret key
+      --artifacts-bucket <ARTIFACTS_BUCKET>
+          The S3 bucket name for artifacts (default: mitosis-artifacts)
+      --attachments-bucket <ATTACHMENTS_BUCKET>
+          The S3 bucket name for attachments (default: mitosis-attachments)
       --redis <REDIS_URL>
           The Redis URL
       --redis-worker-password <REDIS_WORKER_PASSWORD>
@@ -142,3 +152,10 @@ Options:
   -V, --version
           Print version
 ```
+
+Environment variables
+
+- All options can be set via environment variables with `MITO_` prefix and `coordinator` profile.
+- Examples for bucket names:
+  - `MITO_COORDINATOR_ARTIFACTS_BUCKET=my-artifacts`
+  - `MITO_COORDINATOR_ATTACHMENTS_BUCKET=my-attachments`

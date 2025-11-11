@@ -7,6 +7,9 @@ s3_access_key = "mitosis_access"
 s3_secret_key = "mitosis_secret"
 # s3_region is not set. Defeault to "mitosis"
 # s3_force_path_style is not set. Default to false
+# Bucket names for storing artifacts and attachments
+# artifacts_bucket is not set by default. Default to "mitosis-artifacts"
+# attachments_bucket is not set by default. Default to "mitosis-attachments"
 # redis_url is not set. It should be in format like "redis://:mitosis@localhost"
 # redis_worker_password is not set by default and will be generated randomly
 # redis_client_password is not set by default and will be generated randomly

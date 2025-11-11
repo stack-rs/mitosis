@@ -8,7 +8,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use crate::api::router;
 use crate::config::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 use crate::migration::{Migrator, MigratorTrait};
-use crate::service::s3::{setup_buckets, ARTIFACTS_BUCKET, ATTACHMENTS_BUCKET};
+use crate::service::s3::setup_buckets;
 use crate::service::worker::{restore_workers, HeartbeatQueue, TaskDispatcher};
 use crate::signal::shutdown_signal;
 
@@ -116,10 +116,10 @@ impl MitoCoordinator {
         // List all buckets and create if not exist
         setup_buckets(
             &infra_pool.s3,
-            [ATTACHMENTS_BUCKET, ARTIFACTS_BUCKET]
-                .into_iter()
-                .map(String::from)
-                .collect(),
+            vec![
+                infra_pool.attachments_bucket.clone(),
+                infra_pool.artifacts_bucket.clone(),
+            ],
         )
         .await?;
 

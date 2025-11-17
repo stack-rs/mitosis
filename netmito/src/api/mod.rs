@@ -31,11 +31,24 @@ use crate::{
     error::ApiError,
     schema::RedisConnectionInfo,
     service::auth::{user_auth_middleware, user_auth_with_name_middleware, AuthUser},
+    websocket::{websocket_handler, ConnectionRegistry},
 };
 
-pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
+pub fn router(
+    st: InfraPool,
+    ws_registry: ConnectionRegistry,
+    cancel_token: CancellationToken,
+) -> Router {
     #[cfg(not(feature = "debugging"))]
     {
+        use std::sync::Arc;
+
+        // Create WebSocket state
+        let ws_state = Arc::new(crate::websocket::handler::WebSocketState {
+            infra_pool: st.clone(),
+            ws_registry: ws_registry.clone(),
+        });
+
         Router::new()
             .route(
                 "/auth",
@@ -63,9 +76,22 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
             .nest("/tasks", tasks::tasks_router(st.clone()))
             .with_state(st)
             .layer(CorsLayer::permissive())
+            .merge(
+                Router::new()
+                    .route("/ws/managers", get(websocket_handler))
+                    .with_state(ws_state)
+            )
     }
     #[cfg(feature = "debugging")]
     {
+        use std::sync::Arc;
+
+        // Create WebSocket state
+        let ws_state = Arc::new(crate::websocket::handler::WebSocketState {
+            infra_pool: st.clone(),
+            ws_registry: ws_registry.clone(),
+        });
+
         Router::new()
             .route(
                 "/auth",
@@ -95,6 +121,11 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
             .layer(CorsLayer::permissive())
             .layer(middleware::from_fn(print_request_addr))
             .layer(middleware::from_fn(print_request_response))
+            .merge(
+                Router::new()
+                    .route("/ws/managers", get(websocket_handler))
+                    .with_state(ws_state)
+            )
     }
 }
 

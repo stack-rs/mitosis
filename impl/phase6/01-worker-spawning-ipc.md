@@ -52,6 +52,69 @@ Phase 6 is the **most complex phase** of the Task Suite feature implementation. 
 | **Week 1** | IPC Setup & Worker Spawning | - iceoryx2 services operational<br>- Worker spawning with CPU binding<br>- Basic monitoring |
 | **Week 2** | Failure Handling & Pre-fetching | - Auto-recovery logic<br>- Failure tracking<br>- Task buffer management<br>- Full integration tests |
 
+## Piece-by-Piece Breakdown
+
+Each piece is independently testable and delivers incremental value:
+
+**Piece 6.1: Setup iceoryx2 IPC services**
+- Define service message types
+- Create IPC service manager
+- Deliverable: IPC services initialize
+
+**Piece 6.2: Spawn single worker subprocess**
+- Launch worker with --managed flag
+- Pass manager UUID and local ID
+- Monitor process
+- Deliverable: Can spawn and track one worker
+
+**Piece 6.3: Apply CPU core binding**
+- Set CPU affinity for worker process
+- Test all strategies (RoundRobin, Exclusive, Shared)
+- Deliverable: Workers bind to correct cores
+
+**Piece 6.4: Spawn N workers based on WorkerSchedulePlan**
+- Spawn multiple workers
+- Track all processes
+- Deliverable: Can spawn worker pool
+
+**Piece 6.5: IPC FetchTask handler**
+- Receive FetchTask from worker via IPC
+- Forward to coordinator via WebSocket
+- Return response to worker
+- Deliverable: Workers can fetch tasks via IPC
+
+**Piece 6.6: IPC ReportTask handler**
+- Receive ReportTask from worker
+- Forward to coordinator
+- Return ack to worker
+- Deliverable: Workers can report via IPC
+
+**Piece 6.7: Worker health monitoring**
+- Poll worker process status (1s interval)
+- Detect exits
+- Log exit reasons
+- Deliverable: Detects when workers crash
+
+**Piece 6.8: Auto-respawn crashed workers**
+- Respawn worker on crash
+- Reuse same local_id
+- Deliverable: Workers auto-restart
+
+**Piece 6.9: Task failure tracking**
+- Record failures in database
+- Track count per task
+- Deliverable: Failures recorded correctly
+
+**Piece 6.10: Abort task after 3 failures**
+- Check failure count on crash
+- Abort and notify coordinator
+- Deliverable: 3-strike abort works
+
+**Piece 6.11: Task prefetch buffer**
+- Maintain local task queue
+- Async background refill
+- Deliverable: Prefetching reduces latency
+
 ## Design References
 
 ### WorkerSchedulePlan Definition

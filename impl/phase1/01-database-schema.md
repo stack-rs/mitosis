@@ -2,34 +2,44 @@
 
 ## Overview
 
-This is the foundation phase for the Node Manager and Task Suite System. In this phase, we establish the database schema for all new tables, relationships, triggers, and SeaORM entity models. This phase has no dependencies and must be completed before API development can begin.
+This is the foundation phase for the Node Manager and Task Suite System. In this phase, we establish the database schema for all new tables, relationships, and SeaORM entity models. We also implement coordinator-based state management logic to replace traditional database triggers.
+
+**Implementation Philosophy:**
+
+This phase is broken down into **small, self-contained pieces** where each piece is:
+- Independently runnable and testable
+- Self-complete (can compile and run on its own)
+- Doesn't need to fully implement the whole phase
+- Can be reviewed and modified individually
+- When all pieces complete, the phase is fully implemented
 
 **Key Deliverables:**
 - 5 new database tables with proper indexes
 - 1 ALTER statement to extend `active_tasks`
-- 2 database triggers for automatic state management
 - 5 new SeaORM entity models
-- 3 new enum types
+- 4 new enum types
+- Coordinator code for suite task count updates (replaces database triggers)
+- Coordinator background job for suite state transitions
 
-**Philosophy:** The database schema is the single source of truth. Get this right, and the rest of the system will follow naturally.
+**No Database Triggers:** We use coordinator processing code instead of database triggers for better control, testability, and debugging.
 
 ## Prerequisites
 
 - PostgreSQL database (version 12+)
 - SeaORM migration tools installed
-- Understanding of PostgreSQL triggers and indexes
 - Familiarity with SeaORM entity model generation
+- Access to coordinator codebase for implementing processing logic
 
 ## Timeline
 
-**Duration:** 1 week
+**Duration:** 1-2 weeks
 
 **Breakdown:**
-- Days 1-2: Create migration files and SQL schema
-- Day 3: Implement database triggers
-- Days 4-5: Create SeaORM entity models and enums
-- Day 6: Testing and validation
-- Day 7: Buffer for issues and documentation
+- Pieces 1.1-1.6: Database tables and migrations (3-5 days)
+- Piece 1.7: State enums (1 day)
+- Piece 1.8: Task count update logic (1-2 days)
+- Piece 1.9: State transition background job (1-2 days)
+- Testing and validation (2-3 days)
 
 ## Design References
 
@@ -48,21 +58,24 @@ The system introduces five new tables:
 
 Add `task_suite_id` foreign key to link tasks to suites.
 
-### Section 6.3: Database Triggers
+### Section 6.3: State Management
 
-Two critical triggers:
-1. **update_suite_task_counts()** - Automatically maintains `total_tasks` and `pending_tasks` counters
-2. **auto_transition_suite_states()** - Background task to transition suite states (Open/Closed/Complete)
+Instead of database triggers, we implement state management in the coordinator:
+1. **Task count updates** - Increment/decrement suite counters on task submission/completion
+2. **State transitions** - Background job to transition suite states (Open/Closed/Complete)
 
-## Implementation Tasks
+---
 
-### Task 1.1: Create Migration Files
+## Implementation Pieces
 
-Create a new SeaORM migration file for all schema changes. This should be a single migration to ensure atomic deployment.
+### Piece 1.1: Create task_suites Table Migration
 
-**File to create:** `migration/src/mXXXX_create_task_suite_system.rs`
+**Goal:** Create migration file with just the CREATE TABLE statement for task_suites.
 
-**Migration structure:**
+**File to create:** `migration/src/mXXXX_create_task_suites.rs`
+
+**Migration code:**
+
 ```rust
 use sea_orm_migration::prelude::*;
 
@@ -72,375 +85,233 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // 1. Create task_suites table
-        // 2. Create node_managers table
-        // 3. Create group_node_manager table
-        // 4. Create task_suite_managers table
-        // 5. Create task_execution_failures table
-        // 6. Alter active_tasks table
-        // 7. Create triggers
+        manager
+            .create_table(
+                Table::create()
+                    .table(TaskSuites::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(TaskSuites::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(TaskSuites::Uuid)
+                            .uuid()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(ColumnDef::new(TaskSuites::Name).text())
+                    .col(ColumnDef::new(TaskSuites::Description).text())
+                    .col(ColumnDef::new(TaskSuites::GroupId).big_integer().not_null())
+                    .col(ColumnDef::new(TaskSuites::CreatorId).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(TaskSuites::Tags)
+                            .array(ColumnType::Text)
+                            .not_null()
+                            .default(Expr::val("{}"))
+                    )
+                    .col(
+                        ColumnDef::new(TaskSuites::Labels)
+                            .json_binary()
+                            .not_null()
+                            .default(Expr::val("[]"))
+                    )
+                    .col(
+                        ColumnDef::new(TaskSuites::Priority)
+                            .integer()
+                            .not_null()
+                            .default(0)
+                    )
+                    .col(ColumnDef::new(TaskSuites::WorkerSchedule).json_binary().not_null())
+                    .col(ColumnDef::new(TaskSuites::EnvPreparation).json_binary())
+                    .col(ColumnDef::new(TaskSuites::EnvCleanup).json_binary())
+                    .col(
+                        ColumnDef::new(TaskSuites::State)
+                            .integer()
+                            .not_null()
+                            .default(0)
+                    )
+                    .col(ColumnDef::new(TaskSuites::LastTaskSubmittedAt).timestamp_with_time_zone())
+                    .col(
+                        ColumnDef::new(TaskSuites::TotalTasks)
+                            .integer()
+                            .not_null()
+                            .default(0)
+                    )
+                    .col(
+                        ColumnDef::new(TaskSuites::PendingTasks)
+                            .integer()
+                            .not_null()
+                            .default(0)
+                    )
+                    .col(
+                        ColumnDef::new(TaskSuites::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp())
+                    )
+                    .col(
+                        ColumnDef::new(TaskSuites::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp())
+                    )
+                    .col(ColumnDef::new(TaskSuites::CompletedAt).timestamp_with_time_zone())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_task_suites_group")
+                            .from(TaskSuites::Table, TaskSuites::GroupId)
+                            .to(Groups::Table, Groups::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_task_suites_creator")
+                            .from(TaskSuites::Table, TaskSuites::CreatorId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // Create indexes
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_task_suites_group_id")
+                    .table(TaskSuites::Table)
+                    .col(TaskSuites::GroupId)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_task_suites_creator_id")
+                    .table(TaskSuites::Table)
+                    .col(TaskSuites::CreatorId)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_task_suites_state")
+                    .table(TaskSuites::Table)
+                    .col(TaskSuites::State)
+                    .to_owned(),
+            )
+            .await?;
+
+        // GIN indexes for array/JSONB columns (use raw SQL)
+        manager
+            .get_connection()
+            .execute_unprepared("CREATE INDEX idx_task_suites_tags ON task_suites USING GIN(tags)")
+            .await?;
+
+        manager
+            .get_connection()
+            .execute_unprepared("CREATE INDEX idx_task_suites_labels ON task_suites USING GIN(labels)")
+            .await?;
+
+        // Partial index for auto-close timeout queries
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "CREATE INDEX idx_task_suites_auto_close ON task_suites(last_task_submitted_at) WHERE state = 0"
+            )
+            .await?;
+
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // Reverse all changes
-        Ok(())
+        manager
+            .drop_table(Table::drop().table(TaskSuites::Table).to_owned())
+            .await
     }
+}
+
+#[derive(Iden)]
+enum TaskSuites {
+    Table,
+    Id,
+    Uuid,
+    Name,
+    Description,
+    GroupId,
+    CreatorId,
+    Tags,
+    Labels,
+    Priority,
+    WorkerSchedule,
+    EnvPreparation,
+    EnvCleanup,
+    State,
+    LastTaskSubmittedAt,
+    TotalTasks,
+    PendingTasks,
+    CreatedAt,
+    UpdatedAt,
+    CompletedAt,
+}
+
+#[derive(Iden)]
+enum Groups {
+    Table,
+    Id,
+}
+
+#[derive(Iden)]
+enum Users {
+    Table,
+    Id,
 }
 ```
 
-### Task 1.2: Implement task_suites Table
+**Deliverable Criteria:**
+- ✅ Migration file compiles
+- ✅ `sea-orm-cli migrate up` runs successfully
+- ✅ Table exists in database: `\d+ task_suites`
+- ✅ All indexes created (6 indexes total)
+- ✅ Foreign keys enforce constraints
 
-**Purpose:** Store task suite definitions, state, and lifecycle metadata.
+**Testing Instructions:**
 
-**Full CREATE TABLE statement:**
+```bash
+# Run migration
+sea-orm-cli migrate up
 
-```sql
-CREATE TABLE task_suites (
-    id BIGSERIAL PRIMARY KEY,
-    uuid UUID UNIQUE NOT NULL,
+# Verify table exists
+psql -d your_db -c "\d+ task_suites"
 
-    -- Optional human-readable identifiers (non-unique)
-    name TEXT,
-    description TEXT,
+# Verify indexes
+psql -d your_db -c "\di task_suites*"
 
-    -- Permissions
-    group_id BIGINT NOT NULL REFERENCES groups(id) ON DELETE RESTRICT,
-    creator_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+# Test foreign key constraints
+psql -d your_db -c "INSERT INTO task_suites (uuid, group_id, creator_id, worker_schedule) VALUES (gen_random_uuid(), 99999, 1, '{}');"
+# Should fail with foreign key violation
 
-    -- Scheduling attributes
-    tags TEXT[] NOT NULL DEFAULT '{}',
-    labels JSONB NOT NULL DEFAULT '[]',  -- array of strings for querying
-    priority INTEGER NOT NULL DEFAULT 0,
-
-    -- Worker allocation plan (JSON)
-    worker_schedule JSONB NOT NULL,
-    -- Example: {"worker_count": 16, "cpu_binding": {"cores": [0,1,2,3], "strategy": "RoundRobin"}, "task_prefetch_count": 32}
-
-    -- Lifecycle hooks (TaskSpec-like, JSON)
-    env_preparation JSONB,
-    -- Example: {"args": ["./setup.sh"], "envs": {"DATA_DIR": "/mnt/data"}, "resources": [...], "timeout": "5m"}
-    env_cleanup JSONB,
-    -- Example: {"args": ["./cleanup.sh"], "envs": {}, "resources": [], "timeout": "2m"}
-
-    -- State management
-    state INTEGER NOT NULL DEFAULT 0,  -- Open=0, Closed=1, Complete=2, Cancelled=3
-    last_task_submitted_at TIMESTAMPTZ,
-    total_tasks INTEGER NOT NULL DEFAULT 0,  -- Total tasks ever submitted to this suite
-    pending_tasks INTEGER NOT NULL DEFAULT 0,  -- Currently pending/active tasks
-
-    -- Timestamps
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    completed_at TIMESTAMPTZ
-);
+# Test rollback
+sea-orm-cli migrate down
+sea-orm-cli migrate up
 ```
 
-**Indexes:**
+---
 
-```sql
--- Indices for efficient queries
-CREATE INDEX idx_task_suites_group_id ON task_suites(group_id);
-CREATE INDEX idx_task_suites_creator_id ON task_suites(creator_id);
-CREATE INDEX idx_task_suites_state ON task_suites(state);
-CREATE INDEX idx_task_suites_tags ON task_suites USING GIN(tags);
-CREATE INDEX idx_task_suites_labels ON task_suites USING GIN(labels);
+### Piece 1.2: Create TaskSuite SeaORM Entity
 
--- Index for auto-close timeout queries (fixed 3-minute timeout)
-CREATE INDEX idx_task_suites_auto_close
-    ON task_suites(last_task_submitted_at)
-    WHERE state = 0;
+**Goal:** Generate or write entity model for task_suites with all field mappings.
 
--- Index for label-based queries
--- Supports queries like: labels @> '["ml-training"]'::jsonb
-```
+**File to create:** `entity/src/task_suites.rs`
 
-**Key Design Notes:**
-- `uuid` is the external identifier (exposed in API)
-- `id` is the internal primary key (used in foreign keys)
-- `tags` is a PostgreSQL array (TEXT[]) for manager matching
-- `labels` is JSONB for flexible querying
-- `worker_schedule`, `env_preparation`, and `env_cleanup` are JSONB for flexibility
-- `state` is an integer enum (0=Open, 1=Closed, 2=Complete, 3=Cancelled)
-- `total_tasks` and `pending_tasks` are maintained by triggers (see Task 1.7)
-
-### Task 1.3: Implement node_managers Table
-
-**Purpose:** Store node manager registrations, state, and current assignments.
-
-**Full CREATE TABLE statement:**
-
-```sql
-CREATE TABLE node_managers (
-    id BIGSERIAL PRIMARY KEY,
-    uuid UUID UNIQUE NOT NULL,
-    creator_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-
-    -- Capabilities
-    tags TEXT[] NOT NULL DEFAULT '{}',
-    labels JSONB NOT NULL DEFAULT '[]',  -- array of strings for querying
-
-    -- State
-    state INTEGER NOT NULL DEFAULT 0,  -- Idle=0, Preparing=1, Executing=2, Cleanup=3, Offline=4
-    last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    -- Current assignment
-    assigned_task_suite_id BIGINT REFERENCES task_suites(id) ON DELETE SET NULL,
-    lease_expires_at TIMESTAMPTZ,
-
-    -- Metadata
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-```
-
-**Indexes:**
-
-```sql
--- Indices
-CREATE INDEX idx_node_managers_creator_id ON node_managers(creator_id);
-CREATE INDEX idx_node_managers_state ON node_managers(state);
-CREATE INDEX idx_node_managers_tags ON node_managers USING GIN(tags);
-CREATE INDEX idx_node_managers_labels ON node_managers USING GIN(labels);
-CREATE INDEX idx_node_managers_assigned_suite ON node_managers(assigned_task_suite_id)
-    WHERE assigned_task_suite_id IS NOT NULL;
-CREATE INDEX idx_node_managers_heartbeat ON node_managers(last_heartbeat);
-```
-
-**Key Design Notes:**
-- `state` tracks the manager's current lifecycle state
-- `assigned_task_suite_id` is nullable (NULL when idle)
-- `lease_expires_at` provides timeout mechanism for suite assignments
-- `last_heartbeat` is used for offline detection
-- GIN indexes on `tags` and `labels` support efficient tag matching
-
-### Task 1.4: Implement Join Tables
-
-#### 1.4.1: group_node_manager Table
-
-**Purpose:** Permission model - groups have roles ON managers (same pattern as group_worker).
-
-**Full CREATE TABLE statement:**
-
-```sql
-CREATE TABLE group_node_manager (
-    id BIGSERIAL PRIMARY KEY,
-    group_id BIGINT NOT NULL REFERENCES groups(id) ON DELETE RESTRICT,
-    manager_id BIGINT NOT NULL REFERENCES node_managers(id) ON DELETE CASCADE,
-    role INTEGER NOT NULL,  -- 0=Read, 1=Write, 2=Admin (same as GroupWorkerRole)
-
-    UNIQUE(group_id, manager_id)
-);
-
-CREATE INDEX idx_group_node_manager_group ON group_node_manager(group_id);
-CREATE INDEX idx_group_node_manager_manager ON group_node_manager(manager_id);
-```
-
-**Role Definitions:**
-- **Read (0)**: Reserved for future use (view manager status)
-- **Write (1)**: Group can submit task suites to manager (required for execution)
-- **Admin (2)**: Group can manage manager ACL and settings
-
-#### 1.4.2: task_suite_managers Table
-
-**Purpose:** Track which managers are assigned to which suites (user-specified or auto-matched).
-
-**Full CREATE TABLE statement:**
-
-```sql
-CREATE TABLE task_suite_managers (
-    id BIGSERIAL PRIMARY KEY,
-    task_suite_id BIGINT NOT NULL REFERENCES task_suites(id) ON DELETE CASCADE,
-    manager_id BIGINT NOT NULL REFERENCES node_managers(id) ON DELETE CASCADE,
-
-    -- Selection method
-    selection_type INTEGER NOT NULL,  -- 0=UserSpecified, 1=TagMatched
-
-    -- For tag-matched, record which tags matched
-    matched_tags TEXT[],
-
-    -- Audit
-    added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    added_by_user_id BIGINT REFERENCES users(id),
-
-    UNIQUE(task_suite_id, manager_id)
-);
-
-CREATE INDEX idx_task_suite_managers_suite ON task_suite_managers(task_suite_id);
-CREATE INDEX idx_task_suite_managers_manager ON task_suite_managers(manager_id);
-CREATE INDEX idx_task_suite_managers_selection_type ON task_suite_managers(selection_type);
-```
-
-**Key Design Notes:**
-- `selection_type` distinguishes between user-specified (0) and tag-matched (1) assignments
-- `matched_tags` records which tags were used for auto-matching (NULL for user-specified)
-- `added_by_user_id` tracks audit trail
-- UNIQUE constraint prevents duplicate assignments
-
-### Task 1.5: Implement task_execution_failures Table
-
-**Purpose:** Track task failures per manager to prevent infinite retry loops.
-
-**Full CREATE TABLE statement:**
-
-```sql
-CREATE TABLE task_execution_failures (
-    id BIGSERIAL PRIMARY KEY,
-    task_id BIGINT NOT NULL,
-    task_uuid UUID NOT NULL,
-    task_suite_id BIGINT REFERENCES task_suites(id) ON DELETE CASCADE,
-    manager_id BIGINT NOT NULL REFERENCES node_managers(id) ON DELETE CASCADE,
-
-    -- Failure tracking
-    failure_count INTEGER NOT NULL DEFAULT 1,
-    last_failure_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    error_messages TEXT[],  -- History of error messages
-    worker_local_id INTEGER,  -- Which worker failed
-
-    -- Metadata
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    UNIQUE(task_uuid, manager_id)
-);
-
-CREATE INDEX idx_task_failures_task_uuid ON task_execution_failures(task_uuid);
-CREATE INDEX idx_task_failures_manager ON task_execution_failures(manager_id);
-CREATE INDEX idx_task_failures_suite ON task_execution_failures(task_suite_id);
-```
-
-**Key Design Notes:**
-- Tracks failures per (task, manager) pair
-- `failure_count` increments on each failure
-- `error_messages` is an array to preserve failure history
-- `worker_local_id` identifies which worker within the manager failed
-- UNIQUE constraint on (task_uuid, manager_id) ensures one row per combination
-
-### Task 1.6: Alter active_tasks Table
-
-**Purpose:** Link tasks to suites for managed task execution.
-
-**Full ALTER TABLE statement:**
-
-```sql
-ALTER TABLE active_tasks
-ADD COLUMN task_suite_id BIGINT REFERENCES task_suites(id) ON DELETE SET NULL;
-
-CREATE INDEX idx_active_tasks_suite ON active_tasks(task_suite_id)
-    WHERE task_suite_id IS NOT NULL;
-```
-
-**Behavior:**
-- If `task_suite_id` is NULL: Independent task (current behavior, unchanged)
-- If `task_suite_id` is set: Managed task (part of suite)
-- ON DELETE SET NULL: If suite is deleted, task becomes independent
-- Partial index only on non-NULL values for efficiency
-
-### Task 1.7: Create Database Triggers
-
-#### 1.7.1: Auto-Update Suite Task Counts
-
-**Purpose:** Automatically maintain `total_tasks` and `pending_tasks` counters on `task_suites` table.
-
-**Complete trigger implementation:**
-
-```sql
-CREATE OR REPLACE FUNCTION update_suite_task_counts()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF TG_OP = 'INSERT' AND NEW.task_suite_id IS NOT NULL THEN
-        -- New task added to suite
-        UPDATE task_suites
-        SET total_tasks = total_tasks + 1,
-            pending_tasks = pending_tasks + 1,
-            last_task_submitted_at = NOW(),
-            updated_at = NOW()
-        WHERE id = NEW.task_suite_id;
-
-    ELSIF TG_OP = 'UPDATE' AND NEW.task_suite_id IS NOT NULL THEN
-        IF OLD.state != NEW.state AND NEW.state IN (3, 4) THEN
-            -- Task finished (Finished=3) or cancelled (Cancelled=4)
-            UPDATE task_suites
-            SET pending_tasks = GREATEST(pending_tasks - 1, 0),
-                updated_at = NOW()
-            WHERE id = NEW.task_suite_id;
-        END IF;
-
-    ELSIF TG_OP = 'DELETE' AND OLD.task_suite_id IS NOT NULL THEN
-        -- Task deleted (rare)
-        UPDATE task_suites
-        SET pending_tasks = GREATEST(pending_tasks - 1, 0),
-            updated_at = NOW()
-        WHERE id = OLD.task_suite_id;
-    END IF;
-
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER task_suite_count_trigger
-AFTER INSERT OR UPDATE OR DELETE ON active_tasks
-FOR EACH ROW
-EXECUTE FUNCTION update_suite_task_counts();
-```
-
-**Trigger Behavior:**
-- **INSERT**: Increments both `total_tasks` and `pending_tasks`, updates `last_task_submitted_at`
-- **UPDATE**: When task state changes to Finished(3) or Cancelled(4), decrements `pending_tasks`
-- **DELETE**: Decrements `pending_tasks` (rare case)
-- Uses `GREATEST(pending_tasks - 1, 0)` to prevent negative counts
-
-**Critical Note:** This trigger is AFTER trigger, so it fires after the row is inserted/updated/deleted in `active_tasks`.
-
-#### 1.7.2: Auto-Transition Suite States
-
-**Purpose:** Background function to transition suite states based on inactivity timeout and task completion.
-
-**Complete function implementation:**
-
-```sql
-CREATE OR REPLACE FUNCTION auto_transition_suite_states()
-RETURNS void AS $$
-BEGIN
-    -- Transition OPEN → CLOSED (3-minute inactivity timeout)
-    UPDATE task_suites
-    SET state = 1,  -- Closed
-        updated_at = NOW()
-    WHERE state = 0  -- Open
-      AND last_task_submitted_at IS NOT NULL
-      AND EXTRACT(EPOCH FROM (NOW() - last_task_submitted_at)) > 180  -- Fixed 3-minute timeout
-      AND pending_tasks > 0;
-
-    -- Transition OPEN/CLOSED → COMPLETE (all tasks finished)
-    UPDATE task_suites
-    SET state = 2,  -- Complete
-        updated_at = NOW(),
-        completed_at = NOW()
-    WHERE state IN (0, 1)  -- Open or Closed
-      AND pending_tasks = 0;
-END;
-$$ LANGUAGE plpgsql;
-```
-
-**Function Behavior:**
-- **OPEN → CLOSED**: After 3 minutes (180 seconds) of no new task submissions, if pending tasks remain
-- **OPEN/CLOSED → COMPLETE**: When all pending tasks are finished (`pending_tasks = 0`)
-
-**Scheduling:** This function should be called by:
-- Option 1: pg_cron extension (if available): `SELECT cron.schedule('suite-state-transitions', '*/30 * * * * *', 'SELECT auto_transition_suite_states()');`
-- Option 2: Coordinator background task (every 30 seconds)
-
-**Note:** This is a stored procedure, not a trigger. It must be invoked by an external scheduler.
-
-### Task 1.8: Create SeaORM Entity Models
-
-Create SeaORM entity models for all new tables. These should be generated using SeaORM's entity generator and then manually refined.
-
-#### 1.8.1: task_suites.rs Entity
-
-**File:** `entity/src/task_suites.rs`
-
-**Basic structure:**
+**Entity code:**
 
 ```rust
 use sea_orm::entity::prelude::*;
@@ -505,14 +376,264 @@ pub enum Relation {
     TaskExecutionFailures,
 }
 
+impl Related<super::groups::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Group.def()
+    }
+}
+
+impl Related<super::users::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Creator.def()
+    }
+}
+
 impl ActiveModelBehavior for ActiveModel {}
 ```
 
-#### 1.8.2: node_managers.rs Entity
+**Update `entity/src/lib.rs`:**
 
-**File:** `entity/src/node_managers.rs`
+```rust
+// Add to mod declarations
+pub mod task_suites;
+```
 
-**Basic structure:**
+**Deliverable Criteria:**
+- ✅ Entity file compiles
+- ✅ Can import and use entity in code
+- ✅ Basic CRUD operations work
+
+**Testing Instructions:**
+
+```rust
+// Test in integration test or coordinator code
+use entity::task_suites;
+use sea_orm::*;
+
+#[tokio::test]
+async fn test_task_suite_crud() {
+    let db = /* your db connection */;
+
+    // Create
+    let suite = task_suites::ActiveModel {
+        uuid: Set(Uuid::new_v4()),
+        group_id: Set(1),
+        creator_id: Set(1),
+        worker_schedule: Set(json!({"worker_count": 16})),
+        tags: Set(vec!["test".to_string()]),
+        labels: Set(json!(["label1"])),
+        ..Default::default()
+    };
+
+    let inserted = suite.insert(&db).await.unwrap();
+    assert!(inserted.id > 0);
+
+    // Read
+    let found = task_suites::Entity::find_by_id(inserted.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.uuid, inserted.uuid);
+
+    // Update
+    let mut active: task_suites::ActiveModel = found.into();
+    active.state = Set(1);
+    let updated = active.update(&db).await.unwrap();
+    assert_eq!(updated.state, 1);
+
+    // Delete
+    task_suites::Entity::delete_by_id(inserted.id)
+        .exec(&db)
+        .await
+        .unwrap();
+}
+```
+
+---
+
+### Piece 1.3: Create node_managers Table and Entity
+
+**Goal:** Create migration for node_managers table and corresponding SeaORM entity.
+
+**Migration file:** `migration/src/mXXXX_create_node_managers.rs`
+
+**Migration code:**
+
+```rust
+use sea_orm_migration::prelude::*;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(NodeManagers::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(NodeManagers::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(NodeManagers::Uuid)
+                            .uuid()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(ColumnDef::new(NodeManagers::CreatorId).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(NodeManagers::Tags)
+                            .array(ColumnType::Text)
+                            .not_null()
+                            .default(Expr::val("{}"))
+                    )
+                    .col(
+                        ColumnDef::new(NodeManagers::Labels)
+                            .json_binary()
+                            .not_null()
+                            .default(Expr::val("[]"))
+                    )
+                    .col(
+                        ColumnDef::new(NodeManagers::State)
+                            .integer()
+                            .not_null()
+                            .default(0)
+                    )
+                    .col(
+                        ColumnDef::new(NodeManagers::LastHeartbeat)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp())
+                    )
+                    .col(ColumnDef::new(NodeManagers::AssignedTaskSuiteId).big_integer())
+                    .col(ColumnDef::new(NodeManagers::LeaseExpiresAt).timestamp_with_time_zone())
+                    .col(
+                        ColumnDef::new(NodeManagers::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp())
+                    )
+                    .col(
+                        ColumnDef::new(NodeManagers::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp())
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_node_managers_creator")
+                            .from(NodeManagers::Table, NodeManagers::CreatorId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_node_managers_assigned_suite")
+                            .from(NodeManagers::Table, NodeManagers::AssignedTaskSuiteId)
+                            .to(TaskSuites::Table, TaskSuites::Id)
+                            .on_delete(ForeignKeyAction::SetNull)
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // Create indexes
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_node_managers_creator_id")
+                    .table(NodeManagers::Table)
+                    .col(NodeManagers::CreatorId)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_node_managers_state")
+                    .table(NodeManagers::Table)
+                    .col(NodeManagers::State)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_node_managers_heartbeat")
+                    .table(NodeManagers::Table)
+                    .col(NodeManagers::LastHeartbeat)
+                    .to_owned(),
+            )
+            .await?;
+
+        // GIN indexes for tags and labels
+        manager
+            .get_connection()
+            .execute_unprepared("CREATE INDEX idx_node_managers_tags ON node_managers USING GIN(tags)")
+            .await?;
+
+        manager
+            .get_connection()
+            .execute_unprepared("CREATE INDEX idx_node_managers_labels ON node_managers USING GIN(labels)")
+            .await?;
+
+        // Partial index for assigned managers
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "CREATE INDEX idx_node_managers_assigned_suite ON node_managers(assigned_task_suite_id) WHERE assigned_task_suite_id IS NOT NULL"
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(NodeManagers::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(Iden)]
+enum NodeManagers {
+    Table,
+    Id,
+    Uuid,
+    CreatorId,
+    Tags,
+    Labels,
+    State,
+    LastHeartbeat,
+    AssignedTaskSuiteId,
+    LeaseExpiresAt,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(Iden)]
+enum Users {
+    Table,
+    Id,
+}
+
+#[derive(Iden)]
+enum TaskSuites {
+    Table,
+    Id,
+}
+```
+
+**Entity file:** `entity/src/node_managers.rs`
 
 ```rust
 use sea_orm::entity::prelude::*;
@@ -568,14 +689,279 @@ pub enum Relation {
     TaskExecutionFailures,
 }
 
+impl Related<super::users::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Creator.def()
+    }
+}
+
+impl Related<super::task_suites::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::AssignedTaskSuite.def()
+    }
+}
+
 impl ActiveModelBehavior for ActiveModel {}
 ```
 
-#### 1.8.3: group_node_manager.rs Entity
+**Deliverable Criteria:**
+- ✅ Migration compiles and runs
+- ✅ Table created with all columns and indexes
+- ✅ Entity compiles and basic CRUD works
+- ✅ Can create/query managers in database
 
-**File:** `entity/src/group_node_manager.rs`
+**Testing Instructions:**
 
-**Basic structure:**
+```bash
+# Run migration
+sea-orm-cli migrate up
+
+# Verify table
+psql -d your_db -c "\d+ node_managers"
+
+# Test CRUD
+cargo test test_node_manager_crud
+```
+
+---
+
+### Piece 1.4: Create Join Tables (group_node_manager, task_suite_managers)
+
+**Goal:** Create migrations and entities for both join tables with proper relations.
+
+**Migration file:** `migration/src/mXXXX_create_join_tables.rs`
+
+**Migration code:**
+
+```rust
+use sea_orm_migration::prelude::*;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Create group_node_manager table
+        manager
+            .create_table(
+                Table::create()
+                    .table(GroupNodeManager::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(GroupNodeManager::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(GroupNodeManager::GroupId).big_integer().not_null())
+                    .col(ColumnDef::new(GroupNodeManager::ManagerId).big_integer().not_null())
+                    .col(ColumnDef::new(GroupNodeManager::Role).integer().not_null())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_group_node_manager_group")
+                            .from(GroupNodeManager::Table, GroupNodeManager::GroupId)
+                            .to(Groups::Table, Groups::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_group_node_manager_manager")
+                            .from(GroupNodeManager::Table, GroupNodeManager::ManagerId)
+                            .to(NodeManagers::Table, NodeManagers::Id)
+                            .on_delete(ForeignKeyAction::Cascade)
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // Unique constraint on (group_id, manager_id)
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_group_node_manager_unique")
+                    .table(GroupNodeManager::Table)
+                    .col(GroupNodeManager::GroupId)
+                    .col(GroupNodeManager::ManagerId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_group_node_manager_group")
+                    .table(GroupNodeManager::Table)
+                    .col(GroupNodeManager::GroupId)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_group_node_manager_manager")
+                    .table(GroupNodeManager::Table)
+                    .col(GroupNodeManager::ManagerId)
+                    .to_owned(),
+            )
+            .await?;
+
+        // Create task_suite_managers table
+        manager
+            .create_table(
+                Table::create()
+                    .table(TaskSuiteManagers::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(TaskSuiteManagers::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(TaskSuiteManagers::TaskSuiteId).big_integer().not_null())
+                    .col(ColumnDef::new(TaskSuiteManagers::ManagerId).big_integer().not_null())
+                    .col(ColumnDef::new(TaskSuiteManagers::SelectionType).integer().not_null())
+                    .col(ColumnDef::new(TaskSuiteManagers::MatchedTags).array(ColumnType::Text))
+                    .col(
+                        ColumnDef::new(TaskSuiteManagers::AddedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp())
+                    )
+                    .col(ColumnDef::new(TaskSuiteManagers::AddedByUserId).big_integer())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_task_suite_managers_suite")
+                            .from(TaskSuiteManagers::Table, TaskSuiteManagers::TaskSuiteId)
+                            .to(TaskSuites::Table, TaskSuites::Id)
+                            .on_delete(ForeignKeyAction::Cascade)
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_task_suite_managers_manager")
+                            .from(TaskSuiteManagers::Table, TaskSuiteManagers::ManagerId)
+                            .to(NodeManagers::Table, NodeManagers::Id)
+                            .on_delete(ForeignKeyAction::Cascade)
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_task_suite_managers_user")
+                            .from(TaskSuiteManagers::Table, TaskSuiteManagers::AddedByUserId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::SetNull)
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // Unique constraint on (task_suite_id, manager_id)
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_task_suite_managers_unique")
+                    .table(TaskSuiteManagers::Table)
+                    .col(TaskSuiteManagers::TaskSuiteId)
+                    .col(TaskSuiteManagers::ManagerId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_task_suite_managers_suite")
+                    .table(TaskSuiteManagers::Table)
+                    .col(TaskSuiteManagers::TaskSuiteId)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_task_suite_managers_manager")
+                    .table(TaskSuiteManagers::Table)
+                    .col(TaskSuiteManagers::ManagerId)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_task_suite_managers_selection_type")
+                    .table(TaskSuiteManagers::Table)
+                    .col(TaskSuiteManagers::SelectionType)
+                    .to_owned(),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(TaskSuiteManagers::Table).to_owned())
+            .await?;
+
+        manager
+            .drop_table(Table::drop().table(GroupNodeManager::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(Iden)]
+enum GroupNodeManager {
+    Table,
+    Id,
+    GroupId,
+    ManagerId,
+    Role,
+}
+
+#[derive(Iden)]
+enum TaskSuiteManagers {
+    Table,
+    Id,
+    TaskSuiteId,
+    ManagerId,
+    SelectionType,
+    MatchedTags,
+    AddedAt,
+    AddedByUserId,
+}
+
+#[derive(Iden)]
+enum Groups {
+    Table,
+    Id,
+}
+
+#[derive(Iden)]
+enum NodeManagers {
+    Table,
+    Id,
+}
+
+#[derive(Iden)]
+enum TaskSuites {
+    Table,
+    Id,
+}
+
+#[derive(Iden)]
+enum Users {
+    Table,
+    Id,
+}
+```
+
+**Entity 1:** `entity/src/group_node_manager.rs`
 
 ```rust
 use sea_orm::entity::prelude::*;
@@ -609,14 +995,22 @@ pub enum Relation {
     Manager,
 }
 
+impl Related<super::groups::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Group.def()
+    }
+}
+
+impl Related<super::node_managers::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Manager.def()
+    }
+}
+
 impl ActiveModelBehavior for ActiveModel {}
 ```
 
-#### 1.8.4: task_suite_managers.rs Entity
-
-**File:** `entity/src/task_suite_managers.rs`
-
-**Basic structure:**
+**Entity 2:** `entity/src/task_suite_managers.rs`
 
 ```rust
 use sea_orm::entity::prelude::*;
@@ -662,14 +1056,212 @@ pub enum Relation {
     AddedByUser,
 }
 
+impl Related<super::task_suites::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::TaskSuite.def()
+    }
+}
+
+impl Related<super::node_managers::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Manager.def()
+    }
+}
+
+impl Related<super::users::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::AddedByUser.def()
+    }
+}
+
 impl ActiveModelBehavior for ActiveModel {}
 ```
 
-#### 1.8.5: task_execution_failures.rs Entity
+**Deliverable Criteria:**
+- ✅ Both tables created with proper foreign keys
+- ✅ Unique constraints enforced
+- ✅ Can create associations between groups/managers and suites/managers
+- ✅ CASCADE and RESTRICT behaviors work correctly
 
-**File:** `entity/src/task_execution_failures.rs`
+**Testing Instructions:**
 
-**Basic structure:**
+```bash
+# Run migration
+sea-orm-cli migrate up
+
+# Verify tables
+psql -d your_db -c "\d+ group_node_manager"
+psql -d your_db -c "\d+ task_suite_managers"
+
+# Test unique constraint
+# Should fail on duplicate (group_id, manager_id)
+```
+
+---
+
+### Piece 1.5: Create task_execution_failures Table and Entity
+
+**Goal:** Create migration and entity for tracking task failures per manager.
+
+**Migration file:** `migration/src/mXXXX_create_task_execution_failures.rs`
+
+**Migration code:**
+
+```rust
+use sea_orm_migration::prelude::*;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(TaskExecutionFailures::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(TaskExecutionFailures::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(TaskExecutionFailures::TaskId).big_integer().not_null())
+                    .col(ColumnDef::new(TaskExecutionFailures::TaskUuid).uuid().not_null())
+                    .col(ColumnDef::new(TaskExecutionFailures::TaskSuiteId).big_integer())
+                    .col(ColumnDef::new(TaskExecutionFailures::ManagerId).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(TaskExecutionFailures::FailureCount)
+                            .integer()
+                            .not_null()
+                            .default(1)
+                    )
+                    .col(
+                        ColumnDef::new(TaskExecutionFailures::LastFailureAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp())
+                    )
+                    .col(
+                        ColumnDef::new(TaskExecutionFailures::ErrorMessages)
+                            .array(ColumnType::Text)
+                    )
+                    .col(ColumnDef::new(TaskExecutionFailures::WorkerLocalId).integer())
+                    .col(
+                        ColumnDef::new(TaskExecutionFailures::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp())
+                    )
+                    .col(
+                        ColumnDef::new(TaskExecutionFailures::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp())
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_task_failures_suite")
+                            .from(TaskExecutionFailures::Table, TaskExecutionFailures::TaskSuiteId)
+                            .to(TaskSuites::Table, TaskSuites::Id)
+                            .on_delete(ForeignKeyAction::Cascade)
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_task_failures_manager")
+                            .from(TaskExecutionFailures::Table, TaskExecutionFailures::ManagerId)
+                            .to(NodeManagers::Table, NodeManagers::Id)
+                            .on_delete(ForeignKeyAction::Cascade)
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // Unique constraint on (task_uuid, manager_id)
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_task_failures_unique")
+                    .table(TaskExecutionFailures::Table)
+                    .col(TaskExecutionFailures::TaskUuid)
+                    .col(TaskExecutionFailures::ManagerId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_task_failures_task_uuid")
+                    .table(TaskExecutionFailures::Table)
+                    .col(TaskExecutionFailures::TaskUuid)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_task_failures_manager")
+                    .table(TaskExecutionFailures::Table)
+                    .col(TaskExecutionFailures::ManagerId)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_task_failures_suite")
+                    .table(TaskExecutionFailures::Table)
+                    .col(TaskExecutionFailures::TaskSuiteId)
+                    .to_owned(),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(TaskExecutionFailures::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(Iden)]
+enum TaskExecutionFailures {
+    Table,
+    Id,
+    TaskId,
+    TaskUuid,
+    TaskSuiteId,
+    ManagerId,
+    FailureCount,
+    LastFailureAt,
+    ErrorMessages,
+    WorkerLocalId,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(Iden)]
+enum TaskSuites {
+    Table,
+    Id,
+}
+
+#[derive(Iden)]
+enum NodeManagers {
+    Table,
+    Id,
+}
+```
+
+**Entity file:** `entity/src/task_execution_failures.rs`
 
 ```rust
 use sea_orm::entity::prelude::*;
@@ -688,7 +1280,7 @@ pub struct Model {
 
     pub failure_count: i32,
     pub last_failure_at: DateTimeWithTimeZone,
-    pub error_messages: Vec<String>,
+    pub error_messages: Option<Vec<String>>,
     pub worker_local_id: Option<i32>,
 
     pub created_at: DateTimeWithTimeZone,
@@ -712,15 +1304,147 @@ pub enum Relation {
     Manager,
 }
 
+impl Related<super::task_suites::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::TaskSuite.def()
+    }
+}
+
+impl Related<super::node_managers::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Manager.def()
+    }
+}
+
 impl ActiveModelBehavior for ActiveModel {}
 ```
 
-#### 1.8.6: Update active_tasks.rs Entity
+**Deliverable Criteria:**
+- ✅ Table created with unique constraint on (task_uuid, manager_id)
+- ✅ Entity compiles and can record failures
+- ✅ Can increment failure_count on repeated failures
+- ✅ Error messages array persists history
 
-Add the new `task_suite_id` field to the existing `active_tasks` entity:
+**Testing Instructions:**
+
+```bash
+# Run migration
+sea-orm-cli migrate up
+
+# Verify table
+psql -d your_db -c "\d+ task_execution_failures"
+
+# Test failure tracking
+cargo test test_failure_tracking
+```
+
+---
+
+### Piece 1.6: Add task_suite_id to active_tasks
+
+**Goal:** Add task_suite_id foreign key to active_tasks table and update entity.
+
+**Migration file:** `migration/src/mXXXX_alter_active_tasks.rs`
+
+**Migration code:**
 
 ```rust
-// In entity/src/active_tasks.rs
+use sea_orm_migration::prelude::*;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Add task_suite_id column
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ActiveTasks::Table)
+                    .add_column(ColumnDef::new(ActiveTasks::TaskSuiteId).big_integer())
+                    .to_owned(),
+            )
+            .await?;
+
+        // Add foreign key
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ActiveTasks::Table)
+                    .add_foreign_key(
+                        TableForeignKey::new()
+                            .name("fk_active_tasks_suite")
+                            .from_tbl(ActiveTasks::Table)
+                            .from_col(ActiveTasks::TaskSuiteId)
+                            .to_tbl(TaskSuites::Table)
+                            .to_col(TaskSuites::Id)
+                            .on_delete(ForeignKeyAction::SetNull)
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // Create partial index on task_suite_id (only non-NULL values)
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "CREATE INDEX idx_active_tasks_suite ON active_tasks(task_suite_id) WHERE task_suite_id IS NOT NULL"
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Drop index first
+        manager
+            .drop_index(
+                Index::drop()
+                    .name("idx_active_tasks_suite")
+                    .table(ActiveTasks::Table)
+                    .to_owned(),
+            )
+            .await?;
+
+        // Drop foreign key
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ActiveTasks::Table)
+                    .drop_foreign_key(Alias::new("fk_active_tasks_suite"))
+                    .to_owned(),
+            )
+            .await?;
+
+        // Drop column
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ActiveTasks::Table)
+                    .drop_column(ActiveTasks::TaskSuiteId)
+                    .to_owned(),
+            )
+            .await
+    }
+}
+
+#[derive(Iden)]
+enum ActiveTasks {
+    Table,
+    TaskSuiteId,
+}
+
+#[derive(Iden)]
+enum TaskSuites {
+    Table,
+    Id,
+}
+```
+
+**Update entity:** `entity/src/active_tasks.rs`
+
+```rust
 // Add to Model struct:
 pub task_suite_id: Option<i64>,
 
@@ -731,15 +1455,42 @@ pub task_suite_id: Option<i64>,
     to = "super::task_suites::Column::Id"
 )]
 TaskSuite,
+
+// Add Related implementation:
+impl Related<super::task_suites::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::TaskSuite.def()
+    }
+}
 ```
 
-### Task 1.9: Add Enums
+**Deliverable Criteria:**
+- ✅ Column added to active_tasks table
+- ✅ Foreign key constraint works
+- ✅ Partial index created
+- ✅ Can link tasks to suites
+- ✅ ON DELETE SET NULL behavior works (task becomes independent if suite deleted)
 
-Create enum types for state management and selection types.
+**Testing Instructions:**
 
-#### 1.9.1: TaskSuiteState Enum
+```bash
+# Run migration
+sea-orm-cli migrate up
 
-**File:** `common/src/task_suite_state.rs` (or appropriate location)
+# Verify column exists
+psql -d your_db -c "\d+ active_tasks"
+
+# Test linking task to suite
+# Test suite deletion (task_suite_id should become NULL)
+```
+
+---
+
+### Piece 1.7: Add State Enums (TaskSuiteState, NodeManagerState)
+
+**Goal:** Create enum types in code with to/from i32 conversions for database storage.
+
+**File 1:** `common/src/task_suite_state.rs`
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -768,6 +1519,14 @@ impl TaskSuiteState {
     pub fn to_i32(self) -> i32 {
         self as i32
     }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Complete | Self::Cancelled)
+    }
+
+    pub fn can_accept_tasks(self) -> bool {
+        matches!(self, Self::Open | Self::Closed)
+    }
 }
 
 impl fmt::Display for TaskSuiteState {
@@ -780,29 +1539,29 @@ impl fmt::Display for TaskSuiteState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_enum_conversion() {
+        assert_eq!(TaskSuiteState::Open.to_i32(), 0);
+        assert_eq!(TaskSuiteState::from_i32(0), Some(TaskSuiteState::Open));
+        assert_eq!(TaskSuiteState::from_i32(99), None);
+    }
+
+    #[test]
+    fn test_state_predicates() {
+        assert!(TaskSuiteState::Complete.is_terminal());
+        assert!(!TaskSuiteState::Open.is_terminal());
+        assert!(TaskSuiteState::Open.can_accept_tasks());
+        assert!(!TaskSuiteState::Complete.can_accept_tasks());
+    }
+}
 ```
 
-**State Transitions:**
-```
-Create Suite → Open (on first task submission)
-
-Open → Closed (3-minute inactivity timeout, no new tasks)
-Open → Complete (all tasks finished)
-Open → Cancelled (user cancellation)
-
-Closed → Open (new task submitted)
-Closed → Complete (all pending tasks finished)
-Closed → Cancelled (user cancellation)
-
-Complete → Open (new task submitted, suite reopens)
-Complete → Cancelled (user cancellation)
-
-Cancelled → (terminal state)
-```
-
-#### 1.9.2: NodeManagerState Enum
-
-**File:** `common/src/node_manager_state.rs`
+**File 2:** `common/src/node_manager_state.rs`
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -833,6 +1592,14 @@ impl NodeManagerState {
     pub fn to_i32(self) -> i32 {
         self as i32
     }
+
+    pub fn is_available(self) -> bool {
+        matches!(self, Self::Idle)
+    }
+
+    pub fn is_busy(self) -> bool {
+        matches!(self, Self::Preparing | Self::Executing | Self::Cleanup)
+    }
 }
 
 impl fmt::Display for NodeManagerState {
@@ -846,11 +1613,28 @@ impl fmt::Display for NodeManagerState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_enum_conversion() {
+        assert_eq!(NodeManagerState::Idle.to_i32(), 0);
+        assert_eq!(NodeManagerState::from_i32(0), Some(NodeManagerState::Idle));
+        assert_eq!(NodeManagerState::from_i32(99), None);
+    }
+
+    #[test]
+    fn test_state_predicates() {
+        assert!(NodeManagerState::Idle.is_available());
+        assert!(NodeManagerState::Executing.is_busy());
+        assert!(!NodeManagerState::Offline.is_available());
+    }
+}
 ```
 
-#### 1.9.3: SelectionType Enum
-
-**File:** `common/src/selection_type.rs`
+**File 3:** `common/src/selection_type.rs`
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -887,9 +1671,7 @@ impl fmt::Display for SelectionType {
 }
 ```
 
-#### 1.9.4: GroupNodeManagerRole Enum
-
-**File:** `common/src/group_node_manager_role.rs`
+**File 4:** `common/src/group_node_manager_role.rs`
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -916,6 +1698,14 @@ impl GroupNodeManagerRole {
     pub fn to_i32(self) -> i32 {
         self as i32
     }
+
+    pub fn has_write_access(self) -> bool {
+        matches!(self, Self::Write | Self::Admin)
+    }
+
+    pub fn has_admin_access(self) -> bool {
+        matches!(self, Self::Admin)
+    }
 }
 
 impl fmt::Display for GroupNodeManagerRole {
@@ -929,152 +1719,506 @@ impl fmt::Display for GroupNodeManagerRole {
 }
 ```
 
-## Testing Checklist
+**Update `common/src/lib.rs`:**
 
-### Database Schema Tests
+```rust
+pub mod task_suite_state;
+pub mod node_manager_state;
+pub mod selection_type;
+pub mod group_node_manager_role;
+```
 
-- [ ] Migration runs successfully without errors
-- [ ] Migration can be rolled back (down migration works)
-- [ ] All tables created with correct schema
-  - [ ] `task_suites` table exists with all columns
-  - [ ] `node_managers` table exists with all columns
-  - [ ] `group_node_manager` table exists with all columns
-  - [ ] `task_suite_managers` table exists with all columns
-  - [ ] `task_execution_failures` table exists with all columns
-  - [ ] `active_tasks` table updated with `task_suite_id` column
+**Deliverable Criteria:**
+- ✅ All 4 enums compile
+- ✅ Conversion functions (from_i32/to_i32) work correctly
+- ✅ Display trait formats correctly
+- ✅ Can be used with SeaORM entities
+- ✅ All tests pass
 
-### Index Tests
+**Testing Instructions:**
 
-- [ ] All indexes created successfully
-- [ ] GIN indexes on tags and labels work correctly
-- [ ] Partial indexes created with WHERE clauses
-- [ ] Query performance validated (EXPLAIN ANALYZE)
+```bash
+# Run tests
+cargo test -p common
 
-### Constraint Tests
+# Test in integration context
+# Create suite with state=Open (0)
+# Verify can convert between enum and i32
+```
 
-- [ ] UNIQUE constraints enforced
-  - [ ] `task_suites.uuid` is unique
-  - [ ] `node_managers.uuid` is unique
-  - [ ] `group_node_manager(group_id, manager_id)` is unique
-  - [ ] `task_suite_managers(task_suite_id, manager_id)` is unique
-  - [ ] `task_execution_failures(task_uuid, manager_id)` is unique
+---
 
-- [ ] Foreign key constraints enforced
-  - [ ] Cannot insert task_suite with invalid group_id
-  - [ ] Cannot insert node_manager with invalid creator_id
-  - [ ] Cannot insert group_node_manager with invalid group_id or manager_id
-  - [ ] ON DELETE CASCADE works for join tables
-  - [ ] ON DELETE SET NULL works for `active_tasks.task_suite_id`
-  - [ ] ON DELETE RESTRICT prevents deletion of referenced rows
+### Piece 1.8: Implement Coordinator Code to Update Suite Task Counts
 
-- [ ] Default values set correctly
-  - [ ] `task_suites.state` defaults to 0 (Open)
-  - [ ] `task_suites.total_tasks` defaults to 0
-  - [ ] `task_suites.pending_tasks` defaults to 0
-  - [ ] `node_managers.state` defaults to 0 (Idle)
-  - [ ] Timestamp fields use NOW() default
+**Goal:** Write Rust code in coordinator to increment/decrement suite task counters on task submission/completion. This replaces database triggers.
 
-### Trigger Tests
+**File:** `coordinator/src/suite_task_counter.rs`
 
-- [ ] `update_suite_task_counts()` trigger works correctly
-  - [ ] INSERT task with suite_id increments total_tasks and pending_tasks
-  - [ ] INSERT task with suite_id updates last_task_submitted_at
-  - [ ] UPDATE task state to Finished(3) decrements pending_tasks
-  - [ ] UPDATE task state to Cancelled(4) decrements pending_tasks
-  - [ ] DELETE task with suite_id decrements pending_tasks
-  - [ ] Counters never go negative (GREATEST check)
+```rust
+use entity::{active_tasks, task_suites};
+use sea_orm::*;
 
-- [ ] `auto_transition_suite_states()` function works correctly
-  - [ ] Open suite transitions to Closed after 3 minutes of inactivity
-  - [ ] Open suite transitions to Complete when pending_tasks = 0
-  - [ ] Closed suite transitions to Complete when pending_tasks = 0
-  - [ ] Function can be called manually: `SELECT auto_transition_suite_states();`
+/// Increments total_tasks and pending_tasks when a task is submitted to a suite
+pub async fn on_task_submitted(
+    db: &DatabaseConnection,
+    task_suite_id: i64,
+) -> Result<(), DbErr> {
+    // Update counters atomically
+    task_suites::Entity::update_many()
+        .col_expr(
+            task_suites::Column::TotalTasks,
+            Expr::col(task_suites::Column::TotalTasks).add(1),
+        )
+        .col_expr(
+            task_suites::Column::PendingTasks,
+            Expr::col(task_suites::Column::PendingTasks).add(1),
+        )
+        .col_expr(
+            task_suites::Column::LastTaskSubmittedAt,
+            Expr::value(chrono::Utc::now()),
+        )
+        .col_expr(
+            task_suites::Column::UpdatedAt,
+            Expr::value(chrono::Utc::now()),
+        )
+        .filter(task_suites::Column::Id.eq(task_suite_id))
+        .exec(db)
+        .await?;
 
-### SeaORM Entity Tests
+    Ok(())
+}
 
-- [ ] All entity models compile without errors
-- [ ] Entity relationships defined correctly
-  - [ ] task_suites belongs_to groups
-  - [ ] task_suites belongs_to users (creator)
-  - [ ] task_suites has_many active_tasks
-  - [ ] node_managers belongs_to users (creator)
-  - [ ] node_managers belongs_to task_suites (assigned)
-  - [ ] Join table relations work correctly
+/// Decrements pending_tasks when a task completes or is cancelled
+pub async fn on_task_completed(
+    db: &DatabaseConnection,
+    task_suite_id: i64,
+) -> Result<(), DbErr> {
+    // Decrement pending_tasks (use GREATEST to prevent negative values)
+    let result = db
+        .execute_unprepared(&format!(
+            "UPDATE task_suites
+             SET pending_tasks = GREATEST(pending_tasks - 1, 0),
+                 updated_at = NOW()
+             WHERE id = {}",
+            task_suite_id
+        ))
+        .await?;
 
-- [ ] CRUD operations work
-  - [ ] Can insert new task_suite
-  - [ ] Can query task_suite by uuid
-  - [ ] Can update task_suite state
-  - [ ] Can delete task_suite (cascades to join tables)
+    if result.rows_affected() == 0 {
+        tracing::warn!(
+            task_suite_id = task_suite_id,
+            "Attempted to decrement pending_tasks for non-existent suite"
+        );
+    }
 
-- [ ] JSON/JSONB fields serialize/deserialize correctly
-  - [ ] `worker_schedule` JSONB field
-  - [ ] `env_preparation` JSONB field
-  - [ ] `env_cleanup` JSONB field
-  - [ ] `labels` JSONB field
+    Ok(())
+}
 
-### Enum Tests
+/// Decrements pending_tasks when a task is deleted (rare case)
+pub async fn on_task_deleted(
+    db: &DatabaseConnection,
+    task_suite_id: i64,
+) -> Result<(), DbErr> {
+    // Same as completion
+    on_task_completed(db, task_suite_id).await
+}
 
-- [ ] All enums compile and work correctly
-  - [ ] TaskSuiteState enum (Open=0, Closed=1, Complete=2, Cancelled=3)
-  - [ ] NodeManagerState enum (Idle=0, Preparing=1, Executing=2, Cleanup=3, Offline=4)
-  - [ ] SelectionType enum (UserSpecified=0, TagMatched=1)
-  - [ ] GroupNodeManagerRole enum (Read=0, Write=1, Admin=2)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::*;
 
-- [ ] Enum conversion functions work
-  - [ ] `from_i32()` handles all valid values
-  - [ ] `from_i32()` returns None for invalid values
-  - [ ] `to_i32()` returns correct integer value
-  - [ ] `Display` trait formats correctly
+    #[tokio::test]
+    async fn test_task_counter_updates() {
+        let db = /* your test db connection */;
 
-### Integration Tests
+        // Create a test suite
+        let suite = task_suites::ActiveModel {
+            uuid: Set(uuid::Uuid::new_v4()),
+            group_id: Set(1),
+            creator_id: Set(1),
+            worker_schedule: Set(serde_json::json!({"worker_count": 4})),
+            ..Default::default()
+        };
+        let suite = suite.insert(&db).await.unwrap();
 
-- [ ] End-to-end scenario: Create suite → Submit task → Task finishes
-  - [ ] Suite counters update correctly
-  - [ ] Suite state transitions correctly
-  - [ ] Task-suite relationship maintained
+        // Verify initial state
+        assert_eq!(suite.total_tasks, 0);
+        assert_eq!(suite.pending_tasks, 0);
 
-- [ ] Tag matching queries work
-  - [ ] Find managers with tags ⊇ suite.tags
-  - [ ] GIN index used (check EXPLAIN)
+        // Submit a task
+        on_task_submitted(&db, suite.id).await.unwrap();
 
-- [ ] Permission checks
-  - [ ] group_node_manager role enforcement
-  - [ ] Foreign key cascades work correctly
+        // Verify counts incremented
+        let suite = task_suites::Entity::find_by_id(suite.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(suite.total_tasks, 1);
+        assert_eq!(suite.pending_tasks, 1);
+
+        // Complete a task
+        on_task_completed(&db, suite.id).await.unwrap();
+
+        // Verify pending decremented
+        let suite = task_suites::Entity::find_by_id(suite.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(suite.total_tasks, 1);
+        assert_eq!(suite.pending_tasks, 0);
+
+        // Attempt to decrement below zero (should stay at 0)
+        on_task_completed(&db, suite.id).await.unwrap();
+        let suite = task_suites::Entity::find_by_id(suite.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(suite.pending_tasks, 0); // Should not go negative
+    }
+}
+```
+
+**Integration points:**
+
+You need to hook this into your existing task submission and completion handlers:
+
+**In task submission handler:**
+
+```rust
+// After inserting task into active_tasks
+if let Some(suite_id) = task_model.task_suite_id {
+    suite_task_counter::on_task_submitted(&db, suite_id).await?;
+}
+```
+
+**In task completion handler:**
+
+```rust
+// When task state transitions to Finished(3) or Cancelled(4)
+if let Some(suite_id) = old_task.task_suite_id {
+    if new_task.state == TaskState::Finished || new_task.state == TaskState::Cancelled {
+        suite_task_counter::on_task_completed(&db, suite_id).await?;
+    }
+}
+```
+
+**In task deletion handler:**
+
+```rust
+// When deleting a task
+if let Some(suite_id) = task.task_suite_id {
+    suite_task_counter::on_task_deleted(&db, suite_id).await?;
+}
+```
+
+**Deliverable Criteria:**
+- ✅ Functions compile and integrate with coordinator
+- ✅ Task counts update correctly on insert/update/delete
+- ✅ Counts never go negative (GREATEST check)
+- ✅ All tests pass
+- ✅ Logging/tracing in place for debugging
+
+**Testing Instructions:**
+
+```bash
+# Run unit tests
+cargo test -p coordinator test_task_counter_updates
+
+# Integration test:
+# 1. Create suite
+# 2. Submit 10 tasks with suite_id
+# 3. Verify total_tasks=10, pending_tasks=10
+# 4. Complete 5 tasks
+# 5. Verify total_tasks=10, pending_tasks=5
+# 6. Complete remaining 5
+# 7. Verify total_tasks=10, pending_tasks=0
+```
+
+---
+
+### Piece 1.9: Implement Coordinator Background Job for Suite State Transitions
+
+**Goal:** Write periodic background task to check for suites that need state transitions (Open→Closed, any→Complete). Runs every 30 seconds.
+
+**File:** `coordinator/src/suite_state_transitions.rs`
+
+```rust
+use chrono::{Duration, Utc};
+use common::task_suite_state::TaskSuiteState;
+use entity::task_suites;
+use sea_orm::*;
+
+/// Auto-transition suite states based on timeout and completion criteria
+///
+/// Transitions:
+/// - Open → Closed: After 3 minutes of no new task submissions (if pending_tasks > 0)
+/// - Open/Closed → Complete: When all tasks are finished (pending_tasks = 0)
+pub async fn auto_transition_suite_states(db: &DatabaseConnection) -> Result<u64, DbErr> {
+    let mut total_transitioned = 0;
+
+    // Transition 1: Open → Closed (3-minute inactivity timeout)
+    let three_minutes_ago = Utc::now() - Duration::minutes(3);
+    let closed_count = task_suites::Entity::update_many()
+        .col_expr(task_suites::Column::State, Expr::value(TaskSuiteState::Closed.to_i32()))
+        .col_expr(task_suites::Column::UpdatedAt, Expr::value(Utc::now()))
+        .filter(task_suites::Column::State.eq(TaskSuiteState::Open.to_i32()))
+        .filter(task_suites::Column::LastTaskSubmittedAt.is_not_null())
+        .filter(task_suites::Column::LastTaskSubmittedAt.lt(three_minutes_ago))
+        .filter(task_suites::Column::PendingTasks.gt(0))
+        .exec(db)
+        .await?;
+
+    total_transitioned += closed_count.rows_affected();
+
+    if closed_count.rows_affected() > 0 {
+        tracing::info!(
+            count = closed_count.rows_affected(),
+            "Transitioned suites from Open to Closed due to inactivity timeout"
+        );
+    }
+
+    // Transition 2: Open/Closed → Complete (all tasks finished)
+    let complete_count = task_suites::Entity::update_many()
+        .col_expr(task_suites::Column::State, Expr::value(TaskSuiteState::Complete.to_i32()))
+        .col_expr(task_suites::Column::UpdatedAt, Expr::value(Utc::now()))
+        .col_expr(task_suites::Column::CompletedAt, Expr::value(Utc::now()))
+        .filter(
+            task_suites::Column::State
+                .is_in([TaskSuiteState::Open.to_i32(), TaskSuiteState::Closed.to_i32()])
+        )
+        .filter(task_suites::Column::PendingTasks.eq(0))
+        .exec(db)
+        .await?;
+
+    total_transitioned += complete_count.rows_affected();
+
+    if complete_count.rows_affected() > 0 {
+        tracing::info!(
+            count = complete_count.rows_affected(),
+            "Transitioned suites to Complete (all tasks finished)"
+        );
+    }
+
+    Ok(total_transitioned)
+}
+
+/// Background task runner - runs state transitions every 30 seconds
+pub async fn run_state_transition_loop(db: DatabaseConnection) {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+
+    loop {
+        interval.tick().await;
+
+        match auto_transition_suite_states(&db).await {
+            Ok(count) => {
+                if count > 0 {
+                    tracing::debug!(
+                        transitioned = count,
+                        "Suite state transition check completed"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = ?e,
+                    "Failed to auto-transition suite states"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use sea_orm::*;
+
+    #[tokio::test]
+    async fn test_open_to_closed_transition() {
+        let db = /* your test db connection */;
+
+        // Create suite with old last_task_submitted_at
+        let old_time = Utc::now() - Duration::minutes(5);
+        let suite = task_suites::ActiveModel {
+            uuid: Set(uuid::Uuid::new_v4()),
+            group_id: Set(1),
+            creator_id: Set(1),
+            worker_schedule: Set(serde_json::json!({"worker_count": 4})),
+            state: Set(TaskSuiteState::Open.to_i32()),
+            last_task_submitted_at: Set(Some(old_time)),
+            pending_tasks: Set(5), // Still has pending tasks
+            ..Default::default()
+        };
+        let suite = suite.insert(&db).await.unwrap();
+
+        // Run transition
+        let count = auto_transition_suite_states(&db).await.unwrap();
+        assert_eq!(count, 1);
+
+        // Verify state changed to Closed
+        let suite = task_suites::Entity::find_by_id(suite.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(suite.state, TaskSuiteState::Closed.to_i32());
+    }
+
+    #[tokio::test]
+    async fn test_to_complete_transition() {
+        let db = /* your test db connection */;
+
+        // Create suite with pending_tasks = 0
+        let suite = task_suites::ActiveModel {
+            uuid: Set(uuid::Uuid::new_v4()),
+            group_id: Set(1),
+            creator_id: Set(1),
+            worker_schedule: Set(serde_json::json!({"worker_count": 4})),
+            state: Set(TaskSuiteState::Closed.to_i32()),
+            pending_tasks: Set(0), // All tasks finished
+            total_tasks: Set(10),
+            ..Default::default()
+        };
+        let suite = suite.insert(&db).await.unwrap();
+
+        // Run transition
+        let count = auto_transition_suite_states(&db).await.unwrap();
+        assert_eq!(count, 1);
+
+        // Verify state changed to Complete
+        let suite = task_suites::Entity::find_by_id(suite.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(suite.state, TaskSuiteState::Complete.to_i32());
+        assert!(suite.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_no_transition_when_recent_activity() {
+        let db = /* your test db connection */;
+
+        // Create suite with recent activity
+        let recent_time = Utc::now() - Duration::seconds(30); // Only 30 seconds ago
+        let suite = task_suites::ActiveModel {
+            uuid: Set(uuid::Uuid::new_v4()),
+            group_id: Set(1),
+            creator_id: Set(1),
+            worker_schedule: Set(serde_json::json!({"worker_count": 4})),
+            state: Set(TaskSuiteState::Open.to_i32()),
+            last_task_submitted_at: Set(Some(recent_time)),
+            pending_tasks: Set(5),
+            ..Default::default()
+        };
+        let suite = suite.insert(&db).await.unwrap();
+
+        // Run transition
+        let count = auto_transition_suite_states(&db).await.unwrap();
+        assert_eq!(count, 0); // Should not transition
+
+        // Verify state still Open
+        let suite = task_suites::Entity::find_by_id(suite.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(suite.state, TaskSuiteState::Open.to_i32());
+    }
+}
+```
+
+**Integration:** Add to coordinator main/startup:
+
+```rust
+// In coordinator main.rs or similar
+use coordinator::suite_state_transitions;
+
+#[tokio::main]
+async fn main() {
+    // ... existing setup ...
+
+    let db = /* your db connection */;
+
+    // Spawn background task for suite state transitions
+    let db_clone = db.clone();
+    tokio::spawn(async move {
+        tracing::info!("Starting suite state transition background task");
+        suite_state_transitions::run_state_transition_loop(db_clone).await;
+    });
+
+    // ... rest of coordinator startup ...
+}
+```
+
+**Deliverable Criteria:**
+- ✅ Function compiles and integrates with coordinator
+- ✅ Open→Closed transition works after 3-minute timeout
+- ✅ Open/Closed→Complete transition works when pending_tasks=0
+- ✅ Background task runs every 30 seconds
+- ✅ All tests pass
+- ✅ Logging shows transition activity
+
+**Testing Instructions:**
+
+```bash
+# Run unit tests
+cargo test -p coordinator test_state_transitions
+
+# Manual integration test:
+# 1. Create suite, submit tasks
+# 2. Wait 3+ minutes without new tasks
+# 3. Verify suite transitions to Closed
+# 4. Complete all tasks
+# 5. Wait 30 seconds
+# 6. Verify suite transitions to Complete
+
+# Check logs for transition activity:
+# "Transitioned suites from Open to Closed due to inactivity timeout"
+# "Transitioned suites to Complete (all tasks finished)"
+```
+
+---
 
 ## Success Criteria
 
 Phase 1 is considered complete when:
 
 1. **All Migrations Pass**
-   - Migration runs successfully on clean database
-   - Migration can be rolled back without errors
-   - Database schema matches RFC specification exactly
+   - All migration files compile and run successfully
+   - Can be rolled back without errors
+   - Database schema matches RFC specification
 
 2. **All Tables Created**
-   - 5 new tables created: `task_suites`, `node_managers`, `group_node_manager`, `task_suite_managers`, `task_execution_failures`
+   - 5 new tables: `task_suites`, `node_managers`, `group_node_manager`, `task_suite_managers`, `task_execution_failures`
    - 1 table altered: `active_tasks` (added `task_suite_id` column)
    - All indexes created and optimized
 
-3. **Triggers Work Correctly**
-   - `update_suite_task_counts()` trigger fires on INSERT/UPDATE/DELETE
-   - `auto_transition_suite_states()` function can be called and transitions states
-   - Manual testing confirms counters are accurate
-
-4. **SeaORM Entities Generated**
-   - 5 new entity files created and compile successfully
+3. **SeaORM Entities Work**
+   - 5 new entity files compile successfully
    - All relationships defined correctly
    - CRUD operations work for all entities
 
-5. **Enums Defined**
+4. **Enums Defined**
    - 4 enum types created and compile successfully
    - Conversion functions work correctly
    - Can be used in API schema (Phase 2)
 
-6. **All Tests Pass**
-   - Unit tests for database operations
-   - Integration tests for triggers and constraints
-   - Performance tests for indexes (EXPLAIN ANALYZE)
+5. **Coordinator Logic Works**
+   - Task count updates work on task submission/completion
+   - State transition background job runs correctly
+   - All tests pass
+   - No database triggers needed
+
+6. **All Pieces Independently Verified**
+   - Each piece (1.1-1.9) tested individually
+   - All deliverable criteria met
+   - No breaking changes to existing functionality
 
 7. **Documentation Complete**
    - Migration files well-commented
@@ -1102,35 +2246,36 @@ Once the database schema is in place, Phase 2 will:
 
 ---
 
-## Additional Notes
+## Best Practices
 
-### Best Practices
+1. **Test Each Piece Independently**: Don't move to next piece until current piece is verified
+2. **Use Transactions**: Ensure atomicity of database operations
+3. **Backup First**: Always backup database before running migrations
+4. **Check Incrementally**: Verify schema after each migration
+5. **Log Everything**: Add tracing/logging to coordinator logic for debugging
 
-1. **Test Incrementally**: Don't wait until all tables are created. Test each table as you go.
-2. **Use Transactions**: All migration operations should be in a single transaction for atomicity.
-3. **Backup First**: Always backup database before running migrations.
-4. **Check Constraints**: Use `\d+ table_name` in psql to verify schema matches RFC.
+## Common Pitfalls
 
-### Common Pitfalls
+1. **Forgetting to call counter functions**: Task counts won't update if you forget to hook in piece 1.8
+2. **Race conditions**: Use database-level atomic operations (UPDATE ... SET col = col + 1)
+3. **Negative counts**: Always use GREATEST(count - 1, 0) to prevent negative values
+4. **Background task not running**: Make sure piece 1.9 is spawned on coordinator startup
+5. **Array vs JSONB**: PostgreSQL arrays (TEXT[]) are not the same as JSONB arrays
 
-1. **Array vs JSONB**: PostgreSQL arrays (TEXT[]) are not the same as JSONB arrays. Tags use TEXT[], labels use JSONB.
-2. **Trigger Ordering**: AFTER triggers fire after the operation completes. Ensure logic accounts for this.
-3. **NULL Handling**: Use `GREATEST(pending_tasks - 1, 0)` to prevent negative counts.
-4. **Index Types**: Use GIN indexes for array and JSONB columns, B-tree for scalar columns.
+## Debugging Tips
 
-### Debugging Tips
+1. **Check table schemas**: `\d+ table_name` in psql
+2. **Verify indexes**: `\di table_name*` in psql
+3. **Monitor counters**: Add logging to verify total_tasks/pending_tasks match reality
+4. **Check background task**: Look for "Starting suite state transition background task" in logs
+5. **Foreign key violations**: Use `\d+ table_name` to see all constraints
 
-1. **Check Trigger Execution**: `SELECT * FROM pg_trigger WHERE tgname = 'task_suite_count_trigger';`
-2. **Verify Index Usage**: `EXPLAIN ANALYZE SELECT * FROM task_suites WHERE tags @> ARRAY['gpu'];`
-3. **Monitor Counter Accuracy**: Periodically verify `total_tasks` and `pending_tasks` match actual counts
-4. **Foreign Key Violations**: Use `\d+ table_name` to see all constraints and their names
-
-### Performance Considerations
+## Performance Considerations
 
 - GIN indexes on `tags` and `labels` support fast containment queries (@>)
 - Partial indexes reduce index size and improve write performance
-- Auto-close index only on Open suites (WHERE state = 0) for efficiency
-- Consider partitioning `task_execution_failures` table if it grows large
+- Background job runs every 30 seconds (configurable if needed)
+- Atomic UPDATE operations prevent race conditions on counters
 
 ---
 

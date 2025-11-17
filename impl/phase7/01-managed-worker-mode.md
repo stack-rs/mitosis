@@ -39,6 +39,38 @@ Phase 7 implements the managed worker mode, enabling workers to run as subproces
 | 3-4 | Task 7.3, 7.4 | IPC communication, control message handling |
 | 5 | Task 7.5, Testing | Main loop integration, end-to-end testing |
 
+## Piece-by-Piece Breakdown
+
+Each piece is independently testable and delivers incremental value:
+
+**Piece 7.1: Add --managed flag to worker binary**
+- CLI arg parsing
+- Mode selection
+- Deliverable: Worker knows if managed
+
+**Piece 7.2: Define WorkerComm trait**
+- Trait with fetch_task, report_task, send_heartbeat
+- Deliverable: Trait compiles
+
+**Piece 7.3: Implement HttpWorkerComm**
+- Refactor existing HTTP code into trait
+- Deliverable: Independent workers still work
+
+**Piece 7.4: Implement IpcWorkerComm**
+- Connect to manager's iceoryx2 services
+- Implement trait methods via IPC
+- Deliverable: Managed workers can communicate via IPC
+
+**Piece 7.5: Update worker main loop**
+- Use WorkerComm trait
+- Works for both modes
+- Deliverable: Unified worker code
+
+**Piece 7.6: Handle control messages (Shutdown, CancelTask)**
+- Subscribe to control topic
+- Handle gracefully
+- Deliverable: Workers respond to control messages
+
 ## Design References
 
 ### Section 4.3: Worker Modes

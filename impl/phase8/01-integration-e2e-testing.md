@@ -35,6 +35,132 @@ All Phases 1-7 must be completed:
 - Day 6: Backward compatibility testing
 - Day 7: Bug fixes, documentation of test results, and production readiness checklist
 
+## Piece-by-Piece Breakdown
+
+This phase can be broken down into 10 independently reviewable pieces:
+
+### Piece 8.1: Basic end-to-end suite execution test
+**Objective:** Verify the fundamental workflow operates correctly.
+
+**Tasks:**
+- Create suite → Submit tasks → Verify completion
+- Single manager, simple suite
+- Basic validation of suite lifecycle
+
+**Deliverable:** Basic workflow works end-to-end
+
+---
+
+### Piece 8.2: Environment hooks E2E test
+**Objective:** Validate environment preparation and cleanup execution.
+
+**Tasks:**
+- Suite with preparation and cleanup hooks
+- Verify hooks run at correct times
+- Test hook success and failure scenarios
+
+**Deliverable:** Hooks execute properly in suite lifecycle
+
+---
+
+### Piece 8.3: Multi-task suite test
+**Objective:** Test system behavior under load with large task batches.
+
+**Tasks:**
+- Submit 100+ tasks to one suite
+- Verify all complete successfully
+- Check task counters and metrics
+
+**Deliverable:** Large task batches work correctly
+
+---
+
+### Piece 8.4: Tag matching test
+**Objective:** Validate tag-based suite-to-manager assignment algorithm.
+
+**Tasks:**
+- Multiple managers with different tags
+- Suite auto-assigns to correct managers based on tag subsets
+- Test edge cases (no match, multiple matches)
+
+**Deliverable:** Tag matching algorithm works correctly
+
+---
+
+### Piece 8.5: Worker crash and recovery test
+**Objective:** Test fault tolerance for worker failures.
+
+**Tasks:**
+- Force-kill worker mid-task
+- Verify auto-respawn mechanism
+- Verify task retry behavior
+- Test failure count tracking
+
+**Deliverable:** Auto-recovery from worker crashes works
+
+---
+
+### Piece 8.6: Manager disconnect and reconnect test
+**Objective:** Test network resilience and reconnection logic.
+
+**Tasks:**
+- Kill WebSocket connection
+- Verify automatic reconnection with exponential backoff
+- Verify suite resumes execution after reconnect
+
+**Deliverable:** Reconnection logic works correctly
+
+---
+
+### Piece 8.7: Suite state transition test
+**Objective:** Validate suite state machine behavior.
+
+**Tasks:**
+- Test Open → Closed (3-minute timeout)
+- Test Closed → Complete
+- Test cancellation flows
+- Test state persistence
+
+**Deliverable:** State machine transitions work correctly
+
+---
+
+### Piece 8.8: Concurrent suites test
+**Objective:** Test multi-suite, multi-manager scenarios.
+
+**Tasks:**
+- Multiple suites on multiple managers simultaneously
+- Verify no conflicts or race conditions
+- Test task distribution fairness
+
+**Deliverable:** Concurrent execution works correctly
+
+---
+
+### Piece 8.9: Performance benchmarks
+**Objective:** Validate system meets performance targets.
+
+**Tasks:**
+- 10,000 tasks on 16 workers
+- Measure latency, throughput, resource usage
+- Compare against target metrics
+
+**Deliverable:** System meets performance targets
+
+---
+
+### Piece 8.10: Backward compatibility test
+**Objective:** Ensure independent workers are unaffected.
+
+**Tasks:**
+- Independent workers still work
+- Mixed workload (independent + managed)
+- API backward compatibility validation
+
+**Deliverable:** No breaking changes to existing functionality
+
+---
+
 ## Design References
 
 ### Test Scenarios from RFC

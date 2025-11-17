@@ -37,6 +37,127 @@ Phase 9 is the final phase of the Task Suite and Node Manager implementation. Th
 - Production Rollout Planning: 1 day
 - Production Deployment: 1 day (phased)
 
+## Piece-by-Piece Breakdown
+
+This phase can be broken down into 9 independently reviewable pieces:
+
+### Piece 9.1: API documentation updates
+**Objective:** Complete API documentation for all new endpoints.
+
+**Tasks:**
+- Update OpenAPI spec with suite endpoints
+- Update OpenAPI spec with manager endpoints
+- Add examples for all suite/manager APIs
+- Document request/response schemas
+
+**Deliverable:** API documentation is complete and accurate
+
+---
+
+### Piece 9.2: User guide for creating suites
+**Objective:** Enable users to create and manage task suites.
+
+**Tasks:**
+- Write step-by-step guide for suite creation
+- Provide curl examples for all operations
+- Document common patterns and best practices
+- Add troubleshooting for suite issues
+
+**Deliverable:** Users can successfully create and manage suites
+
+---
+
+### Piece 9.3: User guide for deploying managers
+**Objective:** Enable users to deploy and manage node managers.
+
+**Tasks:**
+- Write installation instructions
+- Document systemd service setup
+- Provide configuration examples
+- Add deployment best practices
+
+**Deliverable:** Users can successfully deploy and run managers
+
+---
+
+### Piece 9.4: Troubleshooting guide
+**Objective:** Enable users to diagnose and resolve common issues.
+
+**Tasks:**
+- Document common issues and solutions
+- Provide debugging commands
+- Create FAQ section
+- Add diagnostic procedures
+
+**Deliverable:** Users can self-serve for common problems
+
+---
+
+### Piece 9.5: Prometheus metrics
+**Objective:** Export comprehensive metrics for monitoring.
+
+**Tasks:**
+- Add metrics for suites (states, duration, tasks)
+- Add metrics for managers (states, workers, heartbeats)
+- Add metrics for WebSocket connections
+- Export to Prometheus endpoint
+
+**Deliverable:** All critical metrics are available
+
+---
+
+### Piece 9.6: Grafana dashboards
+**Objective:** Provide visualization for system health and performance.
+
+**Tasks:**
+- Create dashboards for suite monitoring
+- Create dashboards for manager health
+- Create dashboards for task throughput
+- Add resource utilization panels
+
+**Deliverable:** Dashboards are deployed and functional
+
+---
+
+### Piece 9.7: Alert rules
+**Objective:** Enable proactive incident detection.
+
+**Tasks:**
+- Define alerts for suite failures
+- Define alerts for stuck suites
+- Define alerts for offline managers
+- Configure alertmanager integration
+
+**Deliverable:** Alerts trigger correctly and notify on-call
+
+---
+
+### Piece 9.8: Migration runbook
+**Objective:** Ensure safe production deployment.
+
+**Tasks:**
+- Document step-by-step migration process
+- Define rollback procedures
+- Create smoke test suite
+- Document validation steps
+
+**Deliverable:** Clear path from old to new system
+
+---
+
+### Piece 9.9: Deployment smoke tests
+**Objective:** Validate deployment success automatically.
+
+**Tasks:**
+- Create automated post-deployment tests
+- Add health checks for all components
+- Verify backward compatibility
+- Test feature flag behavior
+
+**Deliverable:** Deployment can be automatically validated
+
+---
+
 ## Design References
 
 ### Architecture Components

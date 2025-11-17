@@ -394,13 +394,19 @@ impl Coordinator {
 
 ## Implementation Tasks
 
-### Task 3.1: WebSocket Server Setup
+This phase is broken down into 10 testable pieces, each building incrementally on the previous one. Each piece has a clear deliverable that can be tested with WebSocket client tools.
 
-**Objective:** Set up WebSocket endpoint on coordinator with JWT authentication
+---
 
-**File:** `mitosis-coordinator/src/websocket/mod.rs`
+### Piece 3.1: Setup WebSocket endpoint /ws/managers
 
-**Steps:**
+**Objective:** Enable WebSocket connections with JWT authentication
+
+**Files:**
+- `mitosis-coordinator/src/websocket/mod.rs`
+- `mitosis-coordinator/Cargo.toml`
+
+**Implementation Steps:**
 
 1. **Add dependencies** to `Cargo.toml`:
    ```toml
@@ -410,12 +416,10 @@ impl Coordinator {
 
 2. **Create WebSocket upgrade handler**:
    ```rust
-   use tokio_tungstenite::tungstenite::protocol::Message;
-   use tokio_tungstenite::WebSocketStream;
-   use futures_util::{StreamExt, SinkExt};
    use axum::extract::ws::{WebSocket, WebSocketUpgrade};
    use axum::extract::State;
    use axum::response::IntoResponse;
+   use axum::http::StatusCode;
 
    pub async fn websocket_handler(
        ws: WebSocketUpgrade,
@@ -432,9 +436,9 @@ impl Coordinator {
        let manager_uuid = claims.manager_uuid;
 
        // Upgrade to WebSocket
-       ws.on_upgrade(move |socket| {
+       Ok(ws.on_upgrade(move |socket| {
            handle_manager_socket(socket, manager_uuid, state)
-       })
+       }))
    }
    ```
 
@@ -445,18 +449,20 @@ impl Coordinator {
        // ... other routes
    ```
 
-**Success Criteria:**
-- WebSocket endpoint accepts connections at `/ws/managers`
-- JWT authentication rejects invalid tokens
-- Valid tokens extract `manager_uuid` claim correctly
+**Deliverable:** Can establish WebSocket connection with auth
+- Test with WebSocket client (e.g., `wscat`, `websocat`)
+- Valid JWT token connects successfully
+- Invalid token returns 401 Unauthorized
+- Connection URL: `ws://localhost:8080/ws/managers`
 
 ---
 
-### Task 3.2: Connection Management
+### Piece 3.2: Connection registry and lifecycle
 
-**Objective:** Maintain registry of active manager connections and handle lifecycle events
+**Objective:** Track which managers are currently connected
 
-**File:** `mitosis-coordinator/src/websocket/connection_registry.rs`
+**Files:**
+- `mitosis-coordinator/src/websocket/connection_registry.rs`
 
 **Implementation:**
 
@@ -465,6 +471,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+use futures_util::stream::{SplitSink, StreamExt};
+use axum::extract::ws::{WebSocket, Message};
 
 pub type WsSender = Arc<RwLock<SplitSink<WebSocket, Message>>>;
 
@@ -493,26 +501,8 @@ impl ConnectionRegistry {
         self.connections.read().await.get(manager_uuid).cloned()
     }
 
-    pub async fn broadcast(&self, message: &CoordinatorMessage) -> Result<()> {
-        let connections = self.connections.read().await;
-        let msg_json = serde_json::to_string(message)?;
-
-        for (uuid, sender) in connections.iter() {
-            if let Err(e) = sender.write().await.send(Message::Text(msg_json.clone())).await {
-                tracing::error!(manager_uuid = %uuid, error = %e, "Failed to broadcast message");
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn send_to_manager(&self, manager_uuid: &Uuid, message: &CoordinatorMessage) -> Result<()> {
-        if let Some(sender) = self.get(manager_uuid).await {
-            let msg_json = serde_json::to_string(message)?;
-            sender.write().await.send(Message::Text(msg_json)).await?;
-            Ok(())
-        } else {
-            Err(anyhow!("Manager not connected: {}", manager_uuid))
-        }
+    pub async fn count(&self) -> usize {
+        self.connections.read().await.len()
     }
 }
 ```
@@ -531,24 +521,12 @@ async fn handle_manager_socket(
     // Register connection
     state.ws_registry.register(manager_uuid, sender.clone()).await;
 
-    // Update database: mark manager as online
-    if let Err(e) = sqlx::query!(
-        "UPDATE node_managers SET state = $1, last_heartbeat = NOW(), updated_at = NOW() WHERE uuid = $2",
-        NodeManagerState::Idle as i32,
-        manager_uuid
-    )
-    .execute(&state.db)
-    .await {
-        tracing::error!(manager_uuid = %manager_uuid, error = %e, "Failed to update manager state");
-    }
-
     // Handle incoming messages
     while let Some(msg) = receiver.next().await {
         match msg {
             Ok(Message::Text(text)) => {
-                if let Err(e) = handle_manager_message(&text, manager_uuid, &state).await {
-                    tracing::error!(manager_uuid = %manager_uuid, error = %e, "Error handling message");
-                }
+                tracing::info!(manager_uuid = %manager_uuid, message = %text, "Received message");
+                // Will handle in next piece
             }
             Ok(Message::Close(_)) => {
                 tracing::info!(manager_uuid = %manager_uuid, "Manager closed connection");
@@ -570,41 +548,32 @@ async fn handle_manager_socket(
 
     // Cleanup on disconnect
     state.ws_registry.unregister(&manager_uuid).await;
-
-    // Mark manager as offline
-    if let Err(e) = sqlx::query!(
-        "UPDATE node_managers SET state = $1, updated_at = NOW() WHERE uuid = $2",
-        NodeManagerState::Offline as i32,
-        manager_uuid
-    )
-    .execute(&state.db)
-    .await {
-        tracing::error!(manager_uuid = %manager_uuid, error = %e, "Failed to mark manager offline");
-    }
 }
 ```
 
-**Success Criteria:**
-- Connections registered on connect, unregistered on disconnect
-- Database updated with manager state changes
-- Graceful handling of connection close and errors
+**Deliverable:** Can track which managers are connected
+- Multiple managers can connect simultaneously
+- Registry count increases/decreases with connections
+- Graceful disconnect removes from registry
+- Add test endpoint `GET /ws/managers/count` to verify
 
 ---
 
-### Task 3.3: Message Protocol Implementation
+### Piece 3.3: Message protocol types
 
-**Objective:** Serialize/deserialize messages and route to appropriate handlers
+**Objective:** Define and serialize message types
 
-**File:** `mitosis-coordinator/src/websocket/messages.rs`
+**Files:**
+- `mitosis-coordinator/src/websocket/messages.rs`
 
-**Message Definitions:**
+**Implementation:**
 
 ```rust
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use std::time::Duration;
 
-// Manager → Coordinator
+// Manager → Coordinator (6 types)
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ManagerMessage {
@@ -639,7 +608,7 @@ pub enum ManagerMessage {
     },
 }
 
-// Coordinator → Manager
+// Coordinator → Manager (7 types)
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CoordinatorMessage {
@@ -685,21 +654,6 @@ pub struct ManagerMetrics {
     pub cpu_usage_percent: f32,
     pub memory_usage_mb: u64,
 }
-
-impl Default for ManagerMetrics {
-    fn default() -> Self {
-        Self {
-            active_workers: 0,
-            total_tasks_completed: 0,
-            total_tasks_failed: 0,
-            current_suite_tasks_completed: 0,
-            current_suite_tasks_failed: 0,
-            uptime_seconds: 0,
-            cpu_usage_percent: 0.0,
-            memory_usage_mb: 0,
-        }
-    }
-}
 ```
 
 **Message Router:**
@@ -711,6 +665,8 @@ async fn handle_manager_message(
     state: &Arc<AppState>,
 ) -> Result<()> {
     let message: ManagerMessage = serde_json::from_str(text)?;
+
+    tracing::info!(manager_uuid = %manager_uuid, message_type = ?message, "Routing message");
 
     match message {
         ManagerMessage::Heartbeat { manager_uuid, state: mgr_state, metrics } => {
@@ -737,20 +693,25 @@ async fn handle_manager_message(
 }
 ```
 
-**Success Criteria:**
-- All message types deserialize correctly
-- Invalid JSON returns appropriate errors
-- Messages route to correct handlers
+**Deliverable:** Messages serialize/deserialize correctly
+- Write unit tests for all message types
+- Test with WebSocket client sending JSON:
+  ```json
+  {"type": "heartbeat", "manager_uuid": "...", "state": 0, "metrics": {...}}
+  ```
+- Verify message routing logs correct message type
+- Invalid JSON returns proper error
 
 ---
 
-### Task 3.4: Coordinator Message Handlers
+### Piece 3.4: Heartbeat message handler
 
-**Objective:** Implement business logic for each manager message type
+**Objective:** Process heartbeat messages and update database
 
-**File:** `mitosis-coordinator/src/websocket/handlers.rs`
+**Files:**
+- `mitosis-coordinator/src/websocket/handlers.rs`
 
-#### Handler: ManagerMessage::Heartbeat
+**Implementation:**
 
 ```rust
 async fn handle_heartbeat(
@@ -777,14 +738,26 @@ async fn handle_heartbeat(
     .execute(&app_state.db)
     .await?;
 
-    // Optionally store metrics (future enhancement)
-    // store_manager_metrics(manager_uuid, metrics).await?;
-
     Ok(())
 }
 ```
 
-#### Handler: ManagerMessage::FetchTask
+**Deliverable:** Heartbeats update database
+- Send heartbeat message via WebSocket client
+- Verify `last_heartbeat` column updates in database
+- Verify `state` column updates correctly
+- Add query endpoint `GET /managers/:uuid` to verify state
+
+---
+
+### Piece 3.5: FetchTask message handler
+
+**Objective:** Managers can request tasks via WebSocket
+
+**Files:**
+- `mitosis-coordinator/src/websocket/handlers.rs`
+
+**Implementation:**
 
 ```rust
 async fn handle_fetch_task(
@@ -810,25 +783,44 @@ async fn handle_fetch_task(
     .await?;
 
     let task = if let Some(suite_id) = manager.assigned_task_suite_id {
-        // Fetch task from assigned suite
+        // Fetch task from assigned suite (reuse Phase 1 logic)
         app_state.task_dispatcher.fetch_task_from_suite(suite_id, manager.id).await?
     } else {
         None
     };
 
-    // Send response
+    // Send response back
     let response = CoordinatorMessage::TaskAvailable {
         request_id,
         task,
     };
 
-    app_state.ws_registry.send_to_manager(&manager_uuid, &response).await?;
+    let msg_json = serde_json::to_string(&response)?;
+    if let Some(sender) = app_state.ws_registry.get(&manager_uuid).await {
+        sender.write().await.send(Message::Text(msg_json)).await?;
+    }
 
     Ok(())
 }
 ```
 
-#### Handler: ManagerMessage::ReportTask
+**Deliverable:** Managers can fetch tasks via WebSocket
+- Assign a suite to manager in database
+- Send FetchTask message with request_id=1
+- Verify TaskAvailable response with same request_id
+- Verify task data is included when available
+- Verify task=None when suite has no tasks
+
+---
+
+### Piece 3.6: ReportTask message handler
+
+**Objective:** Task completion updates work via WebSocket
+
+**Files:**
+- `mitosis-coordinator/src/websocket/handlers.rs`
+
+**Implementation:**
 
 ```rust
 async fn handle_report_task(
@@ -849,6 +841,7 @@ async fn handle_report_task(
     // Process task report (reuse existing worker logic)
     let result = match op {
         ReportTaskOp::Finish { exit_code } => {
+            // Call Phase 1's on_task_completed() for counter updates
             app_state.task_dispatcher.finish_task(task_id, exit_code).await
         }
         ReportTaskOp::Cancel { reason } => {
@@ -877,13 +870,32 @@ async fn handle_report_task(
         url,
     };
 
-    app_state.ws_registry.send_to_manager(&manager_uuid, &response).await?;
+    let msg_json = serde_json::to_string(&response)?;
+    if let Some(sender) = app_state.ws_registry.get(&manager_uuid).await {
+        sender.write().await.send(Message::Text(msg_json)).await?;
+    }
 
     Ok(())
 }
 ```
 
-#### Handler: ManagerMessage::ReportFailure
+**Deliverable:** Task completion works via WebSocket
+- Create and fetch a task
+- Send ReportTask with Finish operation
+- Verify TaskReportAck response with success=true
+- Verify task state updates in database
+- Verify suite counters update (from Phase 1's on_task_completed)
+
+---
+
+### Piece 3.7: ReportFailure and AbortTask handlers
+
+**Objective:** Failure tracking via WebSocket
+
+**Files:**
+- `mitosis-coordinator/src/websocket/handlers.rs`
+
+**Implementation:**
 
 ```rust
 async fn handle_report_failure(
@@ -903,7 +915,6 @@ async fn handle_report_failure(
         "Task failure reported"
     );
 
-    // Get manager details
     let manager = sqlx::query_as!(
         NodeManagerModel,
         "SELECT * FROM node_managers WHERE uuid = $1",
@@ -929,11 +940,7 @@ async fn handle_report_failure(
 
     Ok(())
 }
-```
 
-#### Handler: ManagerMessage::AbortTask
-
-```rust
 async fn handle_abort_task(
     manager_uuid: Uuid,
     task_uuid: Uuid,
@@ -947,14 +954,28 @@ async fn handle_abort_task(
         "Task aborted"
     );
 
-    // Mark task as aborted
     app_state.task_dispatcher.abort_task(&task_uuid, &reason).await?;
 
     Ok(())
 }
 ```
 
-#### Handler: ManagerMessage::SuiteCompleted
+**Deliverable:** Failure tracking works
+- Send ReportFailure message
+- Verify row inserted in `task_execution_failures` table
+- Send AbortTask message
+- Verify task marked as aborted in database
+
+---
+
+### Piece 3.8: SuiteCompleted handler
+
+**Objective:** Suite completion via WebSocket
+
+**Files:**
+- `mitosis-coordinator/src/websocket/handlers.rs`
+
+**Implementation:**
 
 ```rust
 async fn handle_suite_completed(
@@ -972,12 +993,12 @@ async fn handle_suite_completed(
         "Suite execution completed"
     );
 
-    // Update manager state to Cleanup
+    // Clear manager assignment
     sqlx::query!(
         "UPDATE node_managers
          SET state = $1, assigned_task_suite_id = NULL, lease_expires_at = NULL, updated_at = NOW()
          WHERE uuid = $2",
-        NodeManagerState::Cleanup as i32,
+        NodeManagerState::Idle as i32,
         manager_uuid
     )
     .execute(&app_state.db)
@@ -1010,20 +1031,23 @@ async fn handle_suite_completed(
 }
 ```
 
-**Success Criteria:**
-- All handlers update database correctly
-- Handlers send appropriate responses back to manager
-- Error handling logs and propagates errors appropriately
+**Deliverable:** Suite completion via WebSocket
+- Assign suite to manager
+- Send SuiteCompleted message
+- Verify manager's assigned_task_suite_id cleared
+- Verify manager state returns to Idle
+- Verify suite marked Complete when pending_tasks=0
 
 ---
 
-### Task 3.5: Manager Disconnection Handling
+### Piece 3.9: Health monitor for disconnected managers
 
-**Objective:** Detect manager failures and reclaim resources
+**Objective:** Detect dead connections and clean up
 
-**File:** `mitosis-coordinator/src/websocket/health_monitor.rs`
+**Files:**
+- `mitosis-coordinator/src/websocket/health_monitor.rs`
 
-**Heartbeat Monitor:**
+**Implementation:**
 
 ```rust
 use tokio::time::{interval, Duration};
@@ -1031,20 +1055,11 @@ use tokio::time::{interval, Duration};
 pub struct HealthMonitor {
     db: Pool<Postgres>,
     ws_registry: Arc<ConnectionRegistry>,
-    task_dispatcher: Arc<TaskDispatcher>,
 }
 
 impl HealthMonitor {
-    pub fn new(
-        db: Pool<Postgres>,
-        ws_registry: Arc<ConnectionRegistry>,
-        task_dispatcher: Arc<TaskDispatcher>,
-    ) -> Self {
-        Self {
-            db,
-            ws_registry,
-            task_dispatcher,
-        }
+    pub fn new(db: Pool<Postgres>, ws_registry: Arc<ConnectionRegistry>) -> Self {
+        Self { db, ws_registry }
     }
 
     pub async fn run(&self) {
@@ -1060,6 +1075,7 @@ impl HealthMonitor {
     }
 
     async fn check_manager_heartbeats(&self) -> Result<()> {
+        // Find managers with heartbeat > 2 minutes old
         let expired_managers = sqlx::query_as!(
             NodeManagerModel,
             "SELECT * FROM node_managers
@@ -1090,7 +1106,14 @@ impl HealthMonitor {
 
             // Reclaim assigned suite
             if let Some(suite_id) = manager.assigned_task_suite_id {
-                self.reclaim_suite_from_manager(manager.id, suite_id).await?;
+                sqlx::query!(
+                    "DELETE FROM task_suite_managers
+                     WHERE node_manager_id = $1 AND task_suite_id = $2",
+                    manager.id,
+                    suite_id
+                )
+                .execute(&self.db)
+                .await?;
             }
 
             // Close WebSocket connection
@@ -1099,125 +1122,62 @@ impl HealthMonitor {
 
         Ok(())
     }
-
-    async fn reclaim_suite_from_manager(
-        &self,
-        manager_id: i64,
-        suite_id: i64,
-    ) -> Result<()> {
-        tracing::info!(
-            manager_id = manager_id,
-            suite_id = suite_id,
-            "Reclaiming suite from offline manager"
-        );
-
-        // Remove suite assignment
-        sqlx::query!(
-            "DELETE FROM task_suite_managers
-             WHERE node_manager_id = $1 AND task_suite_id = $2",
-            manager_id,
-            suite_id
-        )
-        .execute(&self.db)
-        .await?;
-
-        // Return prefetched tasks to queue
-        self.task_dispatcher.return_prefetched_tasks(manager_id).await?;
-
-        // Update suite state if no other managers assigned
-        let remaining_managers = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM task_suite_managers WHERE task_suite_id = $1",
-            suite_id
-        )
-        .fetch_one(&self.db)
-        .await?;
-
-        if remaining_managers.unwrap_or(0) == 0 {
-            tracing::info!(suite_id = suite_id, "No managers remaining for suite");
-            // Suite can be reassigned to other managers matching tags
-        }
-
-        Ok(())
-    }
 }
 ```
 
-**Start Monitor in Coordinator:**
+**Start in main.rs:**
 
 ```rust
-// In coordinator startup (main.rs or app initialization)
-let health_monitor = HealthMonitor::new(
-    db.clone(),
-    ws_registry.clone(),
-    task_dispatcher.clone(),
-);
-
+let health_monitor = HealthMonitor::new(db.clone(), ws_registry.clone());
 tokio::spawn(async move {
     health_monitor.run().await;
 });
 ```
 
-**Success Criteria:**
-- Managers marked offline after 2-minute heartbeat timeout
-- Assigned suites reclaimed from offline managers
-- Prefetched tasks returned to queue
-- WebSocket connections closed properly
+**Deliverable:** Dead connections detected and cleaned
+- Connect manager and send heartbeat
+- Stop sending heartbeats (or disconnect)
+- Wait 2+ minutes
+- Verify manager marked Offline
+- Verify suite assignment cleared
+- Verify connection removed from registry
 
 ---
 
-### Task 3.6: Request-Response Multiplexing
+### Piece 3.10: Request-response multiplexing
 
-**Objective:** Handle concurrent requests from managers efficiently
+**Objective:** Handle parallel requests with out-of-order responses
 
 **Implementation Notes:**
 
-The coordinator doesn't need explicit multiplexing state since it responds directly to each request. However, it must ensure:
+The coordinator already supports multiplexing through `request_id` preservation:
 
-1. **Request ID Preservation**: When coordinator responds, it includes the same `request_id` from the manager's request
-2. **Concurrent Processing**: Each handler runs independently, allowing out-of-order responses
-3. **Timeout Handling**: Manager-side timeouts (30s) mean coordinator should respond promptly
+1. **Each handler** receives `request_id` from manager's message
+2. **Each response** includes the same `request_id`
+3. **Handlers run concurrently** via tokio's async runtime
+4. **Manager correlates** responses using `request_id`
 
-**Example Flow:**
-
-```rust
-// Manager sends:
-ManagerMessage::FetchTask { request_id: 1, worker_local_id: 1 }
-ManagerMessage::FetchTask { request_id: 2, worker_local_id: 2 }
-
-// Coordinator processes concurrently and responds:
-CoordinatorMessage::TaskAvailable { request_id: 2, task: Some(...) }  // Faster query
-CoordinatorMessage::TaskAvailable { request_id: 1, task: Some(...) }  // Slower query
-
-// Manager matches responses to waiting channels via request_id
-```
-
-**Coordinator Implementation Pattern:**
-
-Each handler receives `request_id` and includes it in the response:
+**Example:**
 
 ```rust
-async fn handle_fetch_task(
-    manager_uuid: Uuid,
-    request_id: u64,  // <-- Received from manager
-    worker_local_id: u32,
-    app_state: &Arc<AppState>,
-) -> Result<()> {
-    // ... fetch task logic ...
+// Manager sends two concurrent requests:
+FetchTask { request_id: 1, worker_local_id: 1 }
+FetchTask { request_id: 2, worker_local_id: 2 }
 
-    let response = CoordinatorMessage::TaskAvailable {
-        request_id,  // <-- Echoed back in response
-        task,
-    };
+// Coordinator processes concurrently and may respond out-of-order:
+TaskAvailable { request_id: 2, task: Some(...) }  // Faster query
+TaskAvailable { request_id: 1, task: Some(...) }  // Slower query
 
-    app_state.ws_registry.send_to_manager(&manager_uuid, &response).await?;
-    Ok(())
-}
+// Manager matches via request_id
 ```
 
-**Success Criteria:**
-- Multiple concurrent requests processed independently
-- Responses include correct `request_id`
-- Out-of-order responses handled correctly by manager
+**Deliverable:** Can handle parallel requests
+- Send 3 FetchTask messages rapidly (request_id: 1, 2, 3)
+- Verify all 3 TaskAvailable responses received
+- Verify each response has correct request_id
+- Responses may arrive out-of-order
+- Test with concurrent ReportTask messages
+- Verify no request_id collisions or dropped responses
 
 ---
 

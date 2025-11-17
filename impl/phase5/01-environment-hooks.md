@@ -35,6 +35,46 @@ Phase 5 implements environment lifecycle hooks for Task Suites, enabling automat
 - Days 5-6: State machine integration (PREPARING → EXECUTING, EXECUTING → CLEANUP)
 - Day 7: Error handling, logging, and testing
 
+## Piece-by-Piece Breakdown
+
+Each piece is independently testable and delivers incremental value:
+
+**Piece 5.1: EnvHookSpec parsing from database**
+- Parse JSONB to EnvHookSpec struct
+- Validate fields
+- Deliverable: Can load hook specs from database
+
+**Piece 5.2: S3 resource download**
+- Download resources from S3 before hook
+- Save to local paths
+- Deliverable: Resources downloaded successfully
+
+**Piece 5.3: Basic hook execution**
+- Spawn process with args
+- Set environment variables
+- Wait for completion
+- Deliverable: Can run simple hooks
+
+**Piece 5.4: Hook timeout handling**
+- Timeout enforcement
+- Kill process on timeout
+- Deliverable: Timeouts work correctly
+
+**Piece 5.5: Context variable injection**
+- Inject all MITOSIS_* env vars
+- Suite UUID, name, group, worker count
+- Deliverable: Hooks see correct context
+
+**Piece 5.6: Integrate env_preparation into manager**
+- Call during Preparing state
+- Handle success/failure
+- Deliverable: Preparation hooks run before workers spawn
+
+**Piece 5.7: Integrate env_cleanup into manager**
+- Call during Cleanup state
+- Handle failures gracefully
+- Deliverable: Cleanup hooks run after suite completes
+
 ## Design References
 
 ### Section 4.1: Task Suite - EnvHookSpec Definition

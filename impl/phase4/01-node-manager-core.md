@@ -166,6 +166,201 @@ Registration
 | **Cleanup** | Running env_cleanup | - Shutdown all workers gracefully<br>- Execute cleanup hook<br>- Upload final artifacts<br>- Release resources |
 | **Offline** | Heartbeat timeout | - Coordinator marks as offline<br>- Reclaim assigned suite<br>- Manager auto-reconnects when online |
 
+## Piece-by-Piece Implementation Roadmap
+
+This section breaks down Phase 4 into small, independently testable pieces. Each piece builds on the previous ones but can be tested and verified independently before moving to the next.
+
+### Piece 4.1: Create mitosis-manager Binary Skeleton
+
+**Goal:** Get a basic binary running with CLI argument parsing.
+
+**Tasks:**
+- Set up `mitosis-manager` crate with clap for CLI parsing
+- Define arguments: `--coordinator-url`, `--tags`, `--labels`, `--config`
+- Implement basic main function structure
+- Set up tracing-subscriber for structured logging
+- Add `--help` and `--version` flags
+
+**Deliverable:** Binary compiles and prints help message. Running with `--help` shows all available options.
+
+**Test:** `cargo build && ./target/debug/mitosis-manager --help`
+
+---
+
+### Piece 4.2: Registration Flow (POST /managers)
+
+**Goal:** Successfully register with coordinator and receive JWT token.
+
+**Tasks:**
+- Implement HTTP POST to `/managers` endpoint
+- Send tags, labels, groups, and lifetime in request body
+- Parse registration response (manager_uuid, token, websocket_url)
+- Save JWT token to file with 0600 permissions (`/var/lib/mitosis/manager-{uuid}.token`)
+- Handle registration errors with clear error messages
+
+**Deliverable:** Manager can register with coordinator and receives JWT token. Token is saved to disk securely.
+
+**Test:** Run binary with valid coordinator URL, verify token file created with correct permissions.
+
+---
+
+### Piece 4.3: WebSocket Client Connection
+
+**Goal:** Establish WebSocket connection to coordinator using JWT token.
+
+**Tasks:**
+- Implement WebSocket connection using tokio-tungstenite
+- Pass JWT token in connection URL query parameter or headers
+- Handle connection success and log connection status
+- Handle connection errors (invalid token, network errors)
+- Implement basic message receive loop
+
+**Deliverable:** Manager establishes WebSocket connection successfully. Connection errors are logged clearly.
+
+**Test:** Verify WebSocket connection established, check coordinator logs for connection.
+
+---
+
+### Piece 4.4: Send Heartbeat Messages
+
+**Goal:** Send periodic heartbeat messages to coordinator.
+
+**Tasks:**
+- Create `ManagerMessage::Heartbeat` structure with state and metrics
+- Implement periodic heartbeat loop (30-second interval)
+- Collect basic metrics (active workers, CPU, memory)
+- Send heartbeat over WebSocket
+- Log heartbeat success/failure
+
+**Deliverable:** Manager sends heartbeats every 30 seconds with current state and metrics.
+
+**Test:** Monitor coordinator logs, verify heartbeats arrive every 30 seconds.
+
+---
+
+### Piece 4.5: Reconnection Logic
+
+**Goal:** Automatically reconnect to coordinator on network failures.
+
+**Tasks:**
+- Detect WebSocket disconnections
+- Implement exponential backoff (1s → 2s → 4s → ... → 60s max)
+- Auto-reconnect on connection loss
+- Preserve manager state across reconnections
+- Send heartbeat immediately after reconnection
+
+**Deliverable:** Manager survives network failures and reconnects automatically. State is preserved.
+
+**Test:** Kill coordinator, restart it, verify manager reconnects within 60 seconds.
+
+---
+
+### Piece 4.6: State Machine Skeleton
+
+**Goal:** Implement state machine with valid transitions.
+
+**Tasks:**
+- Define `NodeManagerState` enum (Idle, Preparing, Executing, Cleanup, Offline)
+- Implement state transition validation logic
+- Track state transition history
+- Add logging for all state transitions
+- Implement state-specific handlers (placeholders for now)
+
+**Deliverable:** State machine works correctly with valid transitions. Invalid transitions are rejected.
+
+**Test:** Manually trigger state transitions, verify only valid transitions succeed.
+
+---
+
+### Piece 4.7: Handle SuiteAssigned Message
+
+**Goal:** Receive and process suite assignments from coordinator.
+
+**Tasks:**
+- Implement `CoordinatorMessage::SuiteAssigned` message handling
+- Parse `TaskSuiteSpec` structure
+- Validate suite requirements (tag matching, resource capacity)
+- Transition from Idle → Preparing state
+- Reject assignments when not in Idle state
+- Store suite assignment details
+
+**Deliverable:** Manager can receive suite assignments and transition to Preparing state.
+
+**Test:** Trigger suite assignment via coordinator, verify state transition.
+
+---
+
+### Piece 4.8: Graceful Shutdown Handler
+
+**Goal:** Handle SIGTERM/SIGINT signals and shutdown cleanly.
+
+**Tasks:**
+- Set up signal handlers for SIGTERM and SIGINT
+- Implement graceful shutdown sequence:
+  - Stop accepting new work
+  - Abort current suite (if any)
+  - Send final heartbeat with Offline state
+  - Close WebSocket connection
+  - Clean up resources
+- Add timeout for graceful shutdown (30 seconds)
+
+**Deliverable:** Manager shuts down cleanly on signals. All resources cleaned up, no zombie processes.
+
+**Test:** Send SIGTERM, verify manager shuts down within 30 seconds, resources cleaned.
+
+---
+
+### Piece 4.9: Token Refresh Mechanism
+
+**Goal:** Automatically refresh JWT token before expiry.
+
+**Tasks:**
+- Decode JWT token to extract expiry time
+- Check token expiry periodically (every 1 hour)
+- Refresh token when < 24 hours remaining
+- Save new token to disk
+- Reconnect WebSocket with new token
+- Handle refresh failures gracefully
+
+**Deliverable:** Manager runs long-term without token expiry. Token is refreshed automatically.
+
+**Test:** Use short-lived token (1 hour), verify token refreshed automatically.
+
+---
+
+### Testing Strategy
+
+Each piece should be tested independently:
+
+1. **Unit Tests:** Test individual functions and state transitions
+2. **Integration Tests:** Test with real coordinator or mock WebSocket server
+3. **Manual Tests:** Run binary and observe behavior
+4. **Chaos Tests:** Simulate network failures, coordinator restarts, etc.
+
+### Dependencies Between Pieces
+
+```
+4.1 (Binary Skeleton)
+ │
+ └─> 4.2 (Registration)
+      │
+      └─> 4.3 (WebSocket Connection)
+           │
+           ├─> 4.4 (Heartbeats)
+           │
+           ├─> 4.5 (Reconnection)
+           │    │
+           │    └─> 4.9 (Token Refresh)
+           │
+           └─> 4.6 (State Machine)
+                │
+                ├─> 4.7 (Suite Assignment)
+                │
+                └─> 4.8 (Graceful Shutdown)
+```
+
+Each piece builds on previous pieces, but is independently testable and verifiable before moving to the next.
+
 ## Implementation Tasks
 
 ### Task 4.1: Create mitosis-manager Binary

@@ -4,6 +4,9 @@
 
 Phase 2 focuses on implementing the API layer and coordinator endpoints for Task Suites and Node Managers. This phase builds upon the database schema established in Phase 1 and provides the HTTP/REST interface that users and managers will interact with.
 
+**Implementation Approach:**
+This phase is broken down into 13 independently runnable and testable pieces. Each piece can be developed, tested with curl, and verified in isolation before moving to the next piece. This incremental approach ensures steady progress and early detection of issues.
+
 **Key Deliverables:**
 - Rust type definitions for all API request/response schemas
 - Suite management endpoints (create, query, get details, cancel, manager assignment)
@@ -12,7 +15,7 @@ Phase 2 focuses on implementing the API layer and coordinator endpoints for Task
 - Permission checking logic
 - Tag matching algorithm
 
-**Timeline:** 1 week
+**Timeline:** 1 week (13 pieces)
 
 ## Prerequisites
 
@@ -66,13 +69,24 @@ Permission model (lines 2310-2473):
 - **11.2 JWT Token Management** (lines 2381-2442): Token lifetime, refresh logic
 - **11.3 Authentication Flow** (lines 2444-2473): Manager registration and auth
 
-## Implementation Tasks
+## Piece-by-Piece Implementation
 
-### Task 2.1: Define Rust Types in schema.rs
+Each piece below is independently runnable and testable. Complete them in order, testing each one with curl or integration tests before proceeding to the next.
 
-Create comprehensive type definitions in `src/schema.rs` or `src/api/types.rs` for all request/response types.
+---
 
-#### Suite Types
+## Piece 2.1: Define All Request/Response Types in schema.rs
+
+**Goal:** Define all Rust type definitions for API request/response schemas. These types will be used by all subsequent pieces.
+
+**Files to Modify:**
+- `src/schema.rs` or `src/api/types.rs`
+
+**Implementation Steps:**
+
+Create comprehensive type definitions for all request/response types.
+
+### Suite Types
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -692,17 +706,76 @@ pub struct SubmitTaskResp {
 }
 ```
 
+**Testing:**
+
+Run `cargo build` to verify all types compile:
+
+```bash
+cd /path/to/mitosis/coordinator
+cargo build --lib
+```
+
+Expected output: No compilation errors.
+
+Test JSON serialization/deserialization:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_suite_req_serialization() {
+        let req = CreateTaskSuiteReq {
+            name: Some("test-suite".to_string()),
+            description: None,
+            group_name: "default".to_string(),
+            tags: vec!["gpu".to_string()],
+            labels: vec!["project:ml".to_string()],
+            priority: 10,
+            worker_schedule: WorkerSchedulePlan {
+                worker_count: 4,
+                cpu_binding: None,
+                task_prefetch_count: 16,
+            },
+            env_preparation: None,
+            env_cleanup: None,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: CreateTaskSuiteReq = serde_json::from_str(&json).unwrap();
+        assert_eq!(req.name, deserialized.name);
+    }
+
+    #[test]
+    fn test_task_suite_state_conversion() {
+        assert_eq!(TaskSuiteState::from(0), TaskSuiteState::Open);
+        assert_eq!(TaskSuiteState::from(3), TaskSuiteState::Cancelled);
+        assert_eq!(i32::from(TaskSuiteState::Closed), 1);
+    }
+}
+```
+
+**Deliverables:**
+- ✅ All types compile without errors
+- ✅ Serde serialization/deserialization works for all types
+- ✅ Enum conversions (i32 ↔ enum) work correctly
+- ✅ Optional fields handled properly (skip_serializing_if)
+- ✅ Unit tests pass for all type conversions
+
 ---
 
-### Task 2.2: Implement Suite Management APIs
+## Piece 2.2: POST /suites - Create Task Suite
 
-For each endpoint, implement the following structure:
+**Goal:** Implement endpoint to create a new task suite. Suite is created in Open state with no assigned managers.
 
-#### 2.2.1 POST /suites - Create Task Suite
+**Files to Modify:**
+- `src/api/suites.rs` (create new file)
+- `src/routes.rs` (register route)
 
 **Route Definition:**
 ```rust
-// In src/routes.rs or src/api/suites.rs
+// In src/api/suites.rs
 async fn create_suite(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -711,23 +784,31 @@ async fn create_suite(
     // Implementation
 }
 
-// Register route
-Router::new()
-    .route("/suites", post(create_suite))
+// In src/routes.rs
+pub fn suite_routes() -> Router<AppState> {
+    Router::new()
+        .route("/suites", post(create_suite))
+}
 ```
 
-**Handler Implementation Outline:**
+**Implementation Steps:**
 
 1. **Validate Request**
-   - Check `worker_count` is between 1-256
-   - Validate `task_prefetch_count` > 0
-   - Validate group_name is not empty
-   - Validate timeout formats in env hooks
+   ```rust
+   if req.worker_schedule.worker_count < 1 || req.worker_schedule.worker_count > 256 {
+       return Err(ApiError::BadRequest("worker_count must be between 1 and 256"));
+   }
+   if req.worker_schedule.task_prefetch_count == 0 {
+       return Err(ApiError::BadRequest("task_prefetch_count must be > 0"));
+   }
+   if req.group_name.is_empty() {
+       return Err(ApiError::BadRequest("group_name is required"));
+   }
+   ```
 
 2. **Resolve Group ID**
    ```rust
-   let group = sqlx::query_as!(
-       Group,
+   let group = sqlx::query!(
        "SELECT id, name FROM groups WHERE name = $1",
        req.group_name
    )
@@ -737,7 +818,6 @@ Router::new()
    ```
 
 3. **Permission Check**
-   - Verify user is member of the specified group
    ```rust
    let is_member = sqlx::query_scalar!(
        "SELECT EXISTS(
@@ -760,14 +840,13 @@ Router::new()
    ```rust
    let suite_uuid = Uuid::new_v4();
 
-   let suite_id = sqlx::query_scalar!(
+   sqlx::query!(
        r#"
        INSERT INTO task_suites (
            uuid, name, description, group_id, creator_id,
            tags, labels, priority, worker_schedule,
            env_preparation, env_cleanup, state
        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0)
-       RETURNING id
        "#,
        suite_uuid,
        req.name,
@@ -781,7 +860,7 @@ Router::new()
        req.env_preparation.map(|h| serde_json::to_value(&h)).transpose()?,
        req.env_cleanup.map(|h| serde_json::to_value(&h)).transpose()?
    )
-   .fetch_one(&state.db)
+   .execute(&state.db)
    .await?;
    ```
 
@@ -797,23 +876,123 @@ Router::new()
 **Database Queries:**
 - `SELECT id, name FROM groups WHERE name = ?`
 - `SELECT EXISTS(...) FROM user_group WHERE user_id = ? AND group_id = ?`
-- `INSERT INTO task_suites (...) VALUES (...) RETURNING id`
+- `INSERT INTO task_suites (...) VALUES (...)`
 
 **Permission Checks:**
 - User must be member of specified group
 
-**Error Handling:**
-- 400 Bad Request: Invalid worker_count, malformed request
-- 403 Forbidden: User not member of group
-- 404 Not Found: Group doesn't exist
-- 500 Internal Server Error: Database errors
+**Testing with curl:**
+
+```bash
+# 1. Create a suite (minimal fields)
+curl -X POST http://localhost:8080/api/v1/suites \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "group_name": "default",
+    "tags": ["gpu"],
+    "labels": ["project:ml"],
+    "priority": 10,
+    "worker_schedule": {
+      "worker_count": 4,
+      "task_prefetch_count": 16
+    }
+  }'
+
+# Expected: 200 OK with JSON response containing suite_uuid
+# {
+#   "uuid": "123e4567-e89b-12d3-a456-426614174000",
+#   "state": "Open",
+#   "assigned_managers": []
+# }
+
+# 2. Create suite with all optional fields
+curl -X POST http://localhost:8080/api/v1/suites \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Training Run #42",
+    "description": "ResNet training with mixed precision",
+    "group_name": "ml-team",
+    "tags": ["gpu", "cuda:11.8"],
+    "labels": ["project:resnet", "phase:training"],
+    "priority": 100,
+    "worker_schedule": {
+      "worker_count": 8,
+      "cpu_binding": {
+        "cores": [0, 1, 2, 3],
+        "strategy": "Exclusive"
+      },
+      "task_prefetch_count": 32
+    },
+    "env_preparation": {
+      "args": ["bash", "-c", "echo Preparing environment"],
+      "envs": {"CUDA_VISIBLE_DEVICES": "0,1"},
+      "resources": [],
+      "timeout": "5m"
+    }
+  }'
+
+# Expected: 200 OK with suite_uuid
+
+# 3. Error case: Invalid worker_count
+curl -X POST http://localhost:8080/api/v1/suites \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "group_name": "default",
+    "tags": [],
+    "labels": [],
+    "priority": 0,
+    "worker_schedule": {
+      "worker_count": 500,
+      "task_prefetch_count": 16
+    }
+  }'
+
+# Expected: 400 Bad Request - "worker_count must be between 1 and 256"
+
+# 4. Error case: Not a member of group
+curl -X POST http://localhost:8080/api/v1/suites \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "group_name": "other-team",
+    "tags": [],
+    "labels": [],
+    "priority": 0,
+    "worker_schedule": {
+      "worker_count": 4,
+      "task_prefetch_count": 16
+    }
+  }'
+
+# Expected: 403 Forbidden - "Not a member of group"
+```
+
+**Deliverables:**
+- ✅ Route registered and handler responds to POST /suites
+- ✅ Can create suite with minimal fields
+- ✅ Can create suite with all optional fields (name, description, env hooks)
+- ✅ Returns suite_uuid in response
+- ✅ Suite created in database with state = 0 (Open)
+- ✅ Validation rejects worker_count outside 1-256 range
+- ✅ Permission check enforced (403 if not group member)
+- ✅ Returns 404 if group doesn't exist
 
 ---
 
-#### 2.2.2 GET /suites - Query Suites
+## Piece 2.3: GET /suites - Query Suites
+
+**Goal:** Implement endpoint to list and filter task suites with pagination. Returns only suites from groups the user is a member of.
+
+**Files to Modify:**
+- `src/api/suites.rs`
+- `src/routes.rs`
 
 **Route Definition:**
 ```rust
+// In src/api/suites.rs
 async fn query_suites(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -822,15 +1001,18 @@ async fn query_suites(
     // Implementation
 }
 
+// In src/routes.rs - add to suite_routes()
 Router::new()
-    .route("/suites", get(query_suites))
+    .route("/suites", get(query_suites).post(create_suite))
 ```
 
-**Handler Implementation Outline:**
+**Implementation Steps:**
 
-1. **Build Dynamic Query**
+1. **Build Base Query**
    ```rust
-   let mut query = String::from(
+   use sqlx::QueryBuilder;
+
+   let mut query = QueryBuilder::new(
        r#"
        SELECT
            ts.uuid, ts.name, ts.state, ts.priority,
@@ -840,93 +1022,158 @@ Router::new()
            g.name as group_name
        FROM task_suites ts
        JOIN groups g ON ts.group_id = g.id
-       WHERE 1=1
-       "#
+       WHERE EXISTS(
+           SELECT 1 FROM user_group
+           WHERE user_id = "#
    );
+   query.push_bind(claims.user_id);
+   query.push(" AND group_id = ts.group_id)");
+   ```
 
-   let mut bind_count = 1;
-   let mut params: Vec<Box<dyn sqlx::Encode<'_, sqlx::Postgres> + Send>> = vec![];
-
-   // Add filters
+2. **Add Optional Filters**
+   ```rust
    if let Some(group_name) = &req.group_name {
-       query.push_str(&format!(" AND g.name = ${}", bind_count));
-       params.push(Box::new(group_name.clone()));
-       bind_count += 1;
+       query.push(" AND g.name = ");
+       query.push_bind(group_name);
    }
 
    if let Some(state) = req.state {
-       query.push_str(&format!(" AND ts.state = ${}", bind_count));
-       params.push(Box::new(i32::from(state)));
-       bind_count += 1;
+       query.push(" AND ts.state = ");
+       query.push_bind(i32::from(state));
    }
 
    if !req.tags.is_empty() {
-       query.push_str(&format!(" AND ts.tags @> ${}", bind_count));
-       params.push(Box::new(req.tags.clone()));
-       bind_count += 1;
+       query.push(" AND ts.tags @> ");
+       query.push_bind(&req.tags);
    }
 
    if !req.labels.is_empty() {
-       query.push_str(&format!(" AND ts.labels @> ${}", bind_count));
-       params.push(Box::new(serde_json::to_value(&req.labels)?));
-       bind_count += 1;
+       query.push(" AND ts.labels @> ");
+       query.push_bind(serde_json::to_value(&req.labels)?);
    }
-   ```
-
-2. **Permission Filter**
-   - Only return suites from groups user is member of
-   ```rust
-   query.push_str(&format!(
-       " AND EXISTS(
-           SELECT 1 FROM user_group
-           WHERE user_id = ${} AND group_id = ts.group_id
-       )",
-       bind_count
-   ));
-   params.push(Box::new(claims.user_id));
-   bind_count += 1;
    ```
 
 3. **Add Pagination**
    ```rust
-   query.push_str(&format!(
-       " ORDER BY ts.created_at DESC LIMIT ${} OFFSET ${}",
-       bind_count, bind_count + 1
-   ));
-   params.push(Box::new(req.limit.min(100)));
-   params.push(Box::new(req.offset));
+   let limit = req.limit.min(100);
+   query.push(" ORDER BY ts.created_at DESC LIMIT ");
+   query.push_bind(limit);
+   query.push(" OFFSET ");
+   query.push_bind(req.offset);
    ```
 
 4. **Execute Query**
    ```rust
-   let rows = sqlx::query_as::<_, TaskSuiteSummary>(&query)
-       .bind_all(params)
+   let suites = query
+       .build_query_as::<TaskSuiteSummary>()
        .fetch_all(&state.db)
        .await?;
 
-   let count = rows.len() as i64;
+   let count = suites.len() as i64;
    ```
 
 5. **Return Response**
    ```rust
    Ok(Json(TaskSuiteQueryResp {
        count,
-       suites: rows,
+       suites,
    }))
    ```
 
 **Database Queries:**
 - Dynamic `SELECT` with filters on `task_suites` joined with `groups`
+- Permission filter via EXISTS subquery
 
 **Permission Checks:**
-- User must be member of suite's group (via subquery)
+- User must be member of suite's group (automatic via WHERE clause)
+
+**Testing with curl:**
+
+```bash
+# 1. List all suites (no filters)
+curl -X GET http://localhost:8080/api/v1/suites \
+  -H "Authorization: Bearer $TOKEN"
+
+# Expected: 200 OK with list of suites
+# {
+#   "count": 3,
+#   "suites": [
+#     {
+#       "uuid": "...",
+#       "name": "Suite 1",
+#       "group_name": "default",
+#       "tags": ["gpu"],
+#       "labels": ["project:ml"],
+#       "state": "Open",
+#       "priority": 10,
+#       "total_tasks": 0,
+#       "pending_tasks": 0,
+#       "created_at": "2025-01-15T10:00:00Z",
+#       "updated_at": "2025-01-15T10:00:00Z"
+#     },
+#     ...
+#   ]
+# }
+
+# 2. Filter by group_name
+curl -X GET "http://localhost:8080/api/v1/suites?group_name=ml-team" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Expected: Only suites from ml-team group
+
+# 3. Filter by state
+curl -X GET "http://localhost:8080/api/v1/suites?state=Open" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Expected: Only suites in Open state
+
+# 4. Filter by tags (containment)
+curl -X GET "http://localhost:8080/api/v1/suites?tags=gpu&tags=cuda:11.8" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Expected: Only suites that have BOTH tags
+
+# 5. Filter by labels
+curl -X GET "http://localhost:8080/api/v1/suites?labels=project:ml" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Expected: Suites with matching label
+
+# 6. Pagination
+curl -X GET "http://localhost:8080/api/v1/suites?offset=10&limit=20" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Expected: 20 suites starting from offset 10
+
+# 7. Combined filters
+curl -X GET "http://localhost:8080/api/v1/suites?group_name=default&state=Open&tags=gpu" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Expected: Suites matching all criteria
+```
+
+**Deliverables:**
+- ✅ Route registered and handler responds to GET /suites
+- ✅ Returns list of suites user has access to
+- ✅ Filters work: group_name, state, tags (array containment), labels
+- ✅ Pagination works (offset/limit)
+- ✅ Only returns suites from groups user is member of
+- ✅ Empty result set returns count=0 and empty array
+- ✅ Limit capped at 100 even if higher value requested
 
 ---
 
-#### 2.2.3 GET /suites/{uuid} - Get Suite Details
+## Piece 2.4: GET /suites/{uuid} - Get Suite Details
+
+**Goal:** Fetch complete details for a single suite, including all fields and assigned managers.
+
+**Files to Modify:**
+- `src/api/suites.rs`
+- `src/routes.rs`
 
 **Route Definition:**
 ```rust
+// In src/api/suites.rs
 async fn get_suite_details(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -935,11 +1182,12 @@ async fn get_suite_details(
     // Implementation
 }
 
+// In src/routes.rs - add to suite_routes()
 Router::new()
     .route("/suites/:uuid", get(get_suite_details))
 ```
 
-**Handler Implementation Outline:**
+**Implementation Steps:**
 
 1. **Fetch Suite**
    ```rust
@@ -986,6 +1234,7 @@ Router::new()
        FROM task_suite_managers tsm
        JOIN node_managers nm ON tsm.manager_id = nm.id
        WHERE tsm.task_suite_id = $1
+       ORDER BY tsm.assigned_at
        "#,
        suite.id
    )
@@ -1036,12 +1285,74 @@ Router::new()
 **Permission Checks:**
 - User must be member of suite's group
 
+**Testing with curl:**
+
+```bash
+# 1. Get suite details (success)
+SUITE_UUID="123e4567-e89b-12d3-a456-426614174000"
+curl -X GET http://localhost:8080/api/v1/suites/$SUITE_UUID \
+  -H "Authorization: Bearer $TOKEN"
+
+# Expected: 200 OK with full suite details
+# {
+#   "uuid": "123e4567-e89b-12d3-a456-426614174000",
+#   "name": "Training Run #42",
+#   "description": "ResNet training",
+#   "group_name": "ml-team",
+#   "creator_username": "alice",
+#   "tags": ["gpu", "cuda:11.8"],
+#   "labels": ["project:resnet"],
+#   "priority": 100,
+#   "worker_schedule": {
+#     "worker_count": 8,
+#     "task_prefetch_count": 32
+#   },
+#   "state": "Open",
+#   "last_task_submitted_at": null,
+#   "total_tasks": 0,
+#   "pending_tasks": 0,
+#   "created_at": "2025-01-15T10:00:00Z",
+#   "updated_at": "2025-01-15T10:00:00Z",
+#   "completed_at": null,
+#   "assigned_managers": []
+# }
+
+# 2. Get non-existent suite (404)
+curl -X GET http://localhost:8080/api/v1/suites/00000000-0000-0000-0000-000000000000 \
+  -H "Authorization: Bearer $TOKEN"
+
+# Expected: 404 Not Found - "Suite not found"
+
+# 3. Get suite without permission (403)
+# Use token from different user who's not in the suite's group
+curl -X GET http://localhost:8080/api/v1/suites/$SUITE_UUID \
+  -H "Authorization: Bearer $OTHER_USER_TOKEN"
+
+# Expected: 403 Forbidden - "No access to this suite"
+```
+
+**Deliverables:**
+- ✅ Route registered and handler responds to GET /suites/:uuid
+- ✅ Returns full suite details including all fields
+- ✅ Includes list of assigned manager UUIDs
+- ✅ Returns 404 for non-existent suite UUID
+- ✅ Returns 403 if user not member of suite's group
+- ✅ JSON fields properly deserialized (worker_schedule, env hooks, labels)
+- ✅ Timestamps formatted as RFC3339
+
 ---
 
-#### 2.2.4 POST /suites/{uuid}/cancel - Cancel Suite
+## Piece 2.5: POST /suites/{uuid}/cancel - Cancel Suite
+
+**Goal:** Cancel a task suite, optionally cancelling all pending/running tasks. Suite transitions to Cancelled state (terminal).
+
+**Files to Modify:**
+- `src/api/suites.rs`
+- `src/routes.rs`
 
 **Route Definition:**
 ```rust
+// In src/api/suites.rs
 async fn cancel_suite(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1051,11 +1362,12 @@ async fn cancel_suite(
     // Implementation
 }
 
+// In src/routes.rs - add to suite_routes()
 Router::new()
     .route("/suites/:uuid/cancel", post(cancel_suite))
 ```
 
-**Handler Implementation Outline:**
+**Implementation Steps:**
 
 1. **Fetch Suite**
    ```rust
@@ -1070,7 +1382,6 @@ Router::new()
 
 2. **Permission Check**
    ```rust
-   // User must be member of group
    let is_member = sqlx::query_scalar!(
        "SELECT EXISTS(SELECT 1 FROM user_group WHERE user_id = $1 AND group_id = $2)",
        claims.user_id, suite.group_id
@@ -1125,7 +1436,7 @@ Router::new()
    tx.commit().await?;
    ```
 
-7. **Notify Managers via WebSocket**
+7. **Notify Managers via WebSocket (Phase 3)**
    ```rust
    // TODO: In Phase 3, send CancelSuite message to all assigned managers
    // state.websocket_manager.broadcast_to_suite(suite_uuid, CoordinatorMessage::CancelSuite { ... }).await?;
@@ -1143,17 +1454,78 @@ Router::new()
 - `SELECT id, group_id, state FROM task_suites WHERE uuid = ?`
 - `SELECT EXISTS(...) FROM user_group WHERE user_id = ? AND group_id = ?`
 - `UPDATE task_suites SET state = 3 WHERE id = ?`
-- `UPDATE active_tasks SET state = 4 WHERE task_suite_id = ? AND state IN (0,1,2)`
+- `UPDATE active_tasks SET state = 4 WHERE task_suite_id = ? AND state IN (0,1,2)` (conditional)
 
 **Permission Checks:**
 - User must be member of suite's group
 
+**Testing with curl:**
+
+```bash
+SUITE_UUID="123e4567-e89b-12d3-a456-426614174000"
+
+# 1. Cancel suite without cancelling tasks
+curl -X POST http://localhost:8080/api/v1/suites/$SUITE_UUID/cancel \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cancel_running_tasks": false
+  }'
+
+# Expected: 200 OK
+# {
+#   "cancelled_task_count": 0,
+#   "suite_state": "Cancelled"
+# }
+
+# 2. Cancel suite WITH cancelling tasks
+curl -X POST http://localhost:8080/api/v1/suites/$SUITE_UUID/cancel \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "reason": "Stopping training early",
+    "cancel_running_tasks": true
+  }'
+
+# Expected: 200 OK with cancelled_task_count > 0
+# {
+#   "cancelled_task_count": 42,
+#   "suite_state": "Cancelled"
+# }
+
+# 3. Verify suite state is Cancelled
+curl -X GET http://localhost:8080/api/v1/suites/$SUITE_UUID \
+  -H "Authorization: Bearer $TOKEN"
+
+# Expected: Suite with state = "Cancelled"
+
+# 4. Try to submit task to cancelled suite (should fail in Piece 2.13)
+# This will be tested in Piece 2.13
+```
+
+**Deliverables:**
+- ✅ Route registered and handler responds to POST /suites/:uuid/cancel
+- ✅ Suite state updated to Cancelled (state = 3)
+- ✅ Can cancel without affecting tasks (cancel_running_tasks = false)
+- ✅ Can cancel tasks when requested (cancel_running_tasks = true)
+- ✅ Returns correct cancelled_task_count
+- ✅ Transaction ensures atomicity (suite + tasks updated together)
+- ✅ Idempotent (calling cancel multiple times doesn't fail)
+- ✅ Permission check enforced (403 if not group member)
+
 ---
 
-#### 2.2.5 POST /suites/{uuid}/managers/refresh - Refresh Tag-Matched Managers
+## Piece 2.6: POST /suites/{uuid}/managers/refresh - Tag Matching
+
+**Goal:** Implement automatic tag-based manager assignment. Remove all tag-matched managers and re-assign based on current tags.
+
+**Files to Modify:**
+- `src/api/suite_managers.rs` (create new file)
+- `src/routes.rs`
 
 **Route Definition:**
 ```rust
+// In src/api/suite_managers.rs
 async fn refresh_tag_matched_managers(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1162,11 +1534,12 @@ async fn refresh_tag_matched_managers(
     // Implementation
 }
 
+// In src/routes.rs
 Router::new()
     .route("/suites/:uuid/managers/refresh", post(refresh_tag_matched_managers))
 ```
 
-**Handler Implementation Outline:**
+**Implementation Steps:**
 
 1. **Fetch Suite**
    ```rust
@@ -1180,7 +1553,19 @@ Router::new()
    ```
 
 2. **Permission Check**
-   - User must be member of suite's group
+   ```rust
+   let is_member = sqlx::query_scalar!(
+       "SELECT EXISTS(SELECT 1 FROM user_group WHERE user_id = $1 AND group_id = $2)",
+       claims.user_id, suite.group_id
+   )
+   .fetch_one(&state.db)
+   .await?
+   .unwrap_or(false);
+
+   if !is_member {
+       return Err(ApiError::Forbidden("Not authorized"));
+   }
+   ```
 
 3. **Begin Transaction**
    ```rust
@@ -1201,7 +1586,7 @@ Router::new()
    .await?;
    ```
 
-5. **Find Eligible Managers**
+5. **Find Eligible Managers (Tag Matching Algorithm)**
    ```rust
    // Manager is eligible if:
    // 1. manager.tags contains ALL suite.tags (suite.tags ⊆ manager.tags)
@@ -1275,15 +1660,70 @@ Router::new()
 
 **Permission Checks:**
 - User must be member of suite's group
-- Tag matching: `suite.tags ⊆ manager.tags`
-- Role check: suite's group has Write/Admin on manager
+- Tag matching: `suite.tags ⊆ manager.tags` (PostgreSQL @> operator)
+- Role check: suite's group has Write/Admin (role >= 1) on manager
+
+**Testing with curl:**
+
+```bash
+SUITE_UUID="123e4567-e89b-12d3-a456-426614174000"
+
+# First, create a suite with tags=["gpu", "cuda:11.8"]
+# Register some managers with matching tags
+
+# 1. Refresh managers (initial assignment)
+curl -X POST http://localhost:8080/api/v1/suites/$SUITE_UUID/managers/refresh \
+  -H "Authorization: Bearer $TOKEN"
+
+# Expected: 200 OK
+# {
+#   "added_managers": [
+#     {
+#       "manager_uuid": "...",
+#       "matched_tags": ["gpu", "cuda:11.8"],
+#       "selection_type": "TagMatched"
+#     }
+#   ],
+#   "removed_managers": [],
+#   "total_assigned": 1
+# }
+
+# 2. Refresh again (idempotent - should remove and re-add same managers)
+curl -X POST http://localhost:8080/api/v1/suites/$SUITE_UUID/managers/refresh \
+  -H "Authorization: Bearer $TOKEN"
+
+# Expected: Same managers removed and added
+
+# 3. Verify managers assigned via GET /suites/{uuid}
+curl -X GET http://localhost:8080/api/v1/suites/$SUITE_UUID \
+  -H "Authorization: Bearer $TOKEN"
+
+# Expected: assigned_managers array contains manager UUIDs
+```
+
+**Deliverables:**
+- ✅ Route registered and handler responds to POST /suites/:uuid/managers/refresh
+- ✅ Tag matching algorithm implemented correctly (set containment)
+- ✅ Removes old tag-matched managers (selection_type = 1)
+- ✅ Adds new tag-matched managers based on tags
+- ✅ Preserves user-specified managers (selection_type = 0)
+- ✅ Permission check: group must have Write/Admin role on manager
+- ✅ Transaction ensures atomicity
+- ✅ Returns lists of added/removed managers
 
 ---
 
-#### 2.2.6 POST /suites/{uuid}/managers - Add Managers Explicitly
+## Piece 2.7: POST /suites/{uuid}/managers - Add Managers Explicitly
+
+**Goal:** Allow users to manually assign specific managers to a suite (UserSpecified selection type).
+
+**Files to Modify:**
+- `src/api/suite_managers.rs`
+- `src/routes.rs`
 
 **Route Definition:**
 ```rust
+// In src/api/suite_managers.rs
 async fn add_managers_to_suite(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1293,38 +1733,172 @@ async fn add_managers_to_suite(
     // Implementation
 }
 
+// In src/routes.rs
 Router::new()
     .route("/suites/:uuid/managers", post(add_managers_to_suite))
 ```
 
-**Handler Implementation Outline:**
+**Implementation Steps:**
 
 1. **Fetch Suite**
-2. **Permission Check** - User must be member of suite's group
-3. **For Each Manager UUID:**
-   - Check if manager exists
-   - Check if suite's group has Write/Admin role on manager
-   - If yes: Add to `task_suite_managers` with `selection_type = 0` (UserSpecified)
-   - If no: Add to rejected list
+   ```rust
+   let suite = sqlx::query!(
+       "SELECT id, group_id FROM task_suites WHERE uuid = $1",
+       suite_uuid
+   )
+   .fetch_optional(&state.db)
+   .await?
+   .ok_or(ApiError::NotFound("Suite not found"))?;
+   ```
 
-4. **Return Response** with added/rejected lists
+2. **Permission Check**
+   ```rust
+   let is_member = sqlx::query_scalar!(
+       "SELECT EXISTS(SELECT 1 FROM user_group WHERE user_id = $1 AND group_id = $2)",
+       claims.user_id, suite.group_id
+   )
+   .fetch_one(&state.db)
+   .await?
+   .unwrap_or(false);
+
+   if !is_member {
+       return Err(ApiError::Forbidden("Not authorized"));
+   }
+   ```
+
+3. **For Each Manager UUID**
+   ```rust
+   let mut added_managers = Vec::new();
+   let mut rejected_managers = Vec::new();
+
+   for manager_uuid in &req.manager_uuids {
+       // Check if manager exists and group has access
+       let manager_check = sqlx::query!(
+           r#"
+           SELECT
+               nm.id,
+               EXISTS(
+                   SELECT 1 FROM group_node_manager gnm
+                   WHERE gnm.manager_id = nm.id
+                     AND gnm.group_id = $1
+                     AND gnm.role >= 1
+               ) as has_access
+           FROM node_managers nm
+           WHERE nm.uuid = $2
+           "#,
+           suite.group_id,
+           manager_uuid
+       )
+       .fetch_optional(&state.db)
+       .await?;
+
+       match manager_check {
+           Some(row) if row.has_access.unwrap_or(false) => {
+               // Add manager with UserSpecified selection type
+               sqlx::query!(
+                   r#"
+                   INSERT INTO task_suite_managers
+                       (task_suite_id, manager_id, selection_type, matched_tags, added_by_user_id)
+                   VALUES ($1, $2, 0, ARRAY[]::text[], $3)
+                   ON CONFLICT (task_suite_id, manager_id) DO NOTHING
+                   "#,
+                   suite.id,
+                   row.id,
+                   claims.user_id
+               )
+               .execute(&state.db)
+               .await?;
+
+               added_managers.push(*manager_uuid);
+           }
+           _ => {
+               rejected_managers.push(*manager_uuid);
+           }
+       }
+   }
+   ```
+
+4. **Return Response**
+   ```rust
+   Ok(Json(AddManagersResp {
+       added_managers,
+       rejected_managers,
+       reason: if rejected_managers.is_empty() {
+           None
+       } else {
+           Some("Manager not found or group lacks permission".to_string())
+       },
+   }))
+   ```
 
 **Database Queries:**
 - `SELECT id, group_id FROM task_suites WHERE uuid = ?`
-- For each manager: `SELECT id FROM node_managers WHERE uuid = ?`
-- For each manager: `SELECT EXISTS(...) FROM group_node_manager WHERE group_id = ? AND manager_id = ? AND role >= 1`
+- For each manager: `SELECT id, EXISTS(...) FROM node_managers WHERE uuid = ?`
 - `INSERT INTO task_suite_managers (...) VALUES (...)`
 
 **Permission Checks:**
 - User must be member of suite's group
 - Suite's group must have Write/Admin role on each manager
 
+**Testing with curl:**
+
+```bash
+SUITE_UUID="123e4567-e89b-12d3-a456-426614174000"
+MANAGER_UUID_1="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+MANAGER_UUID_2="ffffffff-gggg-hhhh-iiii-jjjjjjjjjjjj"
+
+# 1. Add managers (all succeed)
+curl -X POST http://localhost:8080/api/v1/suites/$SUITE_UUID/managers \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"manager_uuids\": [\"$MANAGER_UUID_1\", \"$MANAGER_UUID_2\"]
+  }"
+
+# Expected: 200 OK
+# {
+#   "added_managers": ["aaaaaaaa-...", "ffffffff-..."],
+#   "rejected_managers": []
+# }
+
+# 2. Add manager without permission (rejected)
+curl -X POST http://localhost:8080/api/v1/suites/$SUITE_UUID/managers \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"manager_uuids\": [\"00000000-0000-0000-0000-000000000000\"]
+  }"
+
+# Expected: 200 OK (partial success)
+# {
+#   "added_managers": [],
+#   "rejected_managers": ["00000000-0000-0000-0000-000000000000"],
+#   "reason": "Manager not found or group lacks permission"
+# }
+```
+
+**Deliverables:**
+- ✅ Route registered and handler responds to POST /suites/:uuid/managers
+- ✅ Can add multiple managers at once
+- ✅ Managers added with selection_type = 0 (UserSpecified)
+- ✅ Permission check: group must have Write/Admin role on manager
+- ✅ Returns separate lists for added and rejected managers
+- ✅ ON CONFLICT DO NOTHING prevents duplicate assignments
+- ✅ Idempotent (adding same manager twice doesn't fail)
+
 ---
 
-#### 2.2.7 DELETE /suites/{uuid}/managers - Remove Managers
+## Piece 2.8: DELETE /suites/{uuid}/managers - Remove Managers
+
+**Goal:** Remove manager assignments from a suite.
+
+**Files to Modify:**
+- `src/api/suite_managers.rs`
+- `src/routes.rs`
 
 **Route Definition:**
 ```rust
+// In src/api/suite_managers.rs
 async fn remove_managers_from_suite(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1334,34 +1908,63 @@ async fn remove_managers_from_suite(
     // Implementation
 }
 
+// In src/routes.rs
 Router::new()
     .route("/suites/:uuid/managers", delete(remove_managers_from_suite))
 ```
 
-**Handler Implementation Outline:**
+**Implementation Steps:**
 
 1. **Fetch Suite**
-2. **Permission Check** - User must be member of suite's group
+   ```rust
+   let suite = sqlx::query!(
+       "SELECT id, group_id FROM task_suites WHERE uuid = $1",
+       suite_uuid
+   )
+   .fetch_optional(&state.db)
+   .await?
+   .ok_or(ApiError::NotFound("Suite not found"))?;
+   ```
+
+2. **Permission Check**
+   ```rust
+   let is_member = sqlx::query_scalar!(
+       "SELECT EXISTS(SELECT 1 FROM user_group WHERE user_id = $1 AND group_id = $2)",
+       claims.user_id, suite.group_id
+   )
+   .fetch_one(&state.db)
+   .await?
+   .unwrap_or(false);
+
+   if !is_member {
+       return Err(ApiError::Forbidden("Not authorized"));
+   }
+   ```
+
 3. **Delete Manager Assignments**
    ```rust
-   let removed_count = sqlx::query_scalar!(
+   let removed_count = sqlx::query!(
        r#"
        DELETE FROM task_suite_managers
        WHERE task_suite_id = $1
          AND manager_id IN (
            SELECT id FROM node_managers WHERE uuid = ANY($2)
          )
-       RETURNING COUNT(*)::int
        "#,
        suite.id,
        &req.manager_uuids
    )
-   .fetch_one(&state.db)
+   .execute(&state.db)
    .await?
-   .unwrap_or(0);
+   .rows_affected() as i32;
    ```
 
 4. **Return Response**
+   ```rust
+   Ok(Json(RemoveManagersResp {
+       removed_count,
+   }))
+   ```
 
 **Database Queries:**
 - `SELECT id, group_id FROM task_suites WHERE uuid = ?`
@@ -1370,14 +1973,60 @@ Router::new()
 **Permission Checks:**
 - User must be member of suite's group
 
+**Testing with curl:**
+
+```bash
+SUITE_UUID="123e4567-e89b-12d3-a456-426614174000"
+MANAGER_UUID_1="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+# 1. Remove managers
+curl -X DELETE http://localhost:8080/api/v1/suites/$SUITE_UUID/managers \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"manager_uuids\": [\"$MANAGER_UUID_1\"]
+  }"
+
+# Expected: 200 OK
+# {
+#   "removed_count": 1
+# }
+
+# 2. Remove again (idempotent - returns 0)
+curl -X DELETE http://localhost:8080/api/v1/suites/$SUITE_UUID/managers \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"manager_uuids\": [\"$MANAGER_UUID_1\"]
+  }"
+
+# Expected: 200 OK
+# {
+#   "removed_count": 0
+# }
+```
+
+**Deliverables:**
+- ✅ Route registered and handler responds to DELETE /suites/:uuid/managers
+- ✅ Can remove multiple managers at once
+- ✅ Returns count of actually removed managers
+- ✅ Idempotent (removing non-existent assignment returns 0, not error)
+- ✅ Permission check enforced
+
 ---
 
-### Task 2.3: Implement Node Manager APIs
+## Piece 2.9: POST /managers - Register Manager
 
-#### 2.3.1 POST /managers - Register Manager
+**Goal:** Register a new node manager, create JWT token, return WebSocket URL.
+
+**Files to Modify:**
+- `src/api/managers.rs` (create new file)
+- `src/routes.rs`
+- `src/auth/mod.rs` (add ManagerClaims type)
 
 **Route Definition:**
 ```rust
+// In src/api/managers.rs
 async fn register_manager(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1386,15 +2035,24 @@ async fn register_manager(
     // Implementation
 }
 
-Router::new()
-    .route("/managers", post(register_manager))
+// In src/routes.rs
+pub fn manager_routes() -> Router<AppState> {
+    Router::new()
+        .route("/managers", post(register_manager))
+}
 ```
 
-**Handler Implementation Outline:**
+**Implementation Steps:**
 
 1. **Validate Request**
-   - Check tags is not empty
-   - Validate group names
+   ```rust
+   if req.tags.is_empty() {
+       return Err(ApiError::BadRequest("tags cannot be empty"));
+   }
+   if req.groups.is_empty() {
+       return Err(ApiError::BadRequest("groups cannot be empty"));
+   }
+   ```
 
 2. **Resolve Group IDs**
    ```rust
@@ -1406,7 +2064,7 @@ Router::new()
        )
        .fetch_optional(&state.db)
        .await?
-       .ok_or(ApiError::NotFound(format!("Group '{}' not found", group_name)))?;
+       .ok_or_else(|| ApiError::NotFound(format!("Group '{}' not found", group_name)))?;
 
        group_ids.push(group_id);
    }
@@ -1431,7 +2089,7 @@ Router::new()
    .await?;
    ```
 
-4. **Insert Group Permissions**
+4. **Insert Group Permissions (Admin role)**
    ```rust
    for group_id in group_ids {
        sqlx::query!(
@@ -1449,9 +2107,12 @@ Router::new()
 
 5. **Generate JWT Token**
    ```rust
+   use jsonwebtoken::{encode, Header, Algorithm, EncodingKey};
+   use time::OffsetDateTime;
+
    let lifetime = req.lifetime.unwrap_or(Duration::from_secs(30 * 24 * 3600)); // 30 days
 
-   let claims = ManagerClaims {
+   let jwt_claims = ManagerClaims {
        sub: manager_uuid.to_string(),
        exp: (OffsetDateTime::now_utc() + lifetime).unix_timestamp(),
        iat: OffsetDateTime::now_utc().unix_timestamp(),
@@ -1460,8 +2121,8 @@ Router::new()
 
    let token = encode(
        &Header::new(Algorithm::EdDSA),
-       &claims,
-       &state.signing_key
+       &jwt_claims,
+       &state.jwt_encoding_key
    )?;
    ```
 
@@ -1482,12 +2143,77 @@ Router::new()
 **Permission Checks:**
 - User must be authenticated (have valid JWT)
 
+**Testing with curl:**
+
+```bash
+# 1. Register manager with valid groups
+curl -X POST http://localhost:8080/api/v1/managers \
+  -H "Authorization: Bearer $USER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tags": ["gpu", "cuda:11.8", "linux"],
+    "labels": ["datacenter:us-west", "rack:42"],
+    "groups": ["ml-team", "gpu-cluster"]
+  }'
+
+# Expected: 200 OK
+# {
+#   "manager_uuid": "deadbeef-1234-5678-9abc-def012345678",
+#   "token": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+#   "websocket_url": "http://localhost:8080/ws/managers"
+# }
+
+# 2. Save manager token for later use
+MANAGER_TOKEN="eyJ0eXAiOiJKV1QiLCJhbGc..."
+
+# 3. Error: Empty tags
+curl -X POST http://localhost:8080/api/v1/managers \
+  -H "Authorization: Bearer $USER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tags": [],
+    "labels": [],
+    "groups": ["default"]
+  }'
+
+# Expected: 400 Bad Request - "tags cannot be empty"
+
+# 4. Error: Non-existent group
+curl -X POST http://localhost:8080/api/v1/managers \
+  -H "Authorization: Bearer $USER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tags": ["cpu"],
+    "labels": [],
+    "groups": ["non-existent-group"]
+  }'
+
+# Expected: 404 Not Found - "Group 'non-existent-group' not found"
+```
+
+**Deliverables:**
+- ✅ Route registered and handler responds to POST /managers
+- ✅ Manager created in database with Idle state (state = 0)
+- ✅ JWT token generated with manager claims (manager: true)
+- ✅ WebSocket URL returned in response
+- ✅ Group permissions created with Admin role (role = 2)
+- ✅ Validation rejects empty tags/groups
+- ✅ Returns 404 if group doesn't exist
+
 ---
 
-#### 2.3.2 POST /managers/heartbeat - Manager Heartbeat
+## Piece 2.10: POST /managers/heartbeat - Manager Heartbeat
+
+**Goal:** Allow managers to send heartbeats to update their state and metrics.
+
+**Files to Modify:**
+- `src/api/managers.rs`
+- `src/routes.rs`
+- `src/middleware/auth.rs` (add manager auth middleware)
 
 **Route Definition:**
 ```rust
+// In src/api/managers.rs
 async fn manager_heartbeat(
     State(state): State<AppState>,
     Extension(manager_claims): Extension<ManagerClaims>,
@@ -1496,63 +2222,136 @@ async fn manager_heartbeat(
     // Implementation
 }
 
+// In src/routes.rs - add to manager_routes()
 Router::new()
     .route("/managers/heartbeat", post(manager_heartbeat))
 ```
 
-**Handler Implementation Outline:**
+**Implementation Steps:**
 
 1. **Extract Manager UUID from JWT**
    ```rust
-   let manager_uuid = Uuid::parse_str(&manager_claims.sub)?;
+   let manager_uuid = Uuid::parse_str(&manager_claims.sub)
+       .map_err(|_| ApiError::BadRequest("Invalid manager UUID in token"))?;
    ```
 
-2. **Update Manager Record**
+2. **Resolve Suite ID (if assigned)**
+   ```rust
+   let assigned_suite_id = if let Some(suite_uuid) = req.assigned_suite_uuid {
+       sqlx::query_scalar!(
+           "SELECT id FROM task_suites WHERE uuid = $1",
+           suite_uuid
+       )
+       .fetch_optional(&state.db)
+       .await?
+   } else {
+       None
+   };
+   ```
+
+3. **Update Manager Record**
    ```rust
    sqlx::query!(
        r#"
        UPDATE node_managers
        SET last_heartbeat = NOW(),
            state = $1,
-           assigned_task_suite_id = (
-               SELECT id FROM task_suites WHERE uuid = $2
-           ),
+           assigned_task_suite_id = $2,
            updated_at = NOW()
        WHERE uuid = $3
        "#,
        i32::from(req.state),
-       req.assigned_suite_uuid,
+       assigned_suite_id,
        manager_uuid
    )
    .execute(&state.db)
    .await?;
    ```
 
-3. **Store Metrics (Optional)**
+4. **Store Metrics (Optional)**
    ```rust
    if let Some(metrics) = req.metrics {
-       // TODO: Store in metrics table or send to monitoring system
-       tracing::info!("Manager {} metrics: {:?}", manager_uuid, metrics);
+       tracing::info!(
+           "Manager {} metrics: workers={}, completed={}, failed={}",
+           manager_uuid,
+           metrics.active_workers,
+           metrics.tasks_completed,
+           metrics.tasks_failed
+       );
+       // TODO: Store in time-series database or send to monitoring system
    }
    ```
 
-4. **Return Success**
+5. **Return Success**
    ```rust
    Ok(StatusCode::NO_CONTENT)
    ```
 
 **Database Queries:**
+- `SELECT id FROM task_suites WHERE uuid = ?` (conditional)
 - `UPDATE node_managers SET last_heartbeat = NOW(), state = ?, assigned_task_suite_id = ? WHERE uuid = ?`
 
 **Permission Checks:**
 - Manager must have valid JWT token
 
+**Testing with curl:**
+
+```bash
+MANAGER_TOKEN="eyJ0eXAiOiJKV1QiLCJhbGc..."
+
+# 1. Send heartbeat (Idle state)
+curl -X POST http://localhost:8080/api/v1/managers/heartbeat \
+  -H "Authorization: Bearer $MANAGER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "state": "Idle"
+  }'
+
+# Expected: 204 No Content
+
+# 2. Send heartbeat with assigned suite
+SUITE_UUID="123e4567-e89b-12d3-a456-426614174000"
+curl -X POST http://localhost:8080/api/v1/managers/heartbeat \
+  -H "Authorization: Bearer $MANAGER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"state\": \"Executing\",
+    \"assigned_suite_uuid\": \"$SUITE_UUID\",
+    \"metrics\": {
+      \"active_workers\": 8,
+      \"tasks_completed\": 142,
+      \"tasks_failed\": 3
+    }
+  }"
+
+# Expected: 204 No Content
+
+# 3. Verify last_heartbeat updated
+# Query manager via GET /managers (Piece 2.11) and check last_heartbeat timestamp
+```
+
+**Deliverables:**
+- ✅ Route registered and handler responds to POST /managers/heartbeat
+- ✅ Updates last_heartbeat timestamp
+- ✅ Updates manager state
+- ✅ Updates assigned_task_suite_id
+- ✅ Accepts and logs metrics
+- ✅ Returns 204 No Content on success
+- ✅ Manager authentication required (JWT with manager: true claim)
+
 ---
 
-#### 2.3.3 GET /managers - Query Managers
+## Piece 2.11: GET /managers - Query Managers
+
+**Goal:** List and filter node managers with pagination.
+
+**Files to Modify:**
+- `src/api/managers.rs`
+- `src/routes.rs`
 
 **Route Definition:**
 ```rust
+// In src/api/managers.rs
 async fn query_managers(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1561,32 +2360,149 @@ async fn query_managers(
     // Implementation
 }
 
+// In src/routes.rs - add to manager_routes()
 Router::new()
-    .route("/managers", get(query_managers))
+    .route("/managers", get(query_managers).post(register_manager))
 ```
 
-**Handler Implementation Outline:**
+**Implementation Steps:**
 
-1. **Build Dynamic Query** (similar to suite query)
-   - Filter by group_name, tags, state
-   - Add permission check (user must be member of groups that have access to managers)
+1. **Build Base Query**
+   ```rust
+   use sqlx::QueryBuilder;
 
-2. **Execute Query with Pagination**
+   let mut query = QueryBuilder::new(
+       r#"
+       SELECT
+           nm.uuid, nm.tags, nm.labels, nm.state,
+           nm.last_heartbeat, nm.created_at,
+           u.username as creator_username,
+           ts.uuid as assigned_suite_uuid
+       FROM node_managers nm
+       JOIN users u ON nm.creator_id = u.id
+       LEFT JOIN task_suites ts ON nm.assigned_task_suite_id = ts.id
+       WHERE EXISTS(
+           SELECT 1 FROM group_node_manager gnm
+           JOIN user_group ug ON gnm.group_id = ug.group_id
+           WHERE gnm.manager_id = nm.id
+             AND ug.user_id = "#
+   );
+   query.push_bind(claims.user_id);
+   query.push(")");
+   ```
 
-3. **Return Response**
+2. **Add Optional Filters**
+   ```rust
+   if let Some(group_name) = &req.group_name {
+       query.push(" AND EXISTS(SELECT 1 FROM group_node_manager gnm JOIN groups g ON gnm.group_id = g.id WHERE gnm.manager_id = nm.id AND g.name = ");
+       query.push_bind(group_name);
+       query.push(")");
+   }
+
+   if let Some(state) = req.state {
+       query.push(" AND nm.state = ");
+       query.push_bind(i32::from(state));
+   }
+
+   if !req.tags.is_empty() {
+       query.push(" AND nm.tags @> ");
+       query.push_bind(&req.tags);
+   }
+   ```
+
+3. **Add Pagination**
+   ```rust
+   let limit = req.limit.min(100);
+   query.push(" ORDER BY nm.created_at DESC LIMIT ");
+   query.push_bind(limit);
+   query.push(" OFFSET ");
+   query.push_bind(req.offset);
+   ```
+
+4. **Execute Query**
+   ```rust
+   let managers = query
+       .build_query_as::<ManagerSummary>()
+       .fetch_all(&state.db)
+       .await?;
+
+   let count = managers.len() as i64;
+   ```
+
+5. **Return Response**
+   ```rust
+   Ok(Json(ManagerQueryResp {
+       count,
+       managers,
+   }))
+   ```
 
 **Database Queries:**
-- Dynamic `SELECT` with filters on `node_managers` joined with `groups` and `users`
+- Dynamic `SELECT` with filters on `node_managers` joined with `users` and `task_suites`
+- Permission filter via EXISTS subquery
 
 **Permission Checks:**
 - User must be member of groups that have access to managers
 
+**Testing with curl:**
+
+```bash
+# 1. List all managers
+curl -X GET http://localhost:8080/api/v1/managers \
+  -H "Authorization: Bearer $USER_TOKEN"
+
+# Expected: 200 OK with list of managers
+# {
+#   "count": 2,
+#   "managers": [
+#     {
+#       "uuid": "...",
+#       "creator_username": "alice",
+#       "tags": ["gpu", "cuda:11.8"],
+#       "labels": ["datacenter:us-west"],
+#       "state": "Idle",
+#       "last_heartbeat": "2025-01-15T10:05:00Z",
+#       "assigned_suite_uuid": null,
+#       "created_at": "2025-01-15T10:00:00Z"
+#     }
+#   ]
+# }
+
+# 2. Filter by state
+curl -X GET "http://localhost:8080/api/v1/managers?state=Executing" \
+  -H "Authorization: Bearer $USER_TOKEN"
+
+# Expected: Only managers in Executing state
+
+# 3. Filter by tags
+curl -X GET "http://localhost:8080/api/v1/managers?tags=gpu&tags=cuda:11.8" \
+  -H "Authorization: Bearer $USER_TOKEN"
+
+# Expected: Only managers with both tags
+```
+
+**Deliverables:**
+- ✅ Route registered and handler responds to GET /managers
+- ✅ Returns list of managers user has access to
+- ✅ Filters work: group_name, state, tags
+- ✅ Pagination works (offset/limit)
+- ✅ Only returns managers from groups user is member of
+- ✅ Includes assigned_suite_uuid if manager is assigned
+- ✅ Limit capped at 100
+
 ---
 
-#### 2.3.4 POST /managers/{uuid}/shutdown - Shutdown Manager
+## Piece 2.12: POST /managers/{uuid}/shutdown - Shutdown Manager
+
+**Goal:** Request manager shutdown (graceful or force). In Phase 3, this will send WebSocket message to manager.
+
+**Files to Modify:**
+- `src/api/managers.rs`
+- `src/routes.rs`
 
 **Route Definition:**
 ```rust
+// In src/api/managers.rs
 async fn shutdown_manager(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1596,11 +2512,12 @@ async fn shutdown_manager(
     // Implementation
 }
 
+// In src/routes.rs - add to manager_routes()
 Router::new()
     .route("/managers/:uuid/shutdown", post(shutdown_manager))
 ```
 
-**Handler Implementation Outline:**
+**Implementation Steps:**
 
 1. **Fetch Manager**
    ```rust
@@ -1613,8 +2530,7 @@ Router::new()
    .ok_or(ApiError::NotFound("Manager not found"))?;
    ```
 
-2. **Permission Check**
-   - User must have Admin role on manager
+2. **Permission Check (Admin role required)**
    ```rust
    let is_admin = sqlx::query_scalar!(
        r#"
@@ -1638,13 +2554,17 @@ Router::new()
    }
    ```
 
-3. **Send Shutdown Message via WebSocket**
+3. **Send Shutdown Message via WebSocket (Phase 3)**
    ```rust
    // TODO: In Phase 3, send shutdown message to manager
    // state.websocket_manager.send_to_manager(
    //     manager_uuid,
-   //     CoordinatorMessage::Shutdown { graceful: matches!(req.op, ShutdownOp::Graceful) }
+   //     CoordinatorMessage::Shutdown {
+   //         graceful: matches!(req.op, ShutdownOp::Graceful)
+   //     }
    // ).await?;
+
+   tracing::info!("Shutdown requested for manager {}: {:?}", manager_uuid, req.op);
    ```
 
 4. **Return Response**
@@ -1659,110 +2579,338 @@ Router::new()
 - `SELECT EXISTS(...) FROM group_node_manager JOIN user_group WHERE ... AND role = 2`
 
 **Permission Checks:**
-- User must have Admin role on manager (via group membership)
+- User must have Admin role (role = 2) on manager via group membership
+
+**Testing with curl:**
+
+```bash
+MANAGER_UUID="deadbeef-1234-5678-9abc-def012345678"
+
+# 1. Request graceful shutdown (with Admin role)
+curl -X POST http://localhost:8080/api/v1/managers/$MANAGER_UUID/shutdown \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "op": "Graceful"
+  }'
+
+# Expected: 200 OK
+# {
+#   "state": "Idle"
+# }
+
+# 2. Request force shutdown
+curl -X POST http://localhost:8080/api/v1/managers/$MANAGER_UUID/shutdown \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "op": "Force"
+  }'
+
+# Expected: 200 OK
+
+# 3. Error: Without Admin role
+curl -X POST http://localhost:8080/api/v1/managers/$MANAGER_UUID/shutdown \
+  -H "Authorization: Bearer $NON_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "op": "Graceful"
+  }'
+
+# Expected: 403 Forbidden - "Requires Admin role on manager"
+```
+
+**Deliverables:**
+- ✅ Route registered and handler responds to POST /managers/:uuid/shutdown
+- ✅ Permission check: requires Admin role (role = 2)
+- ✅ Logs shutdown request (will send WebSocket message in Phase 3)
+- ✅ Returns current manager state
+- ✅ Handles both Graceful and Force shutdown ops
+- ✅ Returns 403 if user lacks Admin role
+- ✅ Returns 404 if manager doesn't exist
 
 ---
 
-### Task 2.4: Update Task Submission API
+## Piece 2.13: Update POST /tasks to Support suite_uuid
 
-**Modifications to Existing Endpoint:**
+**Goal:** Update existing task submission endpoint to support optional suite_uuid field. Link tasks to suites and trigger database counters.
+
+**Files to Modify:**
+- `src/api/tasks.rs` (existing file)
+- `src/schema.rs` (already updated in Piece 2.1)
 
 **Route:** `POST /tasks` (existing)
 
-**Updated Handler:**
-```rust
-async fn submit_task(
-    State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
-    Json(req): Json<SubmitTaskReq>,
-) -> Result<Json<SubmitTaskResp>, ApiError> {
-    // ... existing validation code ...
+**Implementation Steps:**
 
-    // NEW: Resolve suite_id if suite_uuid provided
-    let task_suite_id = if let Some(suite_uuid) = req.suite_uuid {
-        // Fetch suite
-        let suite = sqlx::query!(
-            "SELECT id, group_id, state FROM task_suites WHERE uuid = $1",
-            suite_uuid
-        )
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or(ApiError::NotFound("Suite not found"))?;
+1. **Update SubmitTaskReq Type (Already done in Piece 2.1)**
+   ```rust
+   // In src/schema.rs
+   #[derive(Debug, Clone, Serialize, Deserialize)]
+   pub struct SubmitTaskReq {
+       pub group_name: String,
 
-        // Check suite is not cancelled
-        if suite.state == 3 {
-            return Err(ApiError::BadRequest("Cannot submit tasks to cancelled suite"));
-        }
+       /// NEW: Optional suite UUID to assign task to
+       #[serde(default, skip_serializing_if = "Option::is_none")]
+       pub suite_uuid: Option<Uuid>,
 
-        // Permission check: user must be member of suite's group
-        let is_member = sqlx::query_scalar!(
-            "SELECT EXISTS(SELECT 1 FROM user_group WHERE user_id = $1 AND group_id = $2)",
-            claims.user_id,
-            suite.group_id
-        )
-        .fetch_one(&state.db)
-        .await?
-        .unwrap_or(false);
+       // ... existing fields ...
+   }
+   ```
 
-        if !is_member {
-            return Err(ApiError::Forbidden("Not authorized to submit to this suite"));
-        }
+2. **Add Suite Resolution Logic (in existing submit_task handler)**
+   ```rust
+   // In src/api/tasks.rs - modify existing submit_task function
 
-        Some(suite.id)
-    } else {
-        None
-    };
+   // ... existing validation code ...
 
-    // ... existing task insertion code ...
+   // NEW: Resolve suite_id if suite_uuid provided
+   let task_suite_id = if let Some(suite_uuid) = req.suite_uuid {
+       // Fetch suite
+       let suite = sqlx::query!(
+           "SELECT id, group_id, state FROM task_suites WHERE uuid = $1",
+           suite_uuid
+       )
+       .fetch_optional(&state.db)
+       .await?
+       .ok_or(ApiError::NotFound("Suite not found"))?;
 
-    // MODIFIED: Add task_suite_id to INSERT
-    let task_id = sqlx::query_scalar!(
-        r#"
-        INSERT INTO active_tasks (
-            uuid, group_id, task_suite_id, tags, labels,
-            priority, timeout, task_spec, state, submitter_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9)
-        RETURNING id
-        "#,
-        task_uuid,
-        group_id,
-        task_suite_id,  // NEW field
-        &req.tags,
-        serde_json::to_value(&req.labels)?,
-        req.priority,
-        req.timeout,
-        serde_json::to_value(&req.task_spec)?,
-        claims.user_id
-    )
-    .fetch_one(&state.db)
-    .await?;
+       // Check suite is not cancelled
+       if suite.state == 3 {
+           return Err(ApiError::BadRequest("Cannot submit tasks to cancelled suite"));
+       }
 
-    // Return response with suite_uuid
-    Ok(Json(SubmitTaskResp {
-        task_id,
-        uuid: task_uuid,
-        suite_uuid: req.suite_uuid,
-    }))
-}
-```
+       // Permission check: user must be member of suite's group
+       let is_member = sqlx::query_scalar!(
+           "SELECT EXISTS(SELECT 1 FROM user_group WHERE user_id = $1 AND group_id = $2)",
+           claims.user_id,
+           suite.group_id
+       )
+       .fetch_one(&state.db)
+       .await?
+       .unwrap_or(false);
 
-**Key Changes:**
-1. Add optional `suite_uuid` field to `SubmitTaskReq`
-2. Resolve suite_id from suite_uuid
-3. Validate suite exists and is not cancelled
-4. Permission check: user must be member of suite's group
-5. Add `task_suite_id` to INSERT statement
-6. Database trigger will auto-update suite's `total_tasks`, `pending_tasks`, and `last_task_submitted_at`
+       if !is_member {
+           return Err(ApiError::Forbidden("Not authorized to submit to this suite"));
+       }
+
+       Some(suite.id)
+   } else {
+       None
+   };
+   ```
+
+3. **Update INSERT Statement**
+   ```rust
+   // MODIFIED: Add task_suite_id to INSERT
+   let task_id = sqlx::query_scalar!(
+       r#"
+       INSERT INTO active_tasks (
+           uuid, group_id, task_suite_id, tags, labels,
+           priority, timeout, task_spec, state, submitter_id
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9)
+       RETURNING id
+       "#,
+       task_uuid,
+       group_id,
+       task_suite_id,  // NEW field
+       &req.tags,
+       serde_json::to_value(&req.labels)?,
+       req.priority,
+       req.timeout.map(|d| d.as_secs() as i32),
+       serde_json::to_value(&req.task_spec)?,
+       claims.user_id
+   )
+   .fetch_one(&state.db)
+   .await?;
+
+   // NOTE: Database trigger on_task_submitted() will automatically update:
+   // - suite.total_tasks += 1
+   // - suite.pending_tasks += 1
+   // - suite.last_task_submitted_at = NOW()
+   // - suite.state = 0 (if was Closed or Complete)
+   ```
+
+4. **Update Response**
+   ```rust
+   // Return response with suite_uuid
+   Ok(Json(SubmitTaskResp {
+       task_id,
+       uuid: task_uuid,
+       suite_uuid: req.suite_uuid,  // Echo back
+   }))
+   ```
 
 **Database Queries (Added):**
-- `SELECT id, group_id, state FROM task_suites WHERE uuid = ?`
-- `SELECT EXISTS(...) FROM user_group WHERE user_id = ? AND group_id = ?`
+- `SELECT id, group_id, state FROM task_suites WHERE uuid = ?` (conditional)
+- `SELECT EXISTS(...) FROM user_group WHERE user_id = ? AND group_id = ?` (conditional)
+- Modified: `INSERT INTO active_tasks (..., task_suite_id, ...) VALUES (...)`
 
 **Permission Checks (Added):**
-- User must be member of suite's group
+- User must be member of suite's group (if suite_uuid provided)
+
+**Database Trigger Integration:**
+
+The `on_task_submitted()` trigger (created in Phase 1) will automatically:
+- Increment `task_suites.total_tasks`
+- Increment `task_suites.pending_tasks`
+- Update `task_suites.last_task_submitted_at` to NOW()
+- Set `task_suites.state` to 0 (Open) if it was Closed (1) or Complete (2)
+
+**Testing with curl:**
+
+```bash
+# 1. Submit task without suite (independent task)
+curl -X POST http://localhost:8080/api/v1/tasks \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "group_name": "default",
+    "tags": ["cpu"],
+    "labels": [],
+    "priority": 0,
+    "task_spec": {
+      "args": ["echo", "hello"],
+      "envs": {},
+      "resources": []
+    }
+  }'
+
+# Expected: 200 OK (suite_uuid is null)
+# {
+#   "task_id": 123,
+#   "uuid": "...",
+#   "suite_uuid": null
+# }
+
+# 2. Submit task to suite
+SUITE_UUID="123e4567-e89b-12d3-a456-426614174000"
+curl -X POST http://localhost:8080/api/v1/tasks \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"group_name\": \"ml-team\",
+    \"suite_uuid\": \"$SUITE_UUID\",
+    \"tags\": [\"gpu\"],
+    \"labels\": [],
+    \"priority\": 10,
+    \"task_spec\": {
+      \"args\": [\"python\", \"train.py\"],
+      \"envs\": {},
+      \"resources\": []
+    }
+  }"
+
+# Expected: 200 OK with suite_uuid echoed back
+# {
+#   "task_id": 124,
+#   "uuid": "...",
+#   "suite_uuid": "123e4567-e89b-12d3-a456-426614174000"
+# }
+
+# 3. Verify suite counters updated via GET /suites/{uuid}
+curl -X GET http://localhost:8080/api/v1/suites/$SUITE_UUID \
+  -H "Authorization: Bearer $TOKEN"
+
+# Expected: total_tasks = 1, pending_tasks = 1, last_task_submitted_at is recent
+
+# 4. Submit multiple tasks and verify counters
+for i in {1..10}; do
+  curl -X POST http://localhost:8080/api/v1/tasks \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"group_name\": \"ml-team\",
+      \"suite_uuid\": \"$SUITE_UUID\",
+      \"tags\": [\"gpu\"],
+      \"labels\": [],
+      \"priority\": 0,
+      \"task_spec\": {
+        \"args\": [\"echo\", \"task-$i\"],
+        \"envs\": {},
+        \"resources\": []
+      }
+    }"
+done
+
+# Expected: total_tasks = 11, pending_tasks = 11
+
+# 5. Error: Submit to non-existent suite
+curl -X POST http://localhost:8080/api/v1/tasks \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "group_name": "default",
+    "suite_uuid": "00000000-0000-0000-0000-000000000000",
+    "tags": [],
+    "labels": [],
+    "priority": 0,
+    "task_spec": {
+      "args": ["echo", "test"],
+      "envs": {},
+      "resources": []
+    }
+  }'
+
+# Expected: 404 Not Found - "Suite not found"
+
+# 6. Error: Submit to cancelled suite
+# First cancel a suite, then try to submit
+curl -X POST http://localhost:8080/api/v1/suites/$SUITE_UUID/cancel \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"cancel_running_tasks": false}'
+
+curl -X POST http://localhost:8080/api/v1/tasks \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"group_name\": \"ml-team\",
+    \"suite_uuid\": \"$SUITE_UUID\",
+    \"tags\": [],
+    \"labels\": [],
+    \"priority\": 0,
+    \"task_spec\": {
+      \"args\": [\"echo\", \"test\"],
+      \"envs\": {},
+      \"resources\": []
+    }
+  }"
+
+# Expected: 400 Bad Request - "Cannot submit tasks to cancelled suite"
+
+# 7. Error: Submit to suite without permission
+curl -X POST http://localhost:8080/api/v1/tasks \
+  -H "Authorization: Bearer $OTHER_USER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"group_name\": \"ml-team\",
+    \"suite_uuid\": \"$SUITE_UUID\",
+    \"tags\": [],
+    \"labels\": [],
+    \"priority\": 0,
+    \"task_spec\": {
+      \"args\": [\"echo\", \"test\"],
+      \"envs\": {},
+      \"resources\": []
+    }
+  }"
+
+# Expected: 403 Forbidden - "Not authorized to submit to this suite"
+```
+
+**Deliverables:**
+- ✅ Existing POST /tasks endpoint updated
+- ✅ Accepts optional suite_uuid field
+- ✅ Links task to suite via task_suite_id foreign key
+- ✅ Validates suite exists and is not cancelled
+- ✅ Permission check: user must be member of suite's group
+- ✅ Database trigger updates suite counters automatically
+- ✅ Returns suite_uuid in response
+- ✅ Backward compatible (can still submit independent tasks without suite_uuid)
+- ✅ Suite state transitions from Closed/Complete → Open on new task submission
 
 ---
-
 ## Testing Checklist
 
 ### Unit Tests

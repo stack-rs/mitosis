@@ -295,3 +295,37 @@ impl Display for WorkerState {
         }
     }
 }
+
+#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
+#[sea_orm(rs_type = "i32", db_type = "Integer")]
+pub enum TaskSuiteState {
+    /// Suite is accepting new tasks
+    Open = 0,
+    /// Suite is closed to new tasks but tasks can still be executed
+    Closed = 1,
+    /// All tasks in the suite have completed
+    Complete = 2,
+    /// Suite has been cancelled
+    Cancelled = 3,
+}
+
+impl Display for TaskSuiteState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TaskSuiteState::Open => write!(f, "Open"),
+            TaskSuiteState::Closed => write!(f, "Closed"),
+            TaskSuiteState::Complete => write!(f, "Complete"),
+            TaskSuiteState::Cancelled => write!(f, "Cancelled"),
+        }
+    }
+}
+
+impl TaskSuiteState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Complete | Self::Cancelled)
+    }
+
+    pub fn can_accept_tasks(&self) -> bool {
+        matches!(self, Self::Open)
+    }
+}

@@ -10,6 +10,8 @@
 - [Running a Client](guide/client.md)
 - [Managing multiple Workers](guide/manager.md)
 - [Architecture Overview](guide/architecture.md)
+- [Task Suites](guide/task-suite.md)
+- [Node Managers](guide/node-manager.md)
 - [Troubleshooting](guide/troubleshooting.md)
 
 # Developer Guide

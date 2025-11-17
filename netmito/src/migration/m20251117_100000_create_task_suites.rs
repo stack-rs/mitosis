@@ -27,73 +27,81 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(TaskSuites::Name).text())
                     .col(ColumnDef::new(TaskSuites::Description).text())
                     .col(ColumnDef::new(TaskSuites::GroupId).big_integer().not_null())
-                    .col(ColumnDef::new(TaskSuites::CreatorId).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(TaskSuites::CreatorId)
+                            .big_integer()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(TaskSuites::Tags)
                             .array(ColumnType::Text)
-                            .not_null()
-                            .default(Expr::val("{}"))
+                            .not_null(),
                     )
                     .col(
                         ColumnDef::new(TaskSuites::Labels)
                             .array(ColumnType::Text)
-                            .not_null()
-                            .default(Expr::val("{}"))
+                            .not_null(),
                     )
                     .col(
                         ColumnDef::new(TaskSuites::Priority)
                             .integer()
                             .not_null()
-                            .default(0)
+                            .default(0),
                     )
-                    .col(ColumnDef::new(TaskSuites::WorkerSchedule).json_binary().not_null())
+                    .col(
+                        ColumnDef::new(TaskSuites::WorkerSchedule)
+                            .json_binary()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(TaskSuites::EnvPreparation).json_binary())
                     .col(ColumnDef::new(TaskSuites::EnvCleanup).json_binary())
                     .col(
                         ColumnDef::new(TaskSuites::State)
                             .integer()
                             .not_null()
-                            .default(0)
+                            .default(0),
                     )
                     .col(ColumnDef::new(TaskSuites::LastTaskSubmittedAt).timestamp_with_time_zone())
                     .col(
                         ColumnDef::new(TaskSuites::TotalTasks)
                             .integer()
                             .not_null()
-                            .default(0)
+                            .default(0),
                     )
                     .col(
                         ColumnDef::new(TaskSuites::PendingTasks)
                             .integer()
                             .not_null()
-                            .default(0)
+                            .default(0),
                     )
                     .col(
                         ColumnDef::new(TaskSuites::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null()
-                            .default(Expr::current_timestamp())
+                            .default(Expr::current_timestamp()),
                     )
                     .col(
                         ColumnDef::new(TaskSuites::UpdatedAt)
                             .timestamp_with_time_zone()
                             .not_null()
-                            .default(Expr::current_timestamp())
+                            .default(Expr::current_timestamp()),
                     )
                     .col(ColumnDef::new(TaskSuites::CompletedAt).timestamp_with_time_zone())
                     .foreign_key(
                         ForeignKey::create()
-                            .name("fk_task_suites_group")
+                            .name("fk-task_suites-group")
                             .from(TaskSuites::Table, TaskSuites::GroupId)
                             .to(Groups::Table, Groups::Id)
                             .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
                     )
                     .foreign_key(
                         ForeignKey::create()
-                            .name("fk_task_suites_creator")
+                            .name("fk-task_suites-creator")
                             .from(TaskSuites::Table, TaskSuites::CreatorId)
                             .to(Users::Table, Users::Id)
                             .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
             )
@@ -103,7 +111,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_task_suites_group_id")
+                    .name("idx_task_suites-group_id")
                     .table(TaskSuites::Table)
                     .col(TaskSuites::GroupId)
                     .to_owned(),
@@ -113,7 +121,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_task_suites_creator_id")
+                    .name("idx_task_suites-creator_id")
                     .table(TaskSuites::Table)
                     .col(TaskSuites::CreatorId)
                     .to_owned(),
@@ -123,29 +131,47 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_task_suites_state")
+                    .name("idx_task_suites-state")
                     .table(TaskSuites::Table)
                     .col(TaskSuites::State)
                     .to_owned(),
             )
             .await?;
 
-        // GIN indexes for array columns (use raw SQL)
+        // GIN indexes for array columns
         manager
-            .get_connection()
-            .execute_unprepared("CREATE INDEX idx_task_suites_tags ON task_suites USING GIN(tags)")
+            .create_index(
+                sea_query::Index::create()
+                    .if_not_exists()
+                    .name("idx_tasks_suites-tags_gin")
+                    .table(TaskSuites::Table)
+                    .col(TaskSuites::Tags)
+                    .full_text()
+                    .to_owned(),
+            )
             .await?;
 
         manager
-            .get_connection()
-            .execute_unprepared("CREATE INDEX idx_task_suites_labels ON task_suites USING GIN(labels)")
+            .create_index(
+                sea_query::Index::create()
+                    .if_not_exists()
+                    .name("idx_tasks_suites-labels_gin")
+                    .table(TaskSuites::Table)
+                    .col(TaskSuites::Labels)
+                    .full_text()
+                    .to_owned(),
+            )
             .await?;
-
         // Partial index for auto-close timeout queries
         manager
-            .get_connection()
-            .execute_unprepared(
-                "CREATE INDEX idx_task_suites_auto_close ON task_suites(last_task_submitted_at) WHERE state = 0"
+            .create_index(
+                sea_query::Index::create()
+                    .if_not_exists()
+                    .name("idx_task_suites-auto_close")
+                    .table(TaskSuites::Table)
+                    .col(TaskSuites::LastTaskSubmittedAt)
+                    .and_where(Expr::col(TaskSuites::State).eq(0))
+                    .to_owned(),
             )
             .await?;
 
@@ -153,6 +179,48 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_index(
+                sea_query::Index::drop()
+                    .name("idx_task_suites-auto_close")
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_index(
+                sea_query::Index::drop()
+                    .name("idx_tasks_suites-labels_gin")
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_index(
+                sea_query::Index::drop()
+                    .name("idx_tasks_suites-tags_gin")
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_index(
+                sea_query::Index::drop()
+                    .name("idx_task_suites-state")
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_index(
+                sea_query::Index::drop()
+                    .name("idx_task_suites-creator_id")
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_index(
+                sea_query::Index::drop()
+                    .name("idx_task_suites-group_id")
+                    .to_owned(),
+            )
+            .await?;
         manager
             .drop_table(Table::drop().table(TaskSuites::Table).to_owned())
             .await

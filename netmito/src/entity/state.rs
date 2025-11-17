@@ -328,4 +328,8 @@ impl TaskSuiteState {
     pub fn can_accept_tasks(&self) -> bool {
         matches!(self, Self::Open)
     }
+
+    pub fn is_closed(&self) -> bool {
+        matches!(self, Self::Closed | Self::Complete | Self::Cancelled)
+    }
 }

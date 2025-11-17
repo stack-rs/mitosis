@@ -11,6 +11,7 @@ pub mod group_worker;
 pub mod groups;
 pub mod role;
 pub mod state;
+pub mod task_suites;
 pub mod user_group;
 pub mod users;
 pub mod workers;

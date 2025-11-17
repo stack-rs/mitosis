@@ -6,6 +6,7 @@ pub use super::artifacts::Entity as Artifacts;
 pub use super::attachments::Entity as Attachments;
 pub use super::group_worker::Entity as GroupWorker;
 pub use super::groups::Entity as Groups;
+pub use super::task_suites::Entity as TaskSuites;
 pub use super::user_group::Entity as UserGroup;
 pub use super::users::Entity as Users;
 pub use super::workers::Entity as Workers;

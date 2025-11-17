@@ -675,6 +675,7 @@ pub async fn report_task(
                 upstream_task_uuid: Set(task.upstream_task_uuid),
                 downstream_task_uuid: Set(task.downstream_task_uuid),
                 reporter_uuid: Set(Some(worker_uuid)),
+                task_suite_id: Set(task.task_suite_id),
             };
             let worker = Worker::ActiveModel {
                 id: Set(worker_id),

@@ -27,6 +27,7 @@ pub struct Model {
     pub upstream_task_uuid: Option<Uuid>,
     pub downstream_task_uuid: Option<Uuid>,
     pub reporter_uuid: Option<Uuid>,
+    pub task_suite_id: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

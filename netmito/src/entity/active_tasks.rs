@@ -26,6 +26,7 @@ pub struct Model {
     pub result: Option<Json>,
     pub upstream_task_uuid: Option<Uuid>,
     pub downstream_task_uuid: Option<Uuid>,
+    pub task_suite_id: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -46,6 +47,14 @@ pub enum Relation {
         on_delete = "Restrict"
     )]
     Users,
+    #[sea_orm(
+        belongs_to = "super::task_suites::Entity",
+        from = "Column::TaskSuiteId",
+        to = "super::task_suites::Column::Id",
+        on_update = "Cascade",
+        on_delete = "SetNull"
+    )]
+    TaskSuites,
 }
 
 impl Related<super::groups::Entity> for Entity {
@@ -57,6 +66,12 @@ impl Related<super::groups::Entity> for Entity {
 impl Related<super::users::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Users.def()
+    }
+}
+
+impl Related<super::task_suites::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::TaskSuites.def()
     }
 }
 
@@ -85,6 +100,7 @@ impl From<Model> for super::archived_tasks::Model {
             upstream_task_uuid: task.upstream_task_uuid,
             downstream_task_uuid: task.downstream_task_uuid,
             reporter_uuid: None,
+            task_suite_id: task.task_suite_id,
         }
     }
 }

@@ -100,3 +100,61 @@ impl Display for GroupWorkerRole {
         write!(f, "{self:?}")
     }
 }
+
+/// The role of a group to a node manager.
+#[derive(
+    EnumIter,
+    DeriveActiveEnum,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    ValueEnum,
+    Copy,
+)]
+#[sea_orm(rs_type = "i32", db_type = "Integer")]
+pub enum GroupNodeManagerRole {
+    /// Reserved for future use (view manager status).
+    #[serde(alias = "read", alias = "READ")]
+    Read = 0,
+    /// The group can submit task suites to the manager.
+    #[serde(alias = "write", alias = "WRITE")]
+    Write = 1,
+    /// The group can manage the manager's ACL and settings.
+    #[serde(alias = "admin", alias = "ADMIN")]
+    Admin = 2,
+}
+
+impl FromStr for GroupNodeManagerRole {
+    type Err = crate::error::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "read" | "Read" | "READ" => Ok(Self::Read),
+            "write" | "Write" | "WRITE" => Ok(Self::Write),
+            "admin" | "Admin" | "ADMIN" => Ok(Self::Admin),
+            _ => Err(crate::error::Error::Custom(format!(
+                "Invalid GroupNodeManagerRole: {s}"
+            ))),
+        }
+    }
+}
+
+impl Display for GroupNodeManagerRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl GroupNodeManagerRole {
+    pub fn has_write_access(&self) -> bool {
+        matches!(self, Self::Write | Self::Admin)
+    }
+
+    pub fn has_admin_access(&self) -> bool {
+        matches!(self, Self::Admin)
+    }
+}

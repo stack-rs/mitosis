@@ -480,6 +480,7 @@ pub async fn user_cancel_task(
                     upstream_task_uuid: Set(task.upstream_task_uuid),
                     downstream_task_uuid: Set(task.downstream_task_uuid),
                     reporter_uuid: Set(None),
+                    task_suite_id: Set(task.task_suite_id),
                 };
                 archived_task.insert(txn).await?;
                 ActiveTasks::Entity::delete_by_id(task.id).exec(txn).await?;
@@ -1211,6 +1212,7 @@ pub async fn cancel_tasks_by_filter(
                     .expr(Expr::col(Alias::new("upstream_task_uuid")))
                     .expr(Expr::col(Alias::new("downstream_task_uuid")))
                     .expr(SimpleExpr::Constant(Value::Uuid(None)))
+                    .expr(Expr::col(Alias::new("task_suite_id")))
                     .from(Alias::new("deleted"))
                     .to_owned();
 
@@ -1236,6 +1238,7 @@ pub async fn cancel_tasks_by_filter(
                         ArchivedTasks::Column::UpstreamTaskUuid,
                         ArchivedTasks::Column::DownstreamTaskUuid,
                         ArchivedTasks::Column::ReporterUuid,
+                        ArchivedTasks::Column::TaskSuiteId,
                     ])
                     .to_owned();
 
@@ -1382,6 +1385,7 @@ pub async fn cancel_tasks_by_uuids(
                         .expr(Expr::col(Alias::new("upstream_task_uuid")))
                         .expr(Expr::col(Alias::new("downstream_task_uuid")))
                         .expr(SimpleExpr::Constant(Value::Uuid(None)))
+                        .expr(Expr::col(Alias::new("task_suite_id")))
                         .from(Alias::new("deleted"))
                         .to_owned();
 
@@ -1407,6 +1411,7 @@ pub async fn cancel_tasks_by_uuids(
                             ArchivedTasks::Column::UpstreamTaskUuid,
                             ArchivedTasks::Column::DownstreamTaskUuid,
                             ArchivedTasks::Column::ReporterUuid,
+                            ArchivedTasks::Column::TaskSuiteId,
                         ])
                         .to_owned();
 

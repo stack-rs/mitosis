@@ -15,8 +15,10 @@ use crate::{
 
 pub mod http;
 pub mod interactive;
+pub mod persistent;
 pub mod redis;
 pub use interactive::*;
+pub use persistent::*;
 pub use redis::*;
 
 pub struct MitoClient {

@@ -9,6 +9,7 @@ pub mod migration;
 pub mod schema;
 pub mod service;
 pub mod signal;
+pub mod websocket;
 pub mod worker;
 pub mod reexports {
     pub use redis;

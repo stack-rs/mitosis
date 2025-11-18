@@ -11,11 +11,13 @@ use crate::migration::{Migrator, MigratorTrait};
 use crate::service::s3::setup_buckets;
 use crate::service::worker::{restore_workers, HeartbeatQueue, TaskDispatcher};
 use crate::signal::shutdown_signal;
+use crate::websocket::ConnectionRegistry;
 
 pub struct MitoCoordinator {
     pub infra_pool: InfraPool,
     pub worker_task_queue: TaskDispatcher,
     pub worker_heartbeat_queue: HeartbeatQueue,
+    pub ws_registry: ConnectionRegistry,
     pub cancel_token: CancellationToken,
     pub log_dir: PathBuf,
 }
@@ -133,10 +135,14 @@ impl MitoCoordinator {
         log_dir.push("coordinator");
         tokio::fs::create_dir_all(&log_dir).await?;
 
+        // Initialize WebSocket connection registry
+        let ws_registry = ConnectionRegistry::new();
+
         Ok(Self {
             infra_pool,
             worker_task_queue,
             worker_heartbeat_queue,
+            ws_registry,
             cancel_token,
             log_dir,
         })
@@ -148,6 +154,7 @@ impl MitoCoordinator {
             infra_pool,
             mut worker_task_queue,
             mut worker_heartbeat_queue,
+            ws_registry,
             cancel_token,
             ..
         } = self;
@@ -167,7 +174,7 @@ impl MitoCoordinator {
         });
 
         restore_workers(&infra_pool).await?;
-        let app = router(infra_pool, cancel_token.clone());
+        let app = router(infra_pool, ws_registry, cancel_token.clone());
         let addr = crate::config::SERVER_CONFIG
             .get()
             .ok_or(crate::error::Error::Custom(

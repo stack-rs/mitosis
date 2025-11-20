@@ -406,7 +406,7 @@ pub(crate) async fn group_upload_artifact(
     task: StoredTaskModel,
     content_type: ArtifactContentType,
     content_length: u64,
-) -> Result<String, crate::error::Error> {
+) -> Result<(bool, String), crate::error::Error> {
     let now = TimeDateTimeWithTimeZone::now_utc();
     let content_length = content_length as i64;
     let (uuid, group_id) = match task {
@@ -425,9 +425,10 @@ pub(crate) async fn group_upload_artifact(
     }
     let s3_client = pool.s3.clone();
     let artifacts_bucket = pool.artifacts_bucket.clone();
-    let url = pool
+    // This returns (exist, url)
+    let resp = pool
         .db
-        .transaction::<_, String, Error>(|txn| {
+        .transaction::<_, (bool, String), Error>(|txn| {
             Box::pin(async move {
                 // Update the task to reflect the artifact upload
                 match task {
@@ -456,7 +457,7 @@ pub(crate) async fn group_upload_artifact(
                 let s3_object_key = format!("{uuid}/{content_type}");
                 let url: String;
                 // Check group storage quota and allocate storage for the artifact
-                match artifact {
+                let exist = match artifact {
                     Some(artifact) => {
                         let recorded_content_length = content_length.max(artifact.size);
                         let new_storage_used =
@@ -486,6 +487,7 @@ pub(crate) async fn group_upload_artifact(
                             ..Default::default()
                         };
                         group.update(txn).await?;
+                        true
                     }
                     None => {
                         let new_storage_used = group.storage_used + content_length;
@@ -516,13 +518,14 @@ pub(crate) async fn group_upload_artifact(
                             ..Default::default()
                         };
                         group.update(txn).await?;
+                        false
                     }
-                }
-                Ok(url)
+                };
+                Ok((exist, url))
             })
         })
         .await?;
-    Ok(url)
+    Ok(resp)
 }
 
 pub async fn user_upload_artifact(
@@ -531,7 +534,7 @@ pub async fn user_upload_artifact(
     uuid: Uuid,
     content_type: ArtifactContentType,
     content_length: u64,
-) -> Result<String, crate::error::Error> {
+) -> Result<(bool, String), crate::error::Error> {
     // Find the task and group
     let (group_id, task) = find_task_by_uuid(pool, uuid).await?;
     // Check if user has permission to upload artifact to the task
@@ -861,7 +864,7 @@ pub async fn user_upload_attachment(
     group_name: String,
     key: String,
     content_length: u64,
-) -> Result<String, crate::error::Error> {
+) -> Result<(bool, String), crate::error::Error> {
     tracing::debug!(
         "Uploading attachment to group {} with key {} and size {}",
         group_name,
@@ -880,9 +883,9 @@ pub async fn user_upload_attachment(
     let s3_client = pool.s3.clone();
     let now = TimeDateTimeWithTimeZone::now_utc();
     let attachments_bucket = pool.attachments_bucket.clone();
-    let uri = pool
+    let resp = pool
         .db
-        .transaction::<_, String, crate::error::Error>(|txn| {
+        .transaction::<_, (bool, String), crate::error::Error>(|txn| {
             Box::pin(async move {
                 let group = Group::Entity::find()
                     .filter(Group::Column::GroupName.eq(group_name.clone()))
@@ -907,7 +910,7 @@ pub async fn user_upload_attachment(
                     .one(txn)
                     .await?;
                 let url: String;
-                match attachment {
+                let exist = match attachment {
                     Some(attachment) => {
                         let recorded_content_length = content_length.max(attachment.size);
                         let new_storage_used =
@@ -937,6 +940,7 @@ pub async fn user_upload_attachment(
                             ..Default::default()
                         };
                         group.update(txn).await?;
+                        true
                     }
                     None => {
                         let new_storage_used = group.storage_used + content_length;
@@ -968,13 +972,14 @@ pub async fn user_upload_attachment(
                             ..Default::default()
                         };
                         group.update(txn).await?;
+                        false
                     }
-                }
-                Ok(url)
+                };
+                Ok((exist, url))
             })
         })
         .await?;
-    Ok(uri)
+    Ok(resp)
 }
 
 // show_pb is used to show progress bar

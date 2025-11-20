@@ -169,6 +169,7 @@ pub struct UploadAttachmentReq {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UploadAttachmentResp {
+    pub exist: bool,
     pub url: String,
 }
 
@@ -180,6 +181,7 @@ pub struct UploadArtifactReq {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UploadArtifactResp {
+    pub exist: bool,
     pub url: String,
 }
 

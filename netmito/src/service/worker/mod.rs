@@ -733,7 +733,7 @@ pub async fn report_task(
                 content_type,
                 content_length
             );
-            let url = group_upload_artifact(
+            let (_, url) = group_upload_artifact(
                 pool,
                 StoredTaskModel::Active(task),
                 content_type,

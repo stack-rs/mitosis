@@ -221,6 +221,22 @@ pub(crate) fn output_group_info(info: &GroupQueryInfo) {
     }
 }
 
+pub(crate) fn output_upload_artifact_resp(exist: bool) {
+    if exist {
+        tracing::info!("Artifact already exists on server, replaced it");
+    } else {
+        tracing::info!("Artifact uploaded successfully");
+    }
+}
+
+pub(crate) fn output_upload_attachment_resp(exist: bool) {
+    if exist {
+        tracing::info!("Attachment already exists on server, replaced it");
+    } else {
+        tracing::info!("Attachment uploaded successfully");
+    }
+}
+
 pub(crate) fn fill_admin_create_user(
     username: Option<String>,
     password: Option<String>,

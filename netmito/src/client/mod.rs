@@ -630,7 +630,10 @@ impl MitoClient {
         self.http_client.user_submit_task(req).await
     }
 
-    pub async fn upload_artifact(&mut self, args: UploadArtifactArgs) -> crate::error::Result<()> {
+    pub async fn upload_artifact(
+        &mut self,
+        args: UploadArtifactArgs,
+    ) -> crate::error::Result<bool> {
         let metadata = args
             .local_file
             .metadata()
@@ -649,13 +652,14 @@ impl MitoClient {
         let resp = self.http_client.get_upload_artifact_resp(uuid, req).await?;
         self.http_client
             .upload_file(resp.url.as_str(), content_length, args.local_file, args.pb)
-            .await
+            .await?;
+        Ok(resp.exist)
     }
 
     pub async fn upload_attachment(
         &mut self,
         args: UploadAttachmentArgs,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<bool> {
         fn get_fname<P: AsRef<std::path::Path>>(p: P) -> crate::error::Result<String> {
             let fname = p
                 .as_ref()
@@ -718,7 +722,8 @@ impl MitoClient {
             .await?;
         self.http_client
             .upload_file(resp.url.as_str(), content_length, args.local_file, args.pb)
-            .await
+            .await?;
+        Ok(resp.exist)
     }
 
     pub async fn admin_workers_cancel(
@@ -860,7 +865,7 @@ impl MitoClient {
     pub async fn tasks_artifacts_upload(
         &mut self,
         args: TaskArtifactUploadArgs,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<bool> {
         self.upload_artifact(args).await
     }
 
@@ -874,7 +879,7 @@ impl MitoClient {
     pub async fn groups_attachments_upload(
         &mut self,
         args: GroupAttachmentUploadArgs,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<bool> {
         self.upload_attachment(args).await
     }
 
@@ -1535,8 +1540,8 @@ impl MitoClient {
                         }
                     }
                     AttachmentsCommands::Upload(args) => match self.upload_attachment(args).await {
-                        Ok(_) => {
-                            tracing::info!("Attachment uploaded successfully");
+                        Ok(exist) => {
+                            output_upload_attachment_resp(exist);
                         }
                         Err(e) => {
                             tracing::error!("{}", e);
@@ -1837,8 +1842,8 @@ impl MitoClient {
                         }
                     }
                     ArtifactsCommands::Upload(args) => match self.upload_artifact(args).await {
-                        Ok(_) => {
-                            tracing::info!("Artifact uploaded successfully");
+                        Ok(exist) => {
+                            output_upload_artifact_resp(exist);
                         }
                         Err(e) => {
                             tracing::error!("{}", e);

@@ -157,7 +157,7 @@ pub async fn upload_attachment(
     Path(group_name): Path<String>,
     Json(req): Json<UploadAttachmentReq>,
 ) -> Result<Json<UploadAttachmentResp>, ApiError> {
-    let url =
+    let (exist, url) =
         service::s3::user_upload_attachment(u.id, &pool, group_name, req.key, req.content_length)
             .await
             .map_err(|e| match e {
@@ -168,7 +168,7 @@ pub async fn upload_attachment(
                     ApiError::InternalServerError
                 }
             })?;
-    Ok(Json(UploadAttachmentResp { url }))
+    Ok(Json(UploadAttachmentResp { exist, url }))
 }
 
 pub async fn download_attachment(

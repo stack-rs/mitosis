@@ -207,7 +207,7 @@ pub async fn upload_artifact(
     Path(uuid): Path<Uuid>,
     Json(req): Json<UploadArtifactReq>,
 ) -> Result<Json<UploadArtifactResp>, ApiError> {
-    let url =
+    let (exist, url) =
         service::s3::user_upload_artifact(&pool, u.id, uuid, req.content_type, req.content_length)
             .await
             .map_err(|e| match e {
@@ -218,7 +218,7 @@ pub async fn upload_artifact(
                     ApiError::InternalServerError
                 }
             })?;
-    Ok(Json(UploadArtifactResp { url }))
+    Ok(Json(UploadArtifactResp { exist, url }))
 }
 
 pub async fn download_artifact(

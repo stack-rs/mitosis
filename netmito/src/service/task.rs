@@ -1,5 +1,7 @@
-use sea_orm::sea_query::extension::postgres::PgExpr;
-use sea_orm::sea_query::{Alias, ExprTrait, PgFunc, Query, Value};
+use sea_orm::sea_query::{
+    extension::postgres::PgExpr, Alias, CommonTableExpression, DeleteStatement, ExprTrait,
+    InsertStatement, PgFunc, Query, SimpleExpr, Value,
+};
 use sea_orm::{prelude::*, FromQueryResult, Set, TransactionTrait};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -1085,6 +1087,11 @@ pub async fn query_tasks_by_filter(
     Ok(resp)
 }
 
+#[derive(FromQueryResult)]
+struct IdResult {
+    id: i64,
+}
+
 /// Cancel multiple tasks by filter criteria.
 /// Only tasks in Ready or Pending state will be cancelled.
 /// User must have Admin or Write role in the task's group (validated by check_task_list_query).
@@ -1130,27 +1137,10 @@ pub async fn cancel_tasks_by_filter(
     check_task_list_query(user_id, pool, &mut query, UserGroupRole::Write).await?;
     let group_name = query.group_name.clone().unwrap_or_default();
 
-    // Build query statement for matching tasks
-    let mut active_stmt = Query::select();
-    active_stmt
-        .columns([
-            (ActiveTasks::Entity, ActiveTasks::Column::Id),
-            (ActiveTasks::Entity, ActiveTasks::Column::Uuid),
-            (ActiveTasks::Entity, ActiveTasks::Column::TaskId),
-            (ActiveTasks::Entity, ActiveTasks::Column::CreatorId),
-            (ActiveTasks::Entity, ActiveTasks::Column::GroupId),
-            (ActiveTasks::Entity, ActiveTasks::Column::Tags),
-            (ActiveTasks::Entity, ActiveTasks::Column::Labels),
-            (ActiveTasks::Entity, ActiveTasks::Column::CreatedAt),
-            (ActiveTasks::Entity, ActiveTasks::Column::UpdatedAt),
-            (ActiveTasks::Entity, ActiveTasks::Column::State),
-            (ActiveTasks::Entity, ActiveTasks::Column::AssignedWorker),
-            (ActiveTasks::Entity, ActiveTasks::Column::Timeout),
-            (ActiveTasks::Entity, ActiveTasks::Column::Priority),
-            (ActiveTasks::Entity, ActiveTasks::Column::Spec),
-            (ActiveTasks::Entity, ActiveTasks::Column::UpstreamTaskUuid),
-            (ActiveTasks::Entity, ActiveTasks::Column::DownstreamTaskUuid),
-        ])
+    // Build task ID subquery with the same filters (avoids parameter limits)
+    let mut task_id_subquery = Query::select();
+    task_id_subquery
+        .column((ActiveTasks::Entity, ActiveTasks::Column::Id))
         .from(ActiveTasks::Entity)
         .join(
             sea_orm::JoinType::Join,
@@ -1167,28 +1157,33 @@ pub async fn cancel_tasks_by_filter(
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
         );
 
-    // Apply filters (note: we don't need archive_stmt for cancellation)
-    let mut archive_stmt = Query::select().from(ArchivedTasks::Entity).to_owned();
-    apply_task_filters(&mut active_stmt, &mut archive_stmt, &query)?;
+    // Apply the same filters to the subquery
+    let mut dummy_archive_stmt = Query::select().from(ArchivedTasks::Entity).to_owned();
+    apply_task_filters(&mut task_id_subquery, &mut dummy_archive_stmt, &query)?;
 
+    // Build the complete CTE statement before the transaction to avoid lifetime issues
+
+    let delete_stmt = DeleteStatement::new()
+        .from_table(ActiveTasks::Entity)
+        .and_where(Expr::col(ActiveTasks::Column::Id).in_subquery(task_id_subquery))
+        .returning_all()
+        .to_owned();
+
+    let cte = CommonTableExpression::new()
+        .query(delete_stmt)
+        .table_name(Alias::new("deleted"))
+        .to_owned();
+
+    // Get the database backend before the transaction
     let builder = pool.db.get_database_backend();
-    let stmt = builder.build(&active_stmt);
 
-    // Execute query, delete, and insert in a single transaction
-    // Total: 3 queries (SELECT + DELETE + INSERT_MANY) regardless of task count
+    // Execute delete and insert in a single transaction
+    // Total: 1 query using CTE (DELETE RETURNING + INSERT SELECT) regardless of task count or column count
     let task_ids = pool
         .db
         .transaction::<_, Vec<i64>, crate::error::Error>(|txn| {
+            let cte = cte.clone();
             Box::pin(async move {
-                // Query matching tasks within transaction (Query #1)
-                let tasks = ActiveTasks::Model::find_by_statement(stmt.clone())
-                    .all(txn)
-                    .await?;
-
-                if tasks.is_empty() {
-                    return Ok(vec![]);
-                }
-
                 let now = TimeDateTimeWithTimeZone::now_utc();
                 let res = TaskResultSpec {
                     exit_status: 0,
@@ -1196,44 +1191,66 @@ pub async fn cancel_tasks_by_filter(
                 };
                 let result = serde_json::to_value(res).inspect_err(|e| tracing::error!("{}", e))?;
 
-                // Collect task IDs for deletion
-                let task_ids: Vec<i64> = tasks.iter().map(|t| t.id).collect();
+                // Build SELECT from the CTE
+                let select_from_cte = Query::select()
+                    .expr(Expr::col(Alias::new("id")))
+                    .expr(Expr::col(Alias::new("creator_id")))
+                    .expr(Expr::col(Alias::new("group_id")))
+                    .expr(Expr::col(Alias::new("task_id")))
+                    .expr(Expr::col(Alias::new("uuid")))
+                    .expr(Expr::col(Alias::new("tags")))
+                    .expr(Expr::col(Alias::new("labels")))
+                    .expr(Expr::col(Alias::new("created_at")))
+                    .expr(Expr::value(now))
+                    .expr(Expr::value(TaskState::Cancelled))
+                    .expr(Expr::col(Alias::new("assigned_worker")))
+                    .expr(Expr::col(Alias::new("timeout")))
+                    .expr(Expr::col(Alias::new("priority")))
+                    .expr(Expr::col(Alias::new("spec")))
+                    .expr(Expr::value(result.clone()))
+                    .expr(Expr::col(Alias::new("upstream_task_uuid")))
+                    .expr(Expr::col(Alias::new("downstream_task_uuid")))
+                    .expr(SimpleExpr::Constant(Value::Uuid(None)))
+                    .from(Alias::new("deleted"))
+                    .to_owned();
 
-                // Prepare archived tasks
-                let archived_tasks: Vec<ArchivedTasks::ActiveModel> = tasks
+                // Build the INSERT SELECT statement with CTE
+                let mut insert_stmt = InsertStatement::new()
+                    .into_table(ArchivedTasks::Entity)
+                    .columns([
+                        ArchivedTasks::Column::Id,
+                        ArchivedTasks::Column::CreatorId,
+                        ArchivedTasks::Column::GroupId,
+                        ArchivedTasks::Column::TaskId,
+                        ArchivedTasks::Column::Uuid,
+                        ArchivedTasks::Column::Tags,
+                        ArchivedTasks::Column::Labels,
+                        ArchivedTasks::Column::CreatedAt,
+                        ArchivedTasks::Column::UpdatedAt,
+                        ArchivedTasks::Column::State,
+                        ArchivedTasks::Column::AssignedWorker,
+                        ArchivedTasks::Column::Timeout,
+                        ArchivedTasks::Column::Priority,
+                        ArchivedTasks::Column::Spec,
+                        ArchivedTasks::Column::Result,
+                        ArchivedTasks::Column::UpstreamTaskUuid,
+                        ArchivedTasks::Column::DownstreamTaskUuid,
+                        ArchivedTasks::Column::ReporterUuid,
+                    ])
+                    .to_owned();
+
+                insert_stmt.select_from(select_from_cte).unwrap();
+                insert_stmt.returning_col(ArchivedTasks::Column::Id);
+                let insert_with_cte = insert_stmt.with(cte.into());
+
+                let stmt = builder.build(&insert_with_cte);
+
+                let task_ids: Vec<i64> = IdResult::find_by_statement(stmt)
+                    .all(txn)
+                    .await?
                     .into_iter()
-                    .map(|task| ArchivedTasks::ActiveModel {
-                        id: Set(task.id),
-                        creator_id: Set(task.creator_id),
-                        group_id: Set(task.group_id),
-                        task_id: Set(task.task_id),
-                        uuid: Set(task.uuid),
-                        tags: Set(task.tags),
-                        labels: Set(task.labels),
-                        created_at: Set(task.created_at),
-                        updated_at: Set(now),
-                        state: Set(TaskState::Cancelled),
-                        assigned_worker: Set(task.assigned_worker),
-                        timeout: Set(task.timeout),
-                        priority: Set(task.priority),
-                        spec: Set(task.spec),
-                        result: Set(Some(result.clone())),
-                        upstream_task_uuid: Set(task.upstream_task_uuid),
-                        downstream_task_uuid: Set(task.downstream_task_uuid),
-                        reporter_uuid: Set(None),
-                    })
+                    .map(|r| r.id)
                     .collect();
-
-                // Batch delete from active_tasks (Query #2)
-                ActiveTasks::Entity::delete_many()
-                    .filter(ActiveTasks::Column::Id.is_in(task_ids.clone()))
-                    .exec(txn)
-                    .await?;
-
-                // Batch insert into archived_tasks (Query #3)
-                ArchivedTasks::Entity::insert_many(archived_tasks)
-                    .exec(txn)
-                    .await?;
 
                 Ok(task_ids)
             })
@@ -1252,6 +1269,12 @@ pub async fn cancel_tasks_by_filter(
     })
 }
 
+#[derive(FromQueryResult)]
+struct IdUuidResult {
+    id: i64,
+    uuid: Uuid,
+}
+
 pub async fn cancel_tasks_by_uuids(
     user_id: i64,
     pool: &InfraPool,
@@ -1264,128 +1287,178 @@ pub async fn cancel_tasks_by_uuids(
         )));
     }
 
-    // Query all matching tasks in a single query with permission checks
-    // Join with user_group to check Write permission
-    let builder = pool.db.get_database_backend();
-    let stmt = Query::select()
-        .columns([
-            (ActiveTasks::Entity, ActiveTasks::Column::Id),
-            (ActiveTasks::Entity, ActiveTasks::Column::Uuid),
-            (ActiveTasks::Entity, ActiveTasks::Column::TaskId),
-            (ActiveTasks::Entity, ActiveTasks::Column::CreatorId),
-            (ActiveTasks::Entity, ActiveTasks::Column::GroupId),
-            (ActiveTasks::Entity, ActiveTasks::Column::Tags),
-            (ActiveTasks::Entity, ActiveTasks::Column::Labels),
-            (ActiveTasks::Entity, ActiveTasks::Column::CreatedAt),
-            (ActiveTasks::Entity, ActiveTasks::Column::UpdatedAt),
-            (ActiveTasks::Entity, ActiveTasks::Column::State),
-            (ActiveTasks::Entity, ActiveTasks::Column::AssignedWorker),
-            (ActiveTasks::Entity, ActiveTasks::Column::Timeout),
-            (ActiveTasks::Entity, ActiveTasks::Column::Priority),
-            (ActiveTasks::Entity, ActiveTasks::Column::Spec),
-            (ActiveTasks::Entity, ActiveTasks::Column::UpstreamTaskUuid),
-            (ActiveTasks::Entity, ActiveTasks::Column::DownstreamTaskUuid),
-        ])
-        .from(ActiveTasks::Entity)
-        // Join with user_group to verify user has Write permission on the group
-        .join(
-            sea_orm::JoinType::Join,
-            UserGroup::Entity,
-            sea_orm::sea_query::Expr::col((UserGroup::Entity, UserGroup::Column::GroupId)).eq(
-                sea_orm::sea_query::Expr::col((ActiveTasks::Entity, ActiveTasks::Column::GroupId)),
-            ),
-        )
-        .and_where(
-            sea_orm::sea_query::Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Uuid))
-                .is_in(req.uuids.clone()),
-        )
-        .and_where(
-            sea_orm::sea_query::Expr::col((UserGroup::Entity, UserGroup::Column::UserId))
-                .eq(user_id),
-        )
-        // Only allow users with Write permission or higher
-        .and_where(
-            sea_orm::sea_query::Expr::col((UserGroup::Entity, UserGroup::Column::Role))
-                .is_in(vec![UserGroupRole::Write, UserGroupRole::Admin]),
-        )
-        // Only cancel tasks in Ready or Pending states
-        .and_where(
-            sea_orm::sea_query::Expr::col((ActiveTasks::Entity, ActiveTasks::Column::State))
-                .is_in(vec![TaskState::Ready, TaskState::Pending]),
-        )
-        .to_owned();
+    // Chunk UUIDs to avoid hitting the parameter limit
+    let uuid_chunks: Vec<Vec<Uuid>> = req.uuids.chunks(1024).map(|chunk| chunk.to_vec()).collect();
 
-    let built_stmt = builder.build(&stmt);
+    let mut all_task_ids = Vec::new();
+    let mut all_found_uuids = HashSet::new();
 
-    // Execute query, delete, and insert in a single transaction
-    // Total: 3 queries (SELECT + DELETE + INSERT_MANY) regardless of task count
-    let (task_ids, found_uuids) = pool
-        .db
-        .transaction::<_, (Vec<i64>, HashSet<Uuid>), crate::error::Error>(|txn| {
-            Box::pin(async move {
-                // Query matching tasks within transaction (Query #1)
-                let tasks = ActiveTasks::Model::find_by_statement(built_stmt.clone())
-                    .all(txn)
-                    .await?;
+    // Process each chunk
+    for uuid_chunk in uuid_chunks {
+        // Query all matching tasks in a single query with permission checks
+        // Join with user_group to check Write permission
+        let builder = pool.db.get_database_backend();
+        let stmt = Query::select()
+            .columns([
+                (ActiveTasks::Entity, ActiveTasks::Column::Id),
+                (ActiveTasks::Entity, ActiveTasks::Column::Uuid),
+                (ActiveTasks::Entity, ActiveTasks::Column::TaskId),
+                (ActiveTasks::Entity, ActiveTasks::Column::CreatorId),
+                (ActiveTasks::Entity, ActiveTasks::Column::GroupId),
+                (ActiveTasks::Entity, ActiveTasks::Column::Tags),
+                (ActiveTasks::Entity, ActiveTasks::Column::Labels),
+                (ActiveTasks::Entity, ActiveTasks::Column::CreatedAt),
+                (ActiveTasks::Entity, ActiveTasks::Column::UpdatedAt),
+                (ActiveTasks::Entity, ActiveTasks::Column::State),
+                (ActiveTasks::Entity, ActiveTasks::Column::AssignedWorker),
+                (ActiveTasks::Entity, ActiveTasks::Column::Timeout),
+                (ActiveTasks::Entity, ActiveTasks::Column::Priority),
+                (ActiveTasks::Entity, ActiveTasks::Column::Spec),
+                (ActiveTasks::Entity, ActiveTasks::Column::UpstreamTaskUuid),
+                (ActiveTasks::Entity, ActiveTasks::Column::DownstreamTaskUuid),
+            ])
+            .from(ActiveTasks::Entity)
+            // Join with user_group to verify user has Write permission on the group
+            .join(
+                sea_orm::JoinType::Join,
+                UserGroup::Entity,
+                sea_orm::sea_query::Expr::col((UserGroup::Entity, UserGroup::Column::GroupId)).eq(
+                    sea_orm::sea_query::Expr::col((
+                        ActiveTasks::Entity,
+                        ActiveTasks::Column::GroupId,
+                    )),
+                ),
+            )
+            .and_where(
+                sea_orm::sea_query::Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Uuid))
+                    .is_in(uuid_chunk),
+            )
+            .and_where(
+                sea_orm::sea_query::Expr::col((UserGroup::Entity, UserGroup::Column::UserId))
+                    .eq(user_id),
+            )
+            // Only allow users with Write permission or higher
+            .and_where(
+                sea_orm::sea_query::Expr::col((UserGroup::Entity, UserGroup::Column::Role))
+                    .is_in(vec![UserGroupRole::Write, UserGroupRole::Admin]),
+            )
+            // Only cancel tasks in Ready or Pending states
+            .and_where(
+                sea_orm::sea_query::Expr::col((ActiveTasks::Entity, ActiveTasks::Column::State))
+                    .is_in(vec![TaskState::Ready, TaskState::Pending]),
+            )
+            .to_owned();
 
-                if tasks.is_empty() {
-                    return Ok((vec![], HashSet::new()));
-                }
+        // Build CTE for DELETE RETURNING + INSERT SELECT to avoid parameter limits
+        // Convert the SELECT statement into a subquery for the DELETE
+        let task_id_subquery = stmt.clone();
 
-                let now = TimeDateTimeWithTimeZone::now_utc();
-                let res = TaskResultSpec {
-                    exit_status: 0,
-                    msg: Some(crate::schema::TaskResultMessage::UserCancellation),
-                };
-                let result = serde_json::to_value(res).inspect_err(|e| tracing::error!("{}", e))?;
+        let delete_stmt = DeleteStatement::new()
+            .from_table(ActiveTasks::Entity)
+            .and_where(
+                Expr::col(ActiveTasks::Column::Id).in_subquery(
+                    Query::select()
+                        .column(ActiveTasks::Column::Id)
+                        .from_subquery(task_id_subquery, Alias::new("matching_tasks"))
+                        .to_owned(),
+                ),
+            )
+            .returning_all()
+            .to_owned();
 
-                // Collect task IDs and UUIDs for deletion
-                let task_ids: Vec<i64> = tasks.iter().map(|t| t.id).collect();
-                let found_uuids: HashSet<Uuid> = tasks.iter().map(|t| t.uuid).collect();
+        let cte = CommonTableExpression::new()
+            .query(delete_stmt)
+            .table_name(Alias::new("deleted"))
+            .to_owned();
 
-                // Prepare archived tasks
-                let archived_tasks: Vec<ArchivedTasks::ActiveModel> = tasks
-                    .into_iter()
-                    .map(|task| ArchivedTasks::ActiveModel {
-                        id: Set(task.id),
-                        creator_id: Set(task.creator_id),
-                        group_id: Set(task.group_id),
-                        task_id: Set(task.task_id),
-                        uuid: Set(task.uuid),
-                        tags: Set(task.tags),
-                        labels: Set(task.labels),
-                        created_at: Set(task.created_at),
-                        updated_at: Set(now),
-                        state: Set(TaskState::Cancelled),
-                        assigned_worker: Set(task.assigned_worker),
-                        timeout: Set(task.timeout),
-                        priority: Set(task.priority),
-                        spec: Set(task.spec),
-                        result: Set(Some(result.clone())),
-                        upstream_task_uuid: Set(task.upstream_task_uuid),
-                        downstream_task_uuid: Set(task.downstream_task_uuid),
-                        reporter_uuid: Set(None),
-                    })
-                    .collect();
+        // Execute delete and insert in a single transaction
+        // Total: 1 query using CTE (DELETE RETURNING + INSERT SELECT) per chunk
+        let (task_ids, found_uuids) = pool
+            .db
+            .transaction::<_, (Vec<i64>, HashSet<Uuid>), crate::error::Error>(|txn| {
+                let cte = cte.clone();
+                Box::pin(async move {
+                    let now = TimeDateTimeWithTimeZone::now_utc();
+                    let res = TaskResultSpec {
+                        exit_status: 0,
+                        msg: Some(crate::schema::TaskResultMessage::UserCancellation),
+                    };
+                    let result =
+                        serde_json::to_value(res).inspect_err(|e| tracing::error!("{}", e))?;
 
-                // Batch delete from active_tasks (Query #2)
-                ActiveTasks::Entity::delete_many()
-                    .filter(ActiveTasks::Column::Id.is_in(task_ids.clone()))
-                    .exec(txn)
-                    .await?;
+                    // Build SELECT from the CTE
+                    let select_from_cte = Query::select()
+                        .expr(Expr::col(Alias::new("id")))
+                        .expr(Expr::col(Alias::new("creator_id")))
+                        .expr(Expr::col(Alias::new("group_id")))
+                        .expr(Expr::col(Alias::new("task_id")))
+                        .expr(Expr::col(Alias::new("uuid")))
+                        .expr(Expr::col(Alias::new("tags")))
+                        .expr(Expr::col(Alias::new("labels")))
+                        .expr(Expr::col(Alias::new("created_at")))
+                        .expr(Expr::value(now))
+                        .expr(Expr::value(TaskState::Cancelled))
+                        .expr(Expr::col(Alias::new("assigned_worker")))
+                        .expr(Expr::col(Alias::new("timeout")))
+                        .expr(Expr::col(Alias::new("priority")))
+                        .expr(Expr::col(Alias::new("spec")))
+                        .expr(Expr::value(result.clone()))
+                        .expr(Expr::col(Alias::new("upstream_task_uuid")))
+                        .expr(Expr::col(Alias::new("downstream_task_uuid")))
+                        .expr(SimpleExpr::Constant(Value::Uuid(None)))
+                        .from(Alias::new("deleted"))
+                        .to_owned();
 
-                // Batch insert into archived_tasks (Query #3)
-                ArchivedTasks::Entity::insert_many(archived_tasks)
-                    .exec(txn)
-                    .await?;
+                    // Build the INSERT SELECT statement with CTE
+                    let mut insert_stmt = InsertStatement::new()
+                        .into_table(ArchivedTasks::Entity)
+                        .columns([
+                            ArchivedTasks::Column::Id,
+                            ArchivedTasks::Column::CreatorId,
+                            ArchivedTasks::Column::GroupId,
+                            ArchivedTasks::Column::TaskId,
+                            ArchivedTasks::Column::Uuid,
+                            ArchivedTasks::Column::Tags,
+                            ArchivedTasks::Column::Labels,
+                            ArchivedTasks::Column::CreatedAt,
+                            ArchivedTasks::Column::UpdatedAt,
+                            ArchivedTasks::Column::State,
+                            ArchivedTasks::Column::AssignedWorker,
+                            ArchivedTasks::Column::Timeout,
+                            ArchivedTasks::Column::Priority,
+                            ArchivedTasks::Column::Spec,
+                            ArchivedTasks::Column::Result,
+                            ArchivedTasks::Column::UpstreamTaskUuid,
+                            ArchivedTasks::Column::DownstreamTaskUuid,
+                            ArchivedTasks::Column::ReporterUuid,
+                        ])
+                        .to_owned();
 
-                Ok((task_ids, found_uuids))
+                    insert_stmt.select_from(select_from_cte).unwrap();
+                    insert_stmt.returning_col(ArchivedTasks::Column::Id);
+                    insert_stmt.returning_col(ArchivedTasks::Column::Uuid);
+                    let insert_with_cte = insert_stmt.with(cte.into());
+
+                    let stmt = builder.build(&insert_with_cte);
+
+                    let results: Vec<IdUuidResult> =
+                        IdUuidResult::find_by_statement(stmt).all(txn).await?;
+
+                    let task_ids: Vec<i64> = results.iter().map(|r| r.id).collect();
+                    let found_uuids: HashSet<Uuid> = results.into_iter().map(|r| r.uuid).collect();
+
+                    Ok((task_ids, found_uuids))
+                })
             })
-        })
-        .await?;
+            .await?;
+
+        // Accumulate results from this chunk
+        all_task_ids.extend(task_ids);
+        all_found_uuids.extend(found_uuids);
+    }
 
     // Remove tasks from dispatch queues
-    for task_id in &task_ids {
+    for task_id in &all_task_ids {
         let _ = remove_task(*task_id, pool)
             .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
     }
@@ -1394,11 +1467,11 @@ pub async fn cancel_tasks_by_uuids(
     let failed_uuids: Vec<Uuid> = req
         .uuids
         .into_iter()
-        .filter(|uuid| !found_uuids.contains(uuid))
+        .filter(|uuid| !all_found_uuids.contains(uuid))
         .collect();
 
     Ok(TasksCancelByUuidsResp {
-        cancelled_count: task_ids.len() as u64,
+        cancelled_count: all_task_ids.len() as u64,
         failed_uuids,
     })
 }

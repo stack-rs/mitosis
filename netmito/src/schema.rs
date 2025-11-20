@@ -560,7 +560,7 @@ pub struct WorkerShutdown {
     pub op: Option<WorkerShutdownOp>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, Copy)]
 pub enum WorkerShutdownOp {
     #[default]
     #[serde(alias = "graceful")]

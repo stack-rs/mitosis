@@ -179,12 +179,19 @@ async fn generate_artifact_downloads(
     uuids: Vec<Uuid>,
     content_type: ArtifactContentType,
 ) -> Result<Vec<ArtifactDownloadItem>, crate::error::Error> {
-    // Query artifacts for these tasks with the specified content type
-    let artifacts = Artifact::Entity::find()
-        .filter(Artifact::Column::TaskId.is_in(uuids))
-        .filter(Artifact::Column::ContentType.eq(content_type))
-        .all(&pool.db)
-        .await?;
+    // Chunk UUIDs to avoid PostgreSQL parameter limit
+    let mut all_artifacts = Vec::new();
+
+    for chunk in uuids.chunks(2048) {
+        let artifacts = Artifact::Entity::find()
+            .filter(Artifact::Column::TaskId.is_in(chunk.to_vec()))
+            .filter(Artifact::Column::ContentType.eq(content_type))
+            .all(&pool.db)
+            .await?;
+        all_artifacts.extend(artifacts);
+    }
+
+    let artifacts = all_artifacts;
 
     // Create a set of task UUIDs that have artifacts
     let mut downloads = Vec::with_capacity(artifacts.len());
@@ -710,12 +717,20 @@ async fn generate_attachment_downloads(
             "Group {} not found",
             group_name
         ))))?;
-    // Query attachments for the specified keys
-    let attachments = Attachment::Entity::find()
-        .filter(Attachment::Column::Key.is_in(keys.clone()))
-        .filter(Attachment::Column::GroupId.eq(group.id))
-        .all(&pool.db)
-        .await?;
+
+    // Chunk keys to avoid PostgreSQL parameter limit
+    let mut all_attachments = Vec::new();
+
+    for chunk in keys.chunks(2048) {
+        let attachments = Attachment::Entity::find()
+            .filter(Attachment::Column::Key.is_in(chunk.to_vec()))
+            .filter(Attachment::Column::GroupId.eq(group.id))
+            .all(&pool.db)
+            .await?;
+        all_attachments.extend(attachments);
+    }
+
+    let attachments = all_attachments;
 
     // Verify all attachments belong to the specified group and generate URLs
     let mut downloads = Vec::new();
@@ -1244,12 +1259,20 @@ async fn delete_artifacts_by_uuids_internal(
     uuids: Vec<Uuid>,
     content_type: ArtifactContentType,
 ) -> Result<(u64, Vec<Uuid>), crate::error::Error> {
-    // Query artifacts for these tasks with the specified content type
-    let artifacts = Artifact::Entity::find()
-        .filter(Artifact::Column::TaskId.is_in(uuids.clone()))
-        .filter(Artifact::Column::ContentType.eq(content_type))
-        .all(&pool.db)
-        .await?;
+    // Chunk UUIDs to avoid PostgreSQL parameter limit
+
+    let mut all_artifacts = Vec::new();
+
+    for chunk in uuids.chunks(2048) {
+        let artifacts = Artifact::Entity::find()
+            .filter(Artifact::Column::TaskId.is_in(chunk.to_vec()))
+            .filter(Artifact::Column::ContentType.eq(content_type))
+            .all(&pool.db)
+            .await?;
+        all_artifacts.extend(artifacts);
+    }
+
+    let artifacts = all_artifacts;
 
     let mut deleted_count = 0u64;
     let mut deleted_uuids = std::collections::HashSet::new();

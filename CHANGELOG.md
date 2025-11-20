@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.7](https://github.com/stack-rs/mitosis/compare/mito-v0.6.6...mito-v0.6.7) - 2025-11-20
+
+### Features
+
+- *(s3)* Return existence on uploading - ([2c8811c](https://github.com/stack-rs/mitosis/commit/2c8811ccba60ad8c779e1b0d9536ab177b333ca9))
+
+### Bug Fixes
+
+- *(task)* Use subquery to avoid arguments limit of sql - ([c7f0622](https://github.com/stack-rs/mitosis/commit/c7f0622a0f4b25766c46edd496155d7f80514d7c))
+
+
 ## [0.6.6](https://github.com/stack-rs/mitosis/compare/mito-v0.6.5...mito-v0.6.6) - 2025-11-11
 
 ### Features

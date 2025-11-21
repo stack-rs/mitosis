@@ -1954,6 +1954,7 @@ impl MitoClient {
         );
         let mut req = SubmitTaskReq {
             group_name: args.group_name.unwrap_or(self.username.clone()),
+            suite_uuid: args.suite_uuid,
             tags: args.tags.into_iter().collect(),
             labels: args.labels.into_iter().collect(),
             timeout: args.timeout,

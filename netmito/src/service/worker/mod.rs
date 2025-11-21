@@ -707,6 +707,7 @@ pub async fn report_task(
             let _ = remove_task(task_id, pool)
                 .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
             if let Some(uuid) = task.downstream_task_uuid {
+                // TODO: should support task_suite in the future
                 service::task::worker_trigger_pending_task(pool, uuid).await?;
             }
             // Worker was requested to gracefully shutdown

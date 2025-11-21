@@ -296,7 +296,9 @@ impl Display for WorkerState {
     }
 }
 
-#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
+#[derive(
+    EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy, Hash,
+)]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum TaskSuiteState {
     /// Suite is accepting new tasks
@@ -326,7 +328,7 @@ impl TaskSuiteState {
     }
 
     pub fn can_accept_tasks(&self) -> bool {
-        matches!(self, Self::Open)
+        !matches!(self, Self::Closed)
     }
 
     pub fn is_closed(&self) -> bool {

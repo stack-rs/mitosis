@@ -9,29 +9,22 @@ use super::state::TaskSuiteState;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
-
     #[sea_orm(unique)]
     pub uuid: Uuid,
-
     pub name: Option<String>,
     pub description: Option<String>,
-
     pub group_id: i64,
     pub creator_id: i64,
-
     pub tags: Vec<String>,
     pub labels: Vec<String>,
     pub priority: i32,
-
     pub worker_schedule: Json,
     pub env_preparation: Option<Json>,
     pub env_cleanup: Option<Json>,
-
     pub state: TaskSuiteState,
     pub last_task_submitted_at: Option<TimeDateTimeWithTimeZone>,
     pub total_tasks: i32,
     pub pending_tasks: i32,
-
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
     pub completed_at: Option<TimeDateTimeWithTimeZone>,

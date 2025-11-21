@@ -106,6 +106,9 @@ pub struct DownloadArtifactsByFilterArgs {
     /// Filter by reporter worker UUID (only returns artifacts from completed tasks reported by this worker)
     #[arg(long)]
     pub reporter_uuid: Option<Uuid>,
+    /// Filter tasks by suite UUID
+    #[arg(long = "suite")]
+    pub suite_uuid: Option<Uuid>,
     /// Specify the directory to download artifacts
     #[arg(short, long = "output")]
     pub output_dir: Option<PathBuf>,
@@ -169,6 +172,7 @@ impl From<DownloadArtifactsByFilterArgs> for ArtifactsDownloadByFilterReq {
             },
             exit_status: args.exit_status,
             priority: args.priority,
+            suite_uuid: args.suite_uuid,
             content_type: args.content_type,
         }
     }
@@ -212,6 +216,9 @@ pub struct DeleteArtifactsByFilterArgs {
     /// Filter by reporter worker UUID (only deletes artifacts from completed tasks reported by this worker)
     #[arg(long)]
     pub reporter_uuid: Option<Uuid>,
+    /// Filter tasks by suite UUID
+    #[arg(long = "suite")]
+    pub suite_uuid: Option<Uuid>,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -251,6 +258,7 @@ impl From<DeleteArtifactsByFilterArgs> for ArtifactsDeleteByFilterReq {
             },
             exit_status: args.exit_status,
             priority: args.priority,
+            suite_uuid: args.suite_uuid,
             content_type: args.content_type,
         }
     }

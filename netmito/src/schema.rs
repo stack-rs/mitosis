@@ -996,3 +996,137 @@ pub struct TaskSuiteTasksQueryParams {
     pub limit: Option<u64>,
     pub offset: Option<u64>,
 }
+
+// ============================================================================
+// Node Manager WebSocket Messages
+// ============================================================================
+
+/// Messages sent from Manager → Coordinator
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ManagerMessage {
+    Heartbeat {
+        manager_uuid: Uuid,
+        state: crate::entity::state::NodeManagerState,
+        metrics: ManagerMetrics,
+    },
+    FetchTask {
+        request_id: u64,
+        worker_local_id: u32,
+    },
+    ReportTask {
+        request_id: u64,
+        task_id: i64,
+        op: ReportTaskOp,
+    },
+    ReportFailure {
+        task_uuid: Uuid,
+        failure_count: u32,
+        error_message: String,
+        worker_local_id: u32,
+    },
+    AbortTask {
+        task_uuid: Uuid,
+        reason: String,
+    },
+    SuiteCompleted {
+        suite_uuid: Uuid,
+        tasks_completed: u64,
+        tasks_failed: u64,
+    },
+}
+
+/// Manager metrics sent with heartbeat
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagerMetrics {
+    pub active_workers: u32,
+    pub total_tasks_completed: u64,
+    pub total_tasks_failed: u64,
+    pub current_suite_tasks_completed: u64,
+    pub current_suite_tasks_failed: u64,
+    pub uptime_seconds: u64,
+    pub cpu_usage_percent: f32,
+    pub memory_usage_mb: u64,
+}
+
+/// Messages sent from Coordinator → Manager
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CoordinatorMessage {
+    SuiteAssigned {
+        suite_uuid: Uuid,
+        suite_spec: TaskSuiteSpec,
+    },
+    TaskAvailable {
+        request_id: u64,
+        task: Option<WorkerTaskResp>,
+    },
+    TaskReportAck {
+        request_id: u64,
+        success: bool,
+        url: Option<String>,
+    },
+    CancelTask {
+        task_uuid: Uuid,
+        reason: String,
+    },
+    CancelSuite {
+        suite_uuid: Uuid,
+        reason: String,
+        cancel_running_tasks: bool,
+    },
+    ConfigUpdate {
+        #[serde(default, with = "humantime_serde")]
+        lease_duration: Option<std::time::Duration>,
+        #[serde(default, with = "humantime_serde")]
+        heartbeat_interval: Option<std::time::Duration>,
+    },
+    Shutdown {
+        graceful: bool,
+    },
+}
+
+/// Task suite specification for manager (uses existing types from above)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSuiteSpec {
+    pub uuid: Uuid,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub group_id: i64,
+    pub tags: Vec<String>,
+    pub labels: Vec<String>,
+    pub priority: i32,
+    pub worker_schedule: WorkerSchedulePlan,
+    pub env_preparation: Option<EnvHookSpec>,
+    pub env_cleanup: Option<EnvHookSpec>,
+}
+
+// ============================================================================
+// Node Manager Registration API
+// ============================================================================
+
+/// Request to register a new node manager
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RegisterManagerReq {
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(default, with = "humantime_serde")]
+    pub lifetime: Option<std::time::Duration>,
+}
+
+/// Response after registering a manager
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RegisterManagerResp {
+    pub manager_uuid: Uuid,
+    pub token: String,
+}
+
+/// Request for manager heartbeat (HTTP fallback)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ManagerHeartbeatReq {
+    pub state: crate::entity::state::NodeManagerState,
+    pub metrics: ManagerMetrics,
+}

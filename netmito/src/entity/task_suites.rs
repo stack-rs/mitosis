@@ -2,32 +2,32 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::state::TaskState;
+use super::state::TaskSuiteState;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
-#[sea_orm(table_name = "archived_tasks")]
+#[sea_orm(table_name = "task_suites")]
 pub struct Model {
-    #[sea_orm(primary_key, auto_increment = false)]
+    #[sea_orm(primary_key)]
     pub id: i64,
-    pub creator_id: i64,
-    pub group_id: i64,
-    pub task_id: i64,
     #[sea_orm(unique)]
     pub uuid: Uuid,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub group_id: i64,
+    pub creator_id: i64,
     pub tags: Vec<String>,
     pub labels: Vec<String>,
+    pub priority: i32,
+    pub worker_schedule: Json,
+    pub env_preparation: Option<Json>,
+    pub env_cleanup: Option<Json>,
+    pub state: TaskSuiteState,
+    pub last_task_submitted_at: Option<TimeDateTimeWithTimeZone>,
+    pub total_tasks: i32,
+    pub pending_tasks: i32,
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
-    pub state: TaskState,
-    pub assigned_worker: Option<i64>,
-    pub timeout: i64,
-    pub priority: i32,
-    pub spec: Json,
-    pub result: Option<Json>,
-    pub upstream_task_uuid: Option<Uuid>,
-    pub downstream_task_uuid: Option<Uuid>,
-    pub reporter_uuid: Option<Uuid>,
-    pub task_suite_id: Option<i64>,
+    pub completed_at: Option<TimeDateTimeWithTimeZone>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -39,7 +39,7 @@ pub enum Relation {
         on_update = "Cascade",
         on_delete = "Restrict"
     )]
-    Groups,
+    Group,
     #[sea_orm(
         belongs_to = "super::users::Entity",
         from = "Column::CreatorId",
@@ -52,7 +52,7 @@ pub enum Relation {
 
 impl Related<super::groups::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Groups.def()
+        Relation::Group.def()
     }
 }
 

@@ -6,6 +6,7 @@ pub mod entity;
 pub mod error;
 pub mod manager;
 pub mod migration;
+pub mod node_manager_service;
 pub mod schema;
 pub mod service;
 pub mod signal;

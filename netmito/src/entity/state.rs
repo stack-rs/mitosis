@@ -295,3 +295,99 @@ impl Display for WorkerState {
         }
     }
 }
+
+#[derive(
+    EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy, Hash,
+)]
+#[sea_orm(rs_type = "i32", db_type = "Integer")]
+pub enum TaskSuiteState {
+    /// Suite is accepting new tasks
+    Open = 0,
+    /// Suite is closed to new tasks but tasks can still be executed
+    Closed = 1,
+    /// All tasks in the suite have completed
+    Complete = 2,
+    /// Suite has been cancelled
+    Cancelled = 3,
+}
+
+impl Display for TaskSuiteState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TaskSuiteState::Open => write!(f, "Open"),
+            TaskSuiteState::Closed => write!(f, "Closed"),
+            TaskSuiteState::Complete => write!(f, "Complete"),
+            TaskSuiteState::Cancelled => write!(f, "Cancelled"),
+        }
+    }
+}
+
+impl TaskSuiteState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Complete | Self::Cancelled)
+    }
+
+    pub fn can_accept_tasks(&self) -> bool {
+        !matches!(self, Self::Closed)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        matches!(self, Self::Closed | Self::Complete | Self::Cancelled)
+    }
+}
+
+#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
+#[sea_orm(rs_type = "i32", db_type = "Integer")]
+pub enum NodeManagerState {
+    /// Manager is idle and available for assignment
+    Idle = 0,
+    /// Manager is preparing environment for task suite
+    Preparing = 1,
+    /// Manager is executing tasks from a suite
+    Executing = 2,
+    /// Manager is cleaning up after task suite completion
+    Cleanup = 3,
+    // TODO: may remove offline
+    /// Manager is offline
+    Offline = 4,
+}
+
+impl Display for NodeManagerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NodeManagerState::Idle => write!(f, "Idle"),
+            NodeManagerState::Preparing => write!(f, "Preparing"),
+            NodeManagerState::Executing => write!(f, "Executing"),
+            NodeManagerState::Cleanup => write!(f, "Cleanup"),
+            NodeManagerState::Offline => write!(f, "Offline"),
+        }
+    }
+}
+
+impl NodeManagerState {
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Idle)
+    }
+
+    pub fn is_busy(&self) -> bool {
+        matches!(self, Self::Preparing | Self::Executing | Self::Cleanup)
+    }
+}
+
+#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
+#[sea_orm(rs_type = "i32", db_type = "Integer")]
+pub enum SelectionType {
+    /// Manager was manually selected by user
+    UserSpecified = 0,
+    /// Manager was selected by tag matching
+    TagMatched = 1,
+}
+
+impl Display for SelectionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SelectionType::UserSpecified => write!(f, "UserSpecified"),
+            SelectionType::TagMatched => write!(f, "TagMatched"),
+        }
+    }
+}

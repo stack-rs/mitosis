@@ -1,6 +1,7 @@
 pub mod client;
 pub mod coordinator;
 pub mod manager;
+pub mod node_manager;
 pub mod worker;
 pub use client::{ClientConfig, ClientConfigCli};
 pub use coordinator::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
@@ -9,6 +10,7 @@ pub(crate) use coordinator::{
     SHUTDOWN_SECRET,
 };
 pub use manager::ManagerConfigCli;
+pub use node_manager::{NodeManagerConfig, NodeManagerConfigCli};
 use tracing::subscriber::DefaultGuard;
 use tracing_appender::non_blocking::WorkerGuard;
 pub use worker::{WorkerConfig, WorkerConfigCli};

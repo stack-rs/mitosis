@@ -48,6 +48,9 @@ pub struct SubmitTaskArgs {
     /// The name of the group this task is submitted to
     #[arg(short = 'g', long = "group")]
     pub group_name: Option<String>,
+    /// Optional suite UUID to assign task to
+    #[arg(long = "suite")]
+    pub suite_uuid: Option<Uuid>,
     /// The tags of the task, used to filter workers to execute the task
     #[arg(short, long, num_args = 0.., value_delimiter = ',')]
     pub tags: Vec<String>,
@@ -109,6 +112,9 @@ pub struct QueryTasksArgs {
     /// Filter by reporter worker UUID (only returns completed tasks reported by this worker)
     #[arg(long)]
     pub reporter_uuid: Option<Uuid>,
+    /// Filter tasks by suite UUID
+    #[arg(long = "suite")]
+    pub suite_uuid: Option<Uuid>,
     /// The limit of the tasks to query
     #[arg(long)]
     pub limit: Option<u64>,
@@ -152,6 +158,9 @@ pub struct CancelTasksArgs {
     /// The priority of the tasks, support operators like `=`(default), `!=`, `<`, `<=`, `>`, `>=`
     #[arg(short, long)]
     pub priority: Option<String>,
+    /// Filter tasks by suite UUID
+    #[arg(long = "suite")]
+    pub suite_uuid: Option<Uuid>,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -203,6 +212,7 @@ pub struct ChangeTaskArgs {
 impl From<QueryTasksArgs> for TasksQueryReq {
     fn from(args: QueryTasksArgs) -> Self {
         Self {
+            suite_uuid: args.suite_uuid,
             reporter_uuid: args.reporter_uuid,
             creator_usernames: if args.creators.is_empty() {
                 None
@@ -271,6 +281,7 @@ impl From<UpdateTaskLabelsArgs> for UpdateTaskLabelsReq {
 impl From<CancelTasksArgs> for TasksCancelByFilterReq {
     fn from(args: CancelTasksArgs) -> Self {
         Self {
+            suite_uuid: args.suite_uuid,
             creator_usernames: if args.creators.is_empty() {
                 None
             } else {

@@ -186,6 +186,9 @@ pub struct UploadArtifactResp {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SubmitTaskReq {
     pub group_name: String,
+    /// Optional suite UUID to assign task to
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suite_uuid: Option<Uuid>,
     pub tags: HashSet<String>,
     pub labels: HashSet<String>,
     #[serde(with = "humantime_serde")]
@@ -198,6 +201,9 @@ pub struct SubmitTaskReq {
 pub struct SubmitTaskResp {
     pub task_id: i64,
     pub uuid: Uuid,
+    /// Suite UUID (echoed back if provided in request)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suite_uuid: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -295,6 +301,8 @@ pub struct TasksQueryReq {
     pub priority: Option<String>,
     /// Set reporter_uuid will automatically exclude all non-completed tasks.
     pub reporter_uuid: Option<Uuid>,
+    /// Filter tasks by suite UUID
+    pub suite_uuid: Option<Uuid>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
     pub count: bool,
@@ -312,6 +320,8 @@ pub struct TasksCancelByFilterReq {
     pub states: Option<HashSet<TaskState>>,
     pub exit_status: Option<String>,
     pub priority: Option<String>,
+    /// Filter tasks by suite UUID
+    pub suite_uuid: Option<Uuid>,
 }
 
 /// Response for batch cancel operation
@@ -582,6 +592,8 @@ pub struct ArtifactsDownloadByFilterReq {
     pub priority: Option<String>,
     /// Set reporter_uuid will automatically exclude all non-completed tasks.
     pub reporter_uuid: Option<Uuid>,
+    /// Filter tasks by suite UUID
+    pub suite_uuid: Option<Uuid>,
     pub content_type: ArtifactContentType,
 }
 
@@ -647,6 +659,8 @@ pub struct ArtifactsDeleteByFilterReq {
     pub priority: Option<String>,
     /// Set reporter_uuid will automatically exclude all non-completed tasks.
     pub reporter_uuid: Option<Uuid>,
+    /// Filter tasks by suite UUID
+    pub suite_uuid: Option<Uuid>,
     pub content_type: ArtifactContentType,
 }
 
@@ -762,4 +776,223 @@ impl From<RawWorkerQueryInfo> for WorkerQueryInfo {
             assigned_task_id: model.assigned_task_id,
         }
     }
+}
+
+/// Request to create a new task suite
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateTaskSuiteReq {
+    /// Optional human-readable name (non-unique)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Optional description
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Group that owns this suite (require user have permissions to that group)
+    pub group_name: String,
+    /// Tags for manager matching (e.g., ["wireless", "linux", "cuda:11"])
+    #[serde(default)]
+    pub tags: HashSet<String>,
+    /// Labels for querying/filtering (e.g., ["project:cauldron", "phase:bayesian-optimization"])
+    #[serde(default)]
+    pub labels: HashSet<String>,
+    /// Suite scheduling priority (higher = more important)
+    #[serde(default)]
+    pub priority: i32,
+    /// Worker allocation plan
+    pub worker_schedule: WorkerSchedulePlan,
+    /// Optional environment preparation hook
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_preparation: Option<EnvHookSpec>,
+    /// Optional environment cleanup hook
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_cleanup: Option<EnvHookSpec>,
+}
+
+/// Response after creating a task suite
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateTaskSuiteResp {
+    /// Unique UUID for this suite
+    pub uuid: Uuid,
+}
+
+/// Worker scheduling policy for the suite
+/// This enum allows for future extension with different scheduling strategies
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "PascalCase")]
+pub enum WorkerSchedulePlan {
+    /// Fixed number of workers with optional CPU binding
+    /// This is the basic scheduling policy where a fixed number of workers
+    /// are spawned to process tasks from the suite
+    // TODO: should update it to our final design
+    FixedWorkers {
+        /// Number of workers to spawn (1-256)
+        worker_count: u32,
+        /// Optional CPU core binding strategy
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cpu_binding: Option<CpuBinding>,
+        /// How many tasks to prefetch locally per worker (default: 16)
+        #[serde(default = "default_prefetch_count")]
+        task_prefetch_count: u32,
+    },
+    // Future extensions:
+    // AutoScale { min_workers, max_workers, scale_up_threshold, scale_down_threshold, ... }
+    // LoadBalanced { target_utilization, ... }
+    // Priority { high_priority_workers, low_priority_workers, ... }
+}
+
+fn default_prefetch_count() -> u32 {
+    16
+}
+
+/// CPU core binding configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CpuBinding {
+    /// List of CPU core IDs to bind to
+    pub cores: Vec<usize>,
+    /// Binding strategy
+    pub strategy: CpuBindingStrategy,
+}
+
+/// CPU binding strategies
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum CpuBindingStrategy {
+    /// Distribute workers across cores in round-robin fashion
+    RoundRobin,
+    /// Each worker gets exclusive access to dedicated core(s)
+    Exclusive,
+    /// All workers share all specified cores
+    Shared,
+}
+
+/// Environment hook specification (preparation or cleanup)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvHookSpec {
+    /// Command and arguments to execute
+    pub args: Vec<String>,
+    /// Environment variables to set
+    #[serde(default)]
+    pub envs: HashMap<String, String>,
+    /// Remote resources to download before execution
+    #[serde(default)]
+    pub resources: Vec<RemoteResourceDownload>,
+    /// Execution timeout (e.g., "5m", "1h")
+    #[serde(with = "humantime_serde")]
+    pub timeout: std::time::Duration,
+}
+
+/// Query parameters for listing suites
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSuitesQueryReq {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub creator_usernames: Option<HashSet<String>>,
+    pub group_name: Option<String>,
+    pub tags: Option<HashSet<String>>,
+    pub labels: Option<HashSet<String>>,
+    pub states: Option<HashSet<crate::entity::state::TaskSuiteState>>,
+    pub priority: Option<String>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+    pub count: bool,
+}
+
+/// Response for suite query
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSuitesQueryResp {
+    pub count: u64,
+    pub suites: Vec<TaskSuiteInfo>,
+    pub group_name: String,
+}
+
+/// Information about a task suite
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParsedTaskSuiteInfo {
+    pub uuid: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub group_name: String,
+    pub creator_username: String,
+    pub tags: Vec<String>,
+    pub labels: Vec<String>,
+    pub priority: i32,
+    pub worker_schedule: WorkerSchedulePlan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_preparation: Option<EnvHookSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_cleanup: Option<EnvHookSpec>,
+    pub state: crate::entity::state::TaskSuiteState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_task_submitted_at: Option<OffsetDateTime>,
+    pub total_tasks: i32,
+    pub pending_tasks: i32,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSuiteQueryResp {
+    pub info: ParsedTaskSuiteInfo,
+    pub assigned_managers: Vec<Uuid>,
+}
+
+/// Information about a task suite
+#[derive(Debug, Clone, Serialize, Deserialize, FromQueryResult)]
+pub struct TaskSuiteInfo {
+    pub uuid: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub group_name: String,
+    pub creator_username: String,
+    pub tags: Vec<String>,
+    pub labels: Vec<String>,
+    pub priority: i32,
+    pub worker_schedule: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_preparation: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_cleanup: Option<serde_json::Value>,
+    pub state: crate::entity::state::TaskSuiteState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_task_submitted_at: Option<OffsetDateTime>,
+    pub total_tasks: i32,
+    pub pending_tasks: i32,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CancelTaskSuiteParam {
+    pub op: Option<CancelTaskSuiteOp>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub enum CancelTaskSuiteOp {
+    #[default]
+    #[serde(alias = "graceful")]
+    Graceful,
+    #[serde(alias = "force")]
+    Force,
+}
+
+/// Response after cancelling a suite
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelSuiteResp {
+    /// Number of tasks that were cancelled
+    pub cancelled_task_count: u64,
+}
+
+/// Query parameters for listing suite tasks
+#[derive(serde::Deserialize)]
+pub struct TaskSuiteTasksQueryParams {
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
 }

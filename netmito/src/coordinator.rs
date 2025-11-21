@@ -154,6 +154,7 @@ impl MitoCoordinator {
 
         // Create TaskTracker to manage background tasks
         let task_tracker = TaskTracker::new();
+        // TODO: auto close task suite
 
         // Spawn background tasks using TaskTracker
         task_tracker.spawn(async move {

@@ -494,14 +494,17 @@ pub async fn fetch_task(
     worker_id: i64,
     pool: &InfraPool,
 ) -> crate::error::Result<Option<WorkerTaskResp>> {
-    loop {
+    // Limit retries to prevent infinite loops that hold HTTP connections open
+    const MAX_RETRIES: usize = 10;
+
+    for retry_count in 0..MAX_RETRIES {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if pool
             .worker_task_queue_tx
             .send(TaskDispatcherOp::FetchTask(worker_id, tx))
             .is_err()
         {
-            break Err(Error::Custom("send fetch task failed".to_string()));
+            return Err(Error::Custom("send fetch task failed".to_string()));
         } else {
             match rx
                 .await
@@ -535,13 +538,28 @@ pub async fn fetch_task(
                             upstream_task_uuid: task.upstream_task_uuid,
                             spec,
                         };
-                        break Ok(Some(task_resp));
+                        return Ok(Some(task_resp));
                     }
+                    // Task was assigned to another worker (race condition), retry
+                    tracing::trace!(
+                        "Worker {} failed to claim task {} (attempt {}/{}), retrying",
+                        worker_id,
+                        id,
+                        retry_count + 1,
+                        MAX_RETRIES
+                    );
                 }
-                None => break Ok(None),
+                None => return Ok(None),
             }
         }
     }
+    // Exceeded max retries, return None to allow worker to try again later
+    tracing::debug!(
+        "Worker {} exceeded max retries ({}) while fetching task",
+        worker_id,
+        MAX_RETRIES
+    );
+    Ok(None)
 }
 
 pub async fn report_task(

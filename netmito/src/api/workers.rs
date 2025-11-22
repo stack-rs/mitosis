@@ -135,12 +135,23 @@ pub async fn worker_fetch_task(
     Extension(w): Extension<AuthWorker>,
     State(pool): State<InfraPool>,
 ) -> ApiResult<Json<Option<WorkerTaskResp>>> {
-    match service::worker::fetch_task(w.id, &pool).await {
-        Ok(t) => Ok(Json(t)),
-        Err(Error::ApiError(e)) => Err(e),
-        Err(e) => {
+    // Add timeout to prevent long-running requests from blocking graceful shutdown
+    let timeout = std::time::Duration::from_secs(25);
+    match tokio::time::timeout(timeout, service::worker::fetch_task(w.id, &pool)).await {
+        Ok(Ok(t)) => Ok(Json(t)),
+        Ok(Err(Error::ApiError(e))) => Err(e),
+        Ok(Err(e)) => {
             tracing::error!("{}", e);
             Err(ApiError::InternalServerError)
+        }
+        Err(_) => {
+            tracing::warn!(
+                "Worker {} fetch_task timed out after {} seconds",
+                w.id,
+                timeout.as_secs()
+            );
+            // Return None to let the worker retry later
+            Ok(Json(None))
         }
     }
 }

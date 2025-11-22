@@ -185,14 +185,27 @@ impl MitoCoordinator {
         };
 
         // Run the HTTP server with graceful shutdown
-        if let Err(e) = axum::serve(
+        let server = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(shutdown_future)
-        .await
-        {
-            tracing::error!("Server error: {}", e);
+        .with_graceful_shutdown(shutdown_future);
+
+        // Add a timeout to the graceful shutdown to prevent hanging forever
+        let shutdown_timeout = std::time::Duration::from_secs(30);
+        match tokio::time::timeout(shutdown_timeout, server).await {
+            Ok(Ok(())) => {
+                tracing::info!("HTTP server stopped gracefully");
+            }
+            Ok(Err(e)) => {
+                tracing::error!("Server error: {}", e);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "Graceful shutdown timed out after {} seconds, forcing shutdown",
+                    shutdown_timeout.as_secs()
+                );
+            }
         }
 
         tracing::info!("HTTP server stopped, waiting for background tasks...");

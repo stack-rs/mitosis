@@ -17,7 +17,7 @@ categories.workspace = true
 argon2 = { version = "0.5.3", features = ["std"] }
 async-compression = { version = "0.4.32", features = ["gzip", "tokio"] }
 async-stream = "0.3.6"
-aws-sdk-s3 = { version = "1.110", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.115", features = ["behavior-version-latest"] }
 axum = { version = "0.8.6", features = ["http2"] }
 axum-extra = { version = "0.12", features = ["typed-header", "query"] }
 base64 = "0.22.1"

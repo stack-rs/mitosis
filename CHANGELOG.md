@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.8](https://github.com/stack-rs/mitosis/compare/mito-v0.6.7...mito-v0.6.8) - 2025-12-10
+
+### Fqeat
+
+- *(api)* Catch internal panic - ([608dd81](https://github.com/stack-rs/mitosis/commit/608dd81628e951625aa6d746254a4cb56b6a9545))
+
+
 ## [0.6.7](https://github.com/stack-rs/mitosis/compare/mito-v0.6.6...mito-v0.6.7) - 2025-11-20
 
 ### Features

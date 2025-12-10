@@ -71,7 +71,7 @@ tokio-tar = "0.3.1"
 tokio-util = { version = "0.7.16", features = ["rt"] }
 tower-http = { version = "0.6.6", features = ["cors", "catch-panic"] }
 tracing = { workspace = true }
-tracing-appender = "0.2.3"
+tracing-appender = "0.2.4"
 tracing-subscriber = { workspace = true }
 url = { version = "2.5.7", features = ["serde"] }
 uuid = { version = "1.18", features = ["v4"] }

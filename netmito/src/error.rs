@@ -250,3 +250,16 @@ impl From<S3Error> for ApiError {
         ApiError::PresignS3Error(Box::new(e))
     }
 }
+
+// TODO: Let whole crate to use it later
+/// Helper function to map service errors to API errors
+pub(crate) fn map_service_error(e: crate::error::Error) -> ApiError {
+    match e {
+        crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+        crate::error::Error::ApiError(e) => e,
+        _ => {
+            tracing::error!("{}", e);
+            ApiError::InternalServerError
+        }
+    }
+}

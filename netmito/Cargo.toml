@@ -46,10 +46,11 @@ rand = "0.9.2"
 redis = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = [
   "json",
+  "query",
   "stream",
   "http2",
   "charset",
-  "rustls-tls",
+  "rustls",
   "system-proxy",
 ] }
 roxmltree = "0.21.1"

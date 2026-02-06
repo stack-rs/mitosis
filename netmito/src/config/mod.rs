@@ -1,7 +1,13 @@
+use tracing::subscriber::DefaultGuard;
+use tracing_appender::non_blocking::WorkerGuard;
+
+pub mod agent;
 pub mod client;
 pub mod coordinator;
 pub mod manager;
 pub mod worker;
+
+pub use agent::{AgentConfig, AgentConfigCli};
 pub use client::{ClientConfig, ClientConfigCli};
 pub use coordinator::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 pub(crate) use coordinator::{
@@ -9,8 +15,6 @@ pub(crate) use coordinator::{
     SHUTDOWN_SECRET,
 };
 pub use manager::ManagerConfigCli;
-use tracing::subscriber::DefaultGuard;
-use tracing_appender::non_blocking::WorkerGuard;
 pub use worker::{WorkerConfig, WorkerConfigCli};
 
 pub struct TracingGuard {

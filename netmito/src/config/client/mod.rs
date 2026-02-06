@@ -72,7 +72,7 @@ pub struct ClientConfigCli {
     /// Enable interactive mode
     #[arg(short, long)]
     pub interactive: bool,
-    /// Whether to retain the previous login state without refetching the credential
+    /// Whether to retain the previous login state without refreshing the credential
     #[arg(long)]
     #[serde(skip_serializing_if = "<&bool>::not")]
     pub retain: bool,
@@ -118,7 +118,7 @@ pub struct LoginArgs {
     pub username: Option<String>,
     /// The password of the user
     pub password: Option<String>,
-    /// Whether to retain the previous login state without refetching the credential
+    /// Whether to retain the previous login state without refreshing the credential
     #[arg(long)]
     pub retain: bool,
 }

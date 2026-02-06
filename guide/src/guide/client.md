@@ -80,7 +80,7 @@ Options:
   -i, --interactive
           Enable interactive mode
       --retain
-          Whether to retain the previous login state without refetching the credential
+          Whether to retain the previous login state without refreshing the credential
   -h, --help
           Print help
   -V, --version

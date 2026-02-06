@@ -18,7 +18,7 @@ pub struct CreateTaskSuiteReq {
     pub description: Option<String>,
     /// Group that owns this suite (require user have permissions to that group)
     pub group_name: String,
-    /// Tags for manager matching (e.g., ["wireless", "linux", "cuda:11"])
+    /// Tags for agent matching (e.g., ["wireless", "linux", "cuda:11"])
     #[serde(default)]
     pub tags: HashSet<String>,
     /// Labels for querying/filtering (e.g., ["project:cauldron", "phase:bayesian-optimization"])
@@ -145,7 +145,7 @@ pub struct ParsedTaskSuiteInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSuiteQueryResp {
     pub info: ParsedTaskSuiteInfo,
-    pub assigned_managers: Vec<Uuid>,
+    pub assigned_agents: Vec<Uuid>,
 }
 
 /// Information about a task suite

@@ -1,6 +1,7 @@
-use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use std::env;
 use std::process::Command;
+
+use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::{manager::ManagerCommand, ManagerConfigCli, WorkerConfigCli};

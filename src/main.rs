@@ -3,8 +3,11 @@ use clap::{Parser, Subcommand};
 use netmito::{
     agent::MitoAgent,
     client::MitoClient,
-    config::{AgentConfigCli, ClientConfigCli, CoordinatorConfigCli, WorkerConfigCli},
+    config::{
+        AgentConfigCli, ClientConfigCli, CoordinatorConfigCli, ManagerConfigCli, WorkerConfigCli,
+    },
     coordinator::MitoCoordinator,
+    manager::MitoManager,
     worker::MitoWorker,
 };
 use shadow_rs::shadow;
@@ -30,6 +33,8 @@ enum Mode {
     Client(ClientConfigCli),
     /// Run a mitosis agent.
     Agent(AgentConfigCli),
+    /// Run a mitosis manager to manage individual workers.
+    Manager(ManagerConfigCli),
 }
 
 fn main() {
@@ -69,6 +74,15 @@ fn main() {
                 .unwrap()
                 .block_on(async {
                     MitoAgent::main(agent_cli).await;
+                });
+        }
+        Mode::Manager(manager_cli) => {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    MitoManager::main(manager_cli).await;
                 });
         }
     }

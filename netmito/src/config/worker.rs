@@ -197,7 +197,7 @@ pub struct WorkerConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub lifetime: Option<String>,
-    /// Whether to retain the previous login state without refetching the credential
+    /// Whether to retain the previous login state without refreshing the credential
     #[arg(long)]
     #[serde(skip_serializing_if = "<&bool>::not")]
     pub retain: bool,

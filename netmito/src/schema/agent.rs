@@ -32,7 +32,7 @@ pub struct RegisterAgentReq {
 pub struct RegisterAgentResp {
     pub agent_uuid: Uuid,
     pub token: String,
-    /// Current notification counter for this manager (start of sequence)
+    /// Current notification counter for this agent (start of sequence)
     pub notification_counter: u64,
 }
 
@@ -158,7 +158,7 @@ pub struct TaskSuiteSpec {
 }
 
 /// Request to accept a suite assignment (claim it for execution)
-/// POST /managers/suite/accept
+/// POST /agents/suite/accept
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceptSuiteReq {
     pub suite_uuid: Uuid,
@@ -169,7 +169,7 @@ pub struct AcceptSuiteReq {
 pub struct AcceptSuiteResp {
     /// Whether the suite was successfully accepted
     pub accepted: bool,
-    /// Reason if not accepted (e.g., already taken by another manager)
+    /// Reason if not accepted (e.g., already taken by another agent)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }

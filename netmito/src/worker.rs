@@ -619,7 +619,7 @@ async fn execute_task(
                             _ = task_executor.task_cancel_token.cancelled() => return Ok(()),
                             _ = tokio::time::sleep(task_executor.polling_interval) => {},
                             _ = tokio::time::sleep_until(timeout_until) => {
-                                tracing::debug!("Fetching resource timeout, commit this task as canceled");
+                                tracing::debug!("Fetching resource timeout, commit this task as cancelled");
                                 let req = ReportTaskReq {
                                     id: task.id,
                                     op: ReportTaskOp::Cancel,
@@ -709,7 +709,7 @@ async fn execute_task(
                 }
                 _ = task_executor.task_cancel_token.cancelled() => return Ok(()),
                 _ = tokio::time::sleep(std::time::Duration::from_secs(120)) => {
-                    tracing::debug!("Fetching resource timeout, commit this task as canceled");
+                    tracing::debug!("Fetching resource timeout, commit this task as cancelled");
                     let req = ReportTaskReq {
                         id: task.id,
                         op: ReportTaskOp::Cancel,
@@ -736,7 +736,7 @@ async fn execute_task(
                     return Ok(());
                 }
                 _ = tokio::time::sleep_until(timeout_until) => {
-                    tracing::debug!("Fetching resource timeout, commit this task as canceled");
+                    tracing::debug!("Fetching resource timeout, commit this task as cancelled");
                     let req = ReportTaskReq {
                         id: task.id,
                         op: ReportTaskOp::Cancel,
@@ -764,7 +764,7 @@ async fn execute_task(
                 }
             }
         } else if resp.status() == StatusCode::NOT_FOUND {
-            tracing::debug!("Resource not found, commit this task as canceled");
+            tracing::debug!("Resource not found, commit this task as cancelled");
             let req = ReportTaskReq {
                 id: task.id,
                 op: ReportTaskOp::Cancel,
@@ -786,7 +786,7 @@ async fn execute_task(
                 .await;
             return Ok(());
         } else if resp.status() == StatusCode::FORBIDDEN {
-            tracing::debug!("Resource is forbidden to be fetched, commit this task as canceled");
+            tracing::debug!("Resource is forbidden to be fetched, commit this task as cancelled");
             let req = ReportTaskReq {
                 id: task.id,
                 op: ReportTaskOp::Cancel,
@@ -826,7 +826,9 @@ async fn execute_task(
         }
     }
 
-    if let Some((watched_task_uuid, watched_task_state)) = task.spec.watch {
+    if let Some((watched_task_uuid, watched_task_state)) =
+        task.exec_options.as_ref().and_then(|opts| opts.watch)
+    {
         // Watch other tasks to specified state to trigger this task
         if task_executor.task_redis_conn.is_some() && task_executor.task_redis_pubsub.is_some() {
             task_executor
@@ -845,7 +847,7 @@ async fn execute_task(
                 },
                 _ = task_executor.watch_task(&watched_task_uuid, watched_task_state) => {},
                 _ = tokio::time::sleep_until(timeout_until) => {
-                    tracing::debug!("Watching timeout, commit this task as canceled");
+                    tracing::debug!("Watching timeout, commit this task as cancelled");
                     task_executor.unsubscribe_task_exec_state(&watched_task_uuid).await;
                     let req = ReportTaskReq {
                         id: task.id,
@@ -876,14 +878,19 @@ async fn execute_task(
         }
     }
 
+    // Default timeout is 10 minutes if not specified
+    let timeout = task
+        .spec
+        .timeout
+        .unwrap_or(std::time::Duration::from_secs(600));
     task_executor
         .announce_task_state_ex(
             &task.uuid,
             TaskExecState::ExecPending as i32,
-            task.timeout.as_secs() + 60,
+            timeout.as_secs() + 60,
         )
         .await;
-    let timeout_until = tokio::time::Instant::now() + task.timeout;
+    let timeout_until = tokio::time::Instant::now() + timeout;
 
     // Setup new task file path and clean up any stale file
     let new_task_path = task_executor.task_cache_path.join("new_task.json");

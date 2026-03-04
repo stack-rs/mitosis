@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.8](https://github.com/stack-rs/mitosis/compare/mito-v0.6.7...mito-v0.6.8) - 2026-03-04
+
+### Features
+
+- *(api)* Catch internal panic - ([3106281](https://github.com/stack-rs/mitosis/commit/3106281bcf7e96c6d2fd2a74bfeb69b9140d7504))
+
+### Bug Fixes
+
+- *(task)* Correct db query in batch cancellation - ([72344df](https://github.com/stack-rs/mitosis/commit/72344dfc4fefdad584d623ae150d5ada78f44a3f))
+
+
 ## [0.6.7](https://github.com/stack-rs/mitosis/compare/mito-v0.6.6...mito-v0.6.7) - 2025-11-20
 
 ### Features

@@ -1,9 +1,11 @@
 pub mod admin;
+pub mod agents;
 pub mod groups;
 pub mod suites;
 pub mod tasks;
 pub mod users;
 pub mod workers;
+pub mod ws;
 
 #[cfg(feature = "debugging")]
 use std::net::SocketAddr;
@@ -64,6 +66,8 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
             .nest("/workers", workers::workers_router(st.clone()))
             .nest("/tasks", tasks::tasks_router(st.clone()))
             .nest("/suites", suites::suites_router(st.clone()))
+            .nest("/agents", agents::agents_router(st.clone()))
+            .nest("/ws", ws::ws_router(st.clone()))
             .with_state(st)
             .layer(CorsLayer::permissive())
             .layer(CatchPanicLayer::new())
@@ -96,6 +100,8 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
             .nest("/workers", workers::workers_router(st.clone()))
             .nest("/tasks", tasks::tasks_router(st.clone()))
             .nest("/suites", suites::suites_router(st.clone()))
+            .nest("/agents", agents::agents_router(st.clone()))
+            .nest("/ws", ws::ws_router(st.clone()))
             .with_state(st)
             .layer(CorsLayer::permissive())
             .layer(CatchPanicLayer::new())

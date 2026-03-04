@@ -6,12 +6,14 @@ use clap_repl::{
 };
 use humansize::{format_size, DECIMAL};
 
+use uuid::Uuid;
+
 use crate::{
     config::client::ClientInteractiveShell,
     entity::role::GroupWorkerRole,
     schema::{
-        AdminChangePasswordReq, CreateUserReq, GroupQueryInfo, ParsedTaskQueryInfo, TaskQueryInfo,
-        UserChangePasswordReq, WorkerQueryInfo,
+        AdminChangePasswordReq, AgentInfo, CreateUserReq, GroupQueryInfo, ParsedTaskQueryInfo,
+        ParsedTaskSuiteInfo, TaskQueryInfo, TaskSuiteInfo, UserChangePasswordReq, WorkerQueryInfo,
     },
     service::auth::{get_and_prompt_password, get_and_prompt_username},
 };
@@ -89,7 +91,10 @@ pub(crate) fn output_parsed_task_info(info: &ParsedTaskQueryInfo) {
     );
     tracing::info!("Tags: {:?}", info.tags);
     tracing::info!("Labels: {:?}", info.labels);
-    let timeout = std::time::Duration::from_secs(info.timeout as u64);
+    let timeout = info
+        .spec
+        .timeout
+        .unwrap_or(std::time::Duration::from_secs(600));
     tracing::info!("Timeout {:?} and Priority {}", timeout, info.priority);
     tracing::info!(
         "Created at {} and Updated at {}",
@@ -108,8 +113,8 @@ pub(crate) fn output_parsed_task_info(info: &ParsedTaskQueryInfo) {
     if let Some(downstream_task_uuid) = info.downstream_task_uuid {
         tracing::info!("Downstream Task UUID: {:?}", downstream_task_uuid);
     }
-    if let Some(reporter_uuid) = info.reporter_uuid {
-        tracing::info!("Reporter UUID: {}", reporter_uuid);
+    if let Some(runner_id) = info.runner_id {
+        tracing::info!("Runner ID: {}", runner_id);
     }
 }
 
@@ -124,7 +129,13 @@ pub(crate) fn output_task_info(info: &TaskQueryInfo) {
     );
     tracing::info!("Tags: {:?}", info.tags);
     tracing::info!("Labels: {:?}", info.labels);
-    let timeout = std::time::Duration::from_secs(info.timeout as u64);
+    // Extract timeout from spec JSON (timeout is in nanoseconds)
+    let timeout = info
+        .spec
+        .get("timeout")
+        .and_then(|t| t.as_u64())
+        .map(|ns| std::time::Duration::from_nanos(ns))
+        .unwrap_or(std::time::Duration::from_secs(600));
     tracing::info!("Timeout {:?} and Priority {}", timeout, info.priority);
     tracing::info!(
         "Created at {} and Updated at {}",
@@ -143,8 +154,8 @@ pub(crate) fn output_task_info(info: &TaskQueryInfo) {
     if let Some(downstream_task_uuid) = info.downstream_task_uuid {
         tracing::info!("Downstream Task UUID: {:?}", downstream_task_uuid);
     }
-    if let Some(reporter_uuid) = info.reporter_uuid {
-        tracing::info!("Reporter UUID: {}", reporter_uuid);
+    if let Some(runner_id) = info.runner_id {
+        tracing::info!("Runner ID: {}", runner_id);
     }
 }
 
@@ -221,21 +232,97 @@ pub(crate) fn output_group_info(info: &GroupQueryInfo) {
     }
 }
 
-pub(crate) fn output_upload_artifact_resp(exist: bool) {
-    if exist {
-        tracing::info!("Artifact already exists on server, replaced it");
-    } else {
-        tracing::info!("Artifact uploaded successfully");
+pub(crate) fn output_upload_artifact_resp() {
+    tracing::info!("Artifact uploaded successfully");
+}
+
+pub(crate) fn output_upload_attachment_resp() {
+    tracing::info!("Attachment uploaded successfully");
+}
+
+pub(crate) fn output_suite_list_info(info: &TaskSuiteInfo) {
+    tracing::info!("Suite UUID: {}", info.uuid);
+    if let Some(ref name) = info.name {
+        tracing::info!("Name: {}", name);
+    }
+    tracing::info!("Group: {}", info.group_name);
+    tracing::info!("State: {}", info.state);
+    tracing::info!(
+        "Tasks: {}/{} pending",
+        info.pending_tasks, info.total_tasks
+    );
+    tracing::info!("Priority: {}", info.priority);
+    tracing::info!("Tags: {:?}", info.tags);
+    tracing::info!("Labels: {:?}", info.labels);
+    tracing::info!("Created by: {}", info.creator_username);
+    tracing::info!(
+        "Created at {} and Updated at {}",
+        info.created_at,
+        info.updated_at
+    );
+    if let Some(completed_at) = info.completed_at {
+        tracing::info!("Completed at: {}", completed_at);
     }
 }
 
-pub(crate) fn output_upload_attachment_resp(exist: bool) {
-    if exist {
-        tracing::info!("Attachment already exists on server, replaced it");
+pub(crate) fn output_suite_info(info: &ParsedTaskSuiteInfo, assigned_agents: &[Uuid]) {
+    tracing::info!("Suite UUID: {}", info.uuid);
+    if let Some(ref name) = info.name {
+        tracing::info!("Name: {}", name);
+    }
+    if let Some(ref desc) = info.description {
+        tracing::info!("Description: {}", desc);
+    }
+    tracing::info!("Group: {}", info.group_name);
+    tracing::info!("Creator: {}", info.creator_username);
+    tracing::info!("State: {}", info.state);
+    tracing::info!(
+        "Tasks: {}/{} pending",
+        info.pending_tasks, info.total_tasks
+    );
+    tracing::info!("Priority: {}", info.priority);
+    tracing::info!("Tags: {:?}", info.tags);
+    tracing::info!("Labels: {:?}", info.labels);
+    tracing::info!(
+        "Created at {} and Updated at {}",
+        info.created_at,
+        info.updated_at
+    );
+    if let Some(last_submitted) = info.last_task_submitted_at {
+        tracing::info!("Last task submitted at: {}", last_submitted);
+    }
+    if let Some(completed_at) = info.completed_at {
+        tracing::info!("Completed at: {}", completed_at);
+    }
+    if assigned_agents.is_empty() {
+        tracing::info!("Assigned agents: none");
     } else {
-        tracing::info!("Attachment uploaded successfully");
+        tracing::info!("Assigned agents ({}):", assigned_agents.len());
+        for agent_uuid in assigned_agents {
+            tracing::info!("  {}", agent_uuid);
+        }
     }
 }
+
+pub(crate) fn output_agent_info(info: &AgentInfo) {
+    tracing::info!("Agent UUID: {}", info.uuid);
+    tracing::info!("State: {}", info.state);
+    tracing::info!("Tags: {:?}", info.tags);
+    tracing::info!("Labels: {:?}", info.labels);
+    tracing::info!("Created by: {}", info.creator_username);
+    tracing::info!("Last heartbeat: {}", info.last_heartbeat);
+    if let Some(suite_uuid) = info.assigned_suite_uuid {
+        tracing::info!("Assigned suite: {}", suite_uuid);
+    } else {
+        tracing::info!("Assigned suite: none");
+    }
+    tracing::info!(
+        "Created at {} and Updated at {}",
+        info.created_at,
+        info.updated_at
+    );
+}
+
 
 pub(crate) fn fill_admin_create_user(
     username: Option<String>,

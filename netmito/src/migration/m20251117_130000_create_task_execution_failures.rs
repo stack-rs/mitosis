@@ -9,66 +9,65 @@ impl MigrationTrait for Migration {
         manager
             .create_table(
                 Table::create()
-                    .table(TaskExecutionFailures::Table)
+                    .table(SuiteHookExecutions::Table)
                     .if_not_exists()
                     .col(
-                        ColumnDef::new(TaskExecutionFailures::Id)
+                        ColumnDef::new(SuiteHookExecutions::Id)
                             .big_integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
                     )
                     .col(
-                        ColumnDef::new(TaskExecutionFailures::TaskId)
+                        ColumnDef::new(SuiteHookExecutions::TaskSuiteId)
                             .big_integer()
                             .not_null(),
                     )
                     .col(
-                        ColumnDef::new(TaskExecutionFailures::TaskUuid)
-                            .uuid()
-                            .not_null(),
-                    )
-                    .col(ColumnDef::new(TaskExecutionFailures::TaskSuiteId).big_integer())
-                    .col(
-                        ColumnDef::new(TaskExecutionFailures::ManagerId)
+                        ColumnDef::new(SuiteHookExecutions::AgentId)
                             .big_integer()
                             .not_null(),
                     )
                     .col(
-                        ColumnDef::new(TaskExecutionFailures::FailureCount)
+                        ColumnDef::new(SuiteHookExecutions::HookType)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SuiteHookExecutions::Spec)
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SuiteHookExecutions::State)
                             .integer()
                             .not_null()
-                            .default(1),
+                            .default(0),
+                    )
+                    .col(ColumnDef::new(SuiteHookExecutions::Result).json_binary())
+                    .col(ColumnDef::new(SuiteHookExecutions::StartedAt).timestamp_with_time_zone())
+                    .col(
+                        ColumnDef::new(SuiteHookExecutions::CompletedAt)
+                            .timestamp_with_time_zone(),
                     )
                     .col(
-                        ColumnDef::new(TaskExecutionFailures::LastFailureAt)
+                        ColumnDef::new(SuiteHookExecutions::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
                     .col(
-                        ColumnDef::new(TaskExecutionFailures::ErrorMessages)
-                            .array(ColumnType::Text),
-                    )
-                    .col(ColumnDef::new(TaskExecutionFailures::WorkerLocalId).integer())
-                    .col(
-                        ColumnDef::new(TaskExecutionFailures::CreatedAt)
-                            .timestamp_with_time_zone()
-                            .not_null()
-                            .default(Expr::current_timestamp()),
-                    )
-                    .col(
-                        ColumnDef::new(TaskExecutionFailures::UpdatedAt)
+                        ColumnDef::new(SuiteHookExecutions::UpdatedAt)
                             .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
                     .foreign_key(
                         ForeignKey::create()
-                            .name("fk-task_execution_failures-task_suite_id")
+                            .name("fk-suite_hook_executions-task_suite_id")
                             .from(
-                                TaskExecutionFailures::Table,
-                                TaskExecutionFailures::TaskSuiteId,
+                                SuiteHookExecutions::Table,
+                                SuiteHookExecutions::TaskSuiteId,
                             )
                             .to(TaskSuites::Table, TaskSuites::Id)
                             .on_delete(ForeignKeyAction::Cascade)
@@ -76,12 +75,9 @@ impl MigrationTrait for Migration {
                     )
                     .foreign_key(
                         ForeignKey::create()
-                            .name("fk-task_execution_failures-manager_id")
-                            .from(
-                                TaskExecutionFailures::Table,
-                                TaskExecutionFailures::ManagerId,
-                            )
-                            .to(NodeManagers::Table, NodeManagers::Id)
+                            .name("fk-suite_hook_executions-agent_id")
+                            .from(SuiteHookExecutions::Table, SuiteHookExecutions::AgentId)
+                            .to(Agents::Table, Agents::Id)
                             .on_delete(ForeignKeyAction::Cascade)
                             .on_update(ForeignKeyAction::Cascade),
                     )
@@ -89,15 +85,14 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // Unique constraint on (task_uuid, manager_id)
+        // Index on (task_suite_id, agent_id) for lookup
         manager
             .create_index(
                 Index::create()
-                    .name("idx_task_execution_failures-task_uuid-manager_id")
-                    .table(TaskExecutionFailures::Table)
-                    .col(TaskExecutionFailures::TaskUuid)
-                    .col(TaskExecutionFailures::ManagerId)
-                    .unique()
+                    .name("idx_suite_hook_executions-suite_agent")
+                    .table(SuiteHookExecutions::Table)
+                    .col(SuiteHookExecutions::TaskSuiteId)
+                    .col(SuiteHookExecutions::AgentId)
                     .to_owned(),
             )
             .await?;
@@ -105,9 +100,9 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_task_execution_failures-task_uuid")
-                    .table(TaskExecutionFailures::Table)
-                    .col(TaskExecutionFailures::TaskUuid)
+                    .name("idx_suite_hook_executions-task_suite_id")
+                    .table(SuiteHookExecutions::Table)
+                    .col(SuiteHookExecutions::TaskSuiteId)
                     .to_owned(),
             )
             .await?;
@@ -115,19 +110,23 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_task_execution_failures-manager_id")
-                    .table(TaskExecutionFailures::Table)
-                    .col(TaskExecutionFailures::ManagerId)
+                    .name("idx_suite_hook_executions-agent_id")
+                    .table(SuiteHookExecutions::Table)
+                    .col(SuiteHookExecutions::AgentId)
                     .to_owned(),
             )
             .await?;
 
+        // Partial index for active (non-terminal) hook executions
         manager
             .create_index(
                 Index::create()
-                    .name("idx_task_execution_failures-task_suite_id")
-                    .table(TaskExecutionFailures::Table)
-                    .col(TaskExecutionFailures::TaskSuiteId)
+                    .name("idx_suite_hook_executions-active")
+                    .table(SuiteHookExecutions::Table)
+                    .col(SuiteHookExecutions::TaskSuiteId)
+                    .col(SuiteHookExecutions::AgentId)
+                    .col(SuiteHookExecutions::HookType)
+                    .and_where(Expr::col(SuiteHookExecutions::State).eq(0)) // Running
                     .to_owned(),
             )
             .await?;
@@ -138,50 +137,54 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .drop_index(
-                sea_query::Index::drop()
-                    .name("idx_task_execution_failures-task_suite_id")
+                Index::drop()
+                    .name("idx_suite_hook_executions-active")
                     .to_owned(),
             )
             .await?;
         manager
             .drop_index(
-                sea_query::Index::drop()
-                    .name("idx_task_execution_failures-manager_id")
+                Index::drop()
+                    .name("idx_suite_hook_executions-agent_id")
                     .to_owned(),
             )
             .await?;
         manager
             .drop_index(
-                sea_query::Index::drop()
-                    .name("idx_task_execution_failures-task_uuid")
+                Index::drop()
+                    .name("idx_suite_hook_executions-task_suite_id")
                     .to_owned(),
             )
             .await?;
         manager
             .drop_index(
-                sea_query::Index::drop()
-                    .name("idx_task_execution_failures-task_uuid-manager_id")
+                Index::drop()
+                    .name("idx_suite_hook_executions-suite_agent")
                     .to_owned(),
             )
             .await?;
         manager
-            .drop_table(Table::drop().table(TaskExecutionFailures::Table).to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(SuiteHookExecutions::Table)
+                    .to_owned(),
+            )
             .await
     }
 }
 
 #[derive(DeriveIden)]
-enum TaskExecutionFailures {
+enum SuiteHookExecutions {
     Table,
     Id,
-    TaskId,
-    TaskUuid,
     TaskSuiteId,
-    ManagerId,
-    FailureCount,
-    LastFailureAt,
-    ErrorMessages,
-    WorkerLocalId,
+    AgentId,
+    HookType,
+    Spec,
+    State,
+    Result,
+    StartedAt,
+    CompletedAt,
     CreatedAt,
     UpdatedAt,
 }
@@ -193,7 +196,7 @@ enum TaskSuites {
 }
 
 #[derive(DeriveIden)]
-enum NodeManagers {
+enum Agents {
     Table,
     Id,
 }

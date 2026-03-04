@@ -9,74 +9,73 @@ impl MigrationTrait for Migration {
         manager
             .create_table(
                 Table::create()
-                    .table(NodeManagers::Table)
+                    .table(Agents::Table)
                     .if_not_exists()
                     .col(
-                        ColumnDef::new(NodeManagers::Id)
+                        ColumnDef::new(Agents::Id)
                             .big_integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
                     )
+                    .col(ColumnDef::new(Agents::Uuid).uuid().not_null().unique_key())
+                    .col(ColumnDef::new(Agents::CreatorId).big_integer().not_null())
+                    .col(ColumnDef::new(Agents::MachineId).big_integer())
                     .col(
-                        ColumnDef::new(NodeManagers::Uuid)
-                            .uuid()
-                            .not_null()
-                            .unique_key(),
-                    )
-                    .col(
-                        ColumnDef::new(NodeManagers::CreatorId)
-                            .big_integer()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(NodeManagers::Tags)
+                        ColumnDef::new(Agents::Tags)
                             .array(ColumnType::Text)
                             .not_null(),
                     )
                     .col(
-                        ColumnDef::new(NodeManagers::Labels)
+                        ColumnDef::new(Agents::Labels)
                             .array(ColumnType::Text)
                             .not_null(),
                     )
                     .col(
-                        ColumnDef::new(NodeManagers::State)
+                        ColumnDef::new(Agents::State)
                             .integer()
                             .not_null()
                             .default(0),
                     )
                     .col(
-                        ColumnDef::new(NodeManagers::LastHeartbeat)
+                        ColumnDef::new(Agents::LastHeartbeat)
                             .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
-                    .col(ColumnDef::new(NodeManagers::AssignedTaskSuiteId).big_integer())
-                    .col(ColumnDef::new(NodeManagers::LeaseExpiresAt).timestamp_with_time_zone())
+                    .col(ColumnDef::new(Agents::AssignedTaskSuiteId).big_integer())
                     .col(
-                        ColumnDef::new(NodeManagers::CreatedAt)
+                        ColumnDef::new(Agents::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
                     .col(
-                        ColumnDef::new(NodeManagers::UpdatedAt)
+                        ColumnDef::new(Agents::UpdatedAt)
                             .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
                     .foreign_key(
                         ForeignKey::create()
-                            .name("fk-node_managers-creator_id")
-                            .from(NodeManagers::Table, NodeManagers::CreatorId)
+                            .name("fk-agents-creator_id")
+                            .from(Agents::Table, Agents::CreatorId)
                             .to(Users::Table, Users::Id)
                             .on_delete(ForeignKeyAction::Restrict)
                             .on_update(ForeignKeyAction::Cascade),
                     )
                     .foreign_key(
                         ForeignKey::create()
-                            .name("fk-node_managers-assigned_task_suite_id")
-                            .from(NodeManagers::Table, NodeManagers::AssignedTaskSuiteId)
+                            .name("fk-agents-machine_id")
+                            .from(Agents::Table, Agents::MachineId)
+                            .to(Machines::Table, Machines::Id)
+                            .on_delete(ForeignKeyAction::SetNull)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-agents-assigned_task_suite_id")
+                            .from(Agents::Table, Agents::AssignedTaskSuiteId)
                             .to(TaskSuites::Table, TaskSuites::Id)
                             .on_delete(ForeignKeyAction::SetNull)
                             .on_update(ForeignKeyAction::Cascade),
@@ -89,9 +88,9 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_node_managers-creator_id")
-                    .table(NodeManagers::Table)
-                    .col(NodeManagers::CreatorId)
+                    .name("idx_agents-creator_id")
+                    .table(Agents::Table)
+                    .col(Agents::CreatorId)
                     .to_owned(),
             )
             .await?;
@@ -99,9 +98,9 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_node_managers-state")
-                    .table(NodeManagers::Table)
-                    .col(NodeManagers::State)
+                    .name("idx_agents-state")
+                    .table(Agents::Table)
+                    .col(Agents::State)
                     .to_owned(),
             )
             .await?;
@@ -109,9 +108,9 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_node_managers-heartbeat")
-                    .table(NodeManagers::Table)
-                    .col(NodeManagers::LastHeartbeat)
+                    .name("idx_agents-heartbeat")
+                    .table(Agents::Table)
+                    .col(Agents::LastHeartbeat)
                     .to_owned(),
             )
             .await?;
@@ -121,9 +120,9 @@ impl MigrationTrait for Migration {
             .create_index(
                 sea_query::Index::create()
                     .if_not_exists()
-                    .name("idx_node_managers-tags_gin")
-                    .table(NodeManagers::Table)
-                    .col(NodeManagers::Tags)
+                    .name("idx_agents-tags_gin")
+                    .table(Agents::Table)
+                    .col(Agents::Tags)
                     .full_text()
                     .to_owned(),
             )
@@ -133,9 +132,9 @@ impl MigrationTrait for Migration {
             .create_index(
                 sea_query::Index::create()
                     .if_not_exists()
-                    .name("idx_node_managers-labels_gin")
-                    .table(NodeManagers::Table)
-                    .col(NodeManagers::Labels)
+                    .name("idx_agents-labels_gin")
+                    .table(Agents::Table)
+                    .col(Agents::Labels)
                     .full_text()
                     .to_owned(),
             )
@@ -146,10 +145,10 @@ impl MigrationTrait for Migration {
             .create_index(
                 sea_query::Index::create()
                     .if_not_exists()
-                    .name("idx_node_managers-assigned_task_suite")
-                    .table(NodeManagers::Table)
-                    .col(NodeManagers::AssignedTaskSuiteId)
-                    .and_where(Expr::col(NodeManagers::AssignedTaskSuiteId).is_not_null())
+                    .name("idx_agents-assigned_task_suite")
+                    .table(Agents::Table)
+                    .col(Agents::AssignedTaskSuiteId)
+                    .and_where(Expr::col(Agents::AssignedTaskSuiteId).is_not_null())
                     .to_owned(),
             )
             .await?;
@@ -161,69 +160,71 @@ impl MigrationTrait for Migration {
         manager
             .drop_index(
                 sea_query::Index::drop()
-                    .name("idx_node_managers-assigned_task_suite")
+                    .name("idx_agents-assigned_task_suite")
                     .to_owned(),
             )
             .await?;
         manager
             .drop_index(
                 sea_query::Index::drop()
-                    .name("idx_node_managers-labels_gin")
+                    .name("idx_agents-labels_gin")
                     .to_owned(),
             )
             .await?;
         manager
             .drop_index(
                 sea_query::Index::drop()
-                    .name("idx_node_managers-tags_gin")
+                    .name("idx_agents-tags_gin")
                     .to_owned(),
             )
             .await?;
         manager
             .drop_index(
                 sea_query::Index::drop()
-                    .name("idx_node_managers-heartbeat")
+                    .name("idx_agents-heartbeat")
                     .to_owned(),
             )
+            .await?;
+        manager
+            .drop_index(sea_query::Index::drop().name("idx_agents-state").to_owned())
             .await?;
         manager
             .drop_index(
                 sea_query::Index::drop()
-                    .name("idx_node_managers-state")
+                    .name("idx_agents-creator_id")
                     .to_owned(),
             )
             .await?;
         manager
-            .drop_index(
-                sea_query::Index::drop()
-                    .name("idx_node_managers-creator_id")
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .drop_table(Table::drop().table(NodeManagers::Table).to_owned())
+            .drop_table(Table::drop().table(Agents::Table).to_owned())
             .await
     }
 }
 
 #[derive(DeriveIden)]
-enum NodeManagers {
+enum Agents {
     Table,
     Id,
     Uuid,
     CreatorId,
+    MachineId,
     Tags,
     Labels,
     State,
     LastHeartbeat,
     AssignedTaskSuiteId,
-    LeaseExpiresAt,
     CreatedAt,
     UpdatedAt,
 }
 
 #[derive(DeriveIden)]
 enum Users {
+    Table,
+    Id,
+}
+
+#[derive(DeriveIden)]
+enum Machines {
     Table,
     Id,
 }

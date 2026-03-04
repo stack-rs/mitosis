@@ -103,9 +103,9 @@ pub struct DownloadArtifactsByFilterArgs {
     /// The priority of the tasks, support operators like `=`(default), `!=`, `<`, `<=`, `>`, `>=`
     #[arg(short, long)]
     pub priority: Option<String>,
-    /// Filter by reporter worker UUID (only returns artifacts from completed tasks reported by this worker)
+    /// Filter by runner UUID (worker or agent that executed the tasks)
     #[arg(long)]
-    pub reporter_uuid: Option<Uuid>,
+    pub runner_id: Option<Uuid>,
     /// Filter tasks by suite UUID
     #[arg(long = "suite")]
     pub suite_uuid: Option<Uuid>,
@@ -148,7 +148,7 @@ pub struct DownloadArtifactsByListArgs {
 impl From<DownloadArtifactsByFilterArgs> for ArtifactsDownloadByFilterReq {
     fn from(args: DownloadArtifactsByFilterArgs) -> Self {
         Self {
-            reporter_uuid: args.reporter_uuid,
+            runner_id: args.runner_id,
             creator_usernames: if args.creators.is_empty() {
                 None
             } else {
@@ -213,9 +213,9 @@ pub struct DeleteArtifactsByFilterArgs {
     /// The priority of the tasks, support operators like `=`(default), `!=`, `<`, `<=`, `>`, `>=`
     #[arg(short, long)]
     pub priority: Option<String>,
-    /// Filter by reporter worker UUID (only deletes artifacts from completed tasks reported by this worker)
+    /// Filter by runner UUID (worker or agent that executed the tasks)
     #[arg(long)]
-    pub reporter_uuid: Option<Uuid>,
+    pub runner_id: Option<Uuid>,
     /// Filter tasks by suite UUID
     #[arg(long = "suite")]
     pub suite_uuid: Option<Uuid>,
@@ -234,7 +234,7 @@ pub struct DeleteArtifactsByListArgs {
 impl From<DeleteArtifactsByFilterArgs> for ArtifactsDeleteByFilterReq {
     fn from(args: DeleteArtifactsByFilterArgs) -> Self {
         Self {
-            reporter_uuid: args.reporter_uuid,
+            runner_id: args.runner_id,
             creator_usernames: if args.creators.is_empty() {
                 None
             } else {

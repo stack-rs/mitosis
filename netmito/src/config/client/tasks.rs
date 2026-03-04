@@ -6,7 +6,7 @@ use crate::{
     config::client::parse_resources,
     entity::state::{TaskExecState, TaskState},
     schema::{
-        ChangeTaskReq, RemoteResourceDownload, SubmitTaskReq, TaskSpec, TasksCancelByFilterReq,
+        ChangeTaskReq, RemoteResourceDownload, SubmitTaskReq, TasksCancelByFilterReq,
         TasksCancelByUuidsReq, TasksQueryReq, TasksSubmitReq, UpdateTaskLabelsReq,
     },
 };
@@ -109,9 +109,9 @@ pub struct QueryTasksArgs {
     /// The priority of the tasks, support operators like `=`(default), `!=`, `<`, `<=`, `>`, `>=`
     #[arg(short, long)]
     pub priority: Option<String>,
-    /// Filter by reporter worker UUID (only returns completed tasks reported by this worker)
+    /// Filter by runner UUID (worker or agent that executed the tasks)
     #[arg(long)]
-    pub reporter_uuid: Option<Uuid>,
+    pub runner_id: Option<Uuid>,
     /// Filter tasks by suite UUID
     #[arg(long = "suite")]
     pub suite_uuid: Option<Uuid>,
@@ -213,7 +213,7 @@ impl From<QueryTasksArgs> for TasksQueryReq {
     fn from(args: QueryTasksArgs) -> Self {
         Self {
             suite_uuid: args.suite_uuid,
-            reporter_uuid: args.reporter_uuid,
+            runner_id: args.runner_id,
             creator_usernames: if args.creators.is_empty() {
                 None
             } else {
@@ -246,26 +246,31 @@ impl From<QueryTasksArgs> for TasksQueryReq {
 
 impl From<ChangeTaskArgs> for ChangeTaskReq {
     fn from(args: ChangeTaskArgs) -> Self {
-        let task_spec = if args.command.is_empty() {
+        use crate::schema::{ExecSpec, TaskExecOptions};
+
+        let spec = if args.command.is_empty() {
             None
         } else {
-            Some(TaskSpec::new(
-                args.command,
-                args.envs,
-                args.resources,
-                args.terminal_output,
-                args.watch,
-            ))
+            Some(ExecSpec {
+                args: args.command,
+                envs: args.envs.into_iter().collect(),
+                resources: args.resources,
+                timeout: args.timeout,
+                terminal_output: args.terminal_output,
+            })
         };
+        let exec_options = args
+            .watch
+            .map(|watch| TaskExecOptions { watch: Some(watch) });
         Self {
             tags: if args.tags.is_empty() {
                 None
             } else {
                 Some(args.tags.into_iter().collect())
             },
-            timeout: args.timeout,
             priority: args.priority,
-            task_spec,
+            spec,
+            exec_options,
         }
     }
 }

@@ -1305,4 +1305,270 @@ impl MitoHttpClient {
             Err(get_error_from_resp(resp).await.into())
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Suite methods
+    // -------------------------------------------------------------------------
+
+    pub async fn create_task_suite(
+        &mut self,
+        req: CreateTaskSuiteReq,
+    ) -> crate::error::Result<CreateTaskSuiteResp> {
+        self.url.set_path("suites");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<CreateTaskSuiteResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn query_task_suites(
+        &mut self,
+        req: TaskSuitesQueryReq,
+    ) -> crate::error::Result<TaskSuitesQueryResp> {
+        self.url.set_path("suites/query");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<TaskSuitesQueryResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn get_task_suite(
+        &mut self,
+        uuid: Uuid,
+    ) -> crate::error::Result<TaskSuiteQueryResp> {
+        self.url.set_path(&format!("suites/{uuid}"));
+        let resp = self
+            .http_client
+            .get(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<TaskSuiteQueryResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn cancel_task_suite(
+        &mut self,
+        uuid: Uuid,
+        force: bool,
+    ) -> crate::error::Result<CancelSuiteResp> {
+        self.url.set_path(&format!("suites/{uuid}"));
+        if force {
+            self.url.set_query(Some("op=force"));
+        } else {
+            self.url.set_query(None);
+        }
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<CancelSuiteResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn close_task_suite(&mut self, uuid: Uuid) -> crate::error::Result<()> {
+        self.url.set_path(&format!("suites/{uuid}/close"));
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn refresh_suite_agents(
+        &mut self,
+        uuid: Uuid,
+    ) -> crate::error::Result<RefreshSuiteAgentsResp> {
+        self.url.set_path(&format!("suites/{uuid}/agents/refresh"));
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<RefreshSuiteAgentsResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn add_suite_agents(
+        &mut self,
+        uuid: Uuid,
+        req: AddSuiteAgentsReq,
+    ) -> crate::error::Result<AddSuiteAgentsResp> {
+        self.url.set_path(&format!("suites/{uuid}/agents"));
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<AddSuiteAgentsResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn remove_suite_agents(
+        &mut self,
+        uuid: Uuid,
+        req: RemoveSuiteAgentsReq,
+    ) -> crate::error::Result<RemoveSuiteAgentsResp> {
+        self.url.set_path(&format!("suites/{uuid}/agents/remove"));
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<RemoveSuiteAgentsResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Agent methods
+    // -------------------------------------------------------------------------
+
+    pub async fn register_agent(
+        &mut self,
+        req: RegisterAgentReq,
+    ) -> crate::error::Result<RegisterAgentResp> {
+        self.url.set_path("agents");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<RegisterAgentResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn query_agents(
+        &mut self,
+        req: AgentsQueryReq,
+    ) -> crate::error::Result<AgentsQueryResp> {
+        self.url.set_path("agents/query");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<AgentsQueryResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn shutdown_agent(&mut self, uuid: Uuid, force: bool) -> crate::error::Result<()> {
+        self.url.set_path(&format!("agents/{uuid}"));
+        if force {
+            self.url.set_query(Some("op=force"));
+        } else {
+            self.url.set_query(None);
+        }
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
 }

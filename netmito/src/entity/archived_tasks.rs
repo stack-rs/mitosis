@@ -19,14 +19,13 @@ pub struct Model {
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
     pub state: TaskState,
-    pub assigned_worker: Option<i64>,
-    pub timeout: i64,
+    pub runner_id: Option<Uuid>,
     pub priority: i32,
     pub spec: Json,
+    pub exec_options: Option<Json>,
     pub result: Option<Json>,
     pub upstream_task_uuid: Option<Uuid>,
     pub downstream_task_uuid: Option<Uuid>,
-    pub reporter_uuid: Option<Uuid>,
     pub task_suite_id: Option<i64>,
 }
 

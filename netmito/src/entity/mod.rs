@@ -3,18 +3,19 @@
 pub mod prelude;
 
 pub mod active_tasks;
+pub mod agents;
 pub mod archived_tasks;
 pub mod artifacts;
 pub mod attachments;
 pub mod content;
-pub mod group_node_manager;
+pub mod group_agent;
 pub mod group_worker;
 pub mod groups;
-pub mod node_managers;
+pub mod machines;
 pub mod role;
 pub mod state;
-pub mod task_execution_failures;
-pub mod task_suite_node_manager;
+pub mod suite_hook_executions;
+pub mod task_suite_agent;
 pub mod task_suites;
 pub mod user_group;
 pub mod users;

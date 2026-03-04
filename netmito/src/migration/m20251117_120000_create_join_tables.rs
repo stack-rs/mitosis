@@ -6,43 +6,35 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // Create group_node_manager table
+        // Create group_agent table
         manager
             .create_table(
                 Table::create()
-                    .table(GroupNodeManager::Table)
+                    .table(GroupAgent::Table)
                     .if_not_exists()
                     .col(
-                        ColumnDef::new(GroupNodeManager::Id)
+                        ColumnDef::new(GroupAgent::Id)
                             .big_integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(
-                        ColumnDef::new(GroupNodeManager::GroupId)
-                            .big_integer()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(GroupNodeManager::ManagerId)
-                            .big_integer()
-                            .not_null(),
-                    )
-                    .col(ColumnDef::new(GroupNodeManager::Role).integer().not_null())
+                    .col(ColumnDef::new(GroupAgent::GroupId).big_integer().not_null())
+                    .col(ColumnDef::new(GroupAgent::AgentId).big_integer().not_null())
+                    .col(ColumnDef::new(GroupAgent::Role).integer().not_null())
                     .foreign_key(
                         ForeignKey::create()
-                            .name("fk-group_node_manager-group_id")
-                            .from(GroupNodeManager::Table, GroupNodeManager::GroupId)
+                            .name("fk-group_agent-group_id")
+                            .from(GroupAgent::Table, GroupAgent::GroupId)
                             .to(Groups::Table, Groups::Id)
                             .on_delete(ForeignKeyAction::Restrict)
                             .on_update(ForeignKeyAction::Cascade),
                     )
                     .foreign_key(
                         ForeignKey::create()
-                            .name("fk-group_node_manager-manager_id")
-                            .from(GroupNodeManager::Table, GroupNodeManager::ManagerId)
-                            .to(NodeManagers::Table, NodeManagers::Id)
+                            .name("fk-group_agent-agent_id")
+                            .from(GroupAgent::Table, GroupAgent::AgentId)
+                            .to(Agents::Table, Agents::Id)
                             .on_delete(ForeignKeyAction::Cascade)
                             .on_update(ForeignKeyAction::Cascade),
                     )
@@ -50,14 +42,14 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // Unique constraint on (group_id, manager_id)
+        // Unique constraint on (group_id, agent_id)
         manager
             .create_index(
                 Index::create()
-                    .name("idx_group_node_manager-group_id-manager_id")
-                    .table(GroupNodeManager::Table)
-                    .col(GroupNodeManager::GroupId)
-                    .col(GroupNodeManager::ManagerId)
+                    .name("idx_group_agent-group_id-agent_id")
+                    .table(GroupAgent::Table)
+                    .col(GroupAgent::GroupId)
+                    .col(GroupAgent::AgentId)
                     .unique()
                     .to_owned(),
             )
@@ -66,9 +58,9 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_group_node_manager-group_id")
-                    .table(GroupNodeManager::Table)
-                    .col(GroupNodeManager::GroupId)
+                    .name("idx_group_agent-group_id")
+                    .table(GroupAgent::Table)
+                    .col(GroupAgent::GroupId)
                     .to_owned(),
             )
             .await?;
@@ -76,72 +68,69 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_group_node_manager-manager_id")
-                    .table(GroupNodeManager::Table)
-                    .col(GroupNodeManager::ManagerId)
+                    .name("idx_group_agent-agent_id")
+                    .table(GroupAgent::Table)
+                    .col(GroupAgent::AgentId)
                     .to_owned(),
             )
             .await?;
 
-        // Create task_suite_node_manager table
+        // Create task_suite_agent table
         manager
             .create_table(
                 Table::create()
-                    .table(TaskSuiteNodeManager::Table)
+                    .table(TaskSuiteAgent::Table)
                     .if_not_exists()
                     .col(
-                        ColumnDef::new(TaskSuiteNodeManager::Id)
+                        ColumnDef::new(TaskSuiteAgent::Id)
                             .big_integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
                     )
                     .col(
-                        ColumnDef::new(TaskSuiteNodeManager::TaskSuiteId)
+                        ColumnDef::new(TaskSuiteAgent::TaskSuiteId)
                             .big_integer()
                             .not_null(),
                     )
                     .col(
-                        ColumnDef::new(TaskSuiteNodeManager::ManagerId)
+                        ColumnDef::new(TaskSuiteAgent::AgentId)
                             .big_integer()
                             .not_null(),
                     )
                     .col(
-                        ColumnDef::new(TaskSuiteNodeManager::SelectionType)
+                        ColumnDef::new(TaskSuiteAgent::SelectionType)
                             .integer()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(TaskSuiteNodeManager::MatchedTags).array(ColumnType::Text))
+                    .col(ColumnDef::new(TaskSuiteAgent::MatchedTags).array(ColumnType::Text))
                     .col(
-                        ColumnDef::new(TaskSuiteNodeManager::CreatedAt)
+                        ColumnDef::new(TaskSuiteAgent::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
-                    .col(ColumnDef::new(TaskSuiteNodeManager::CreatorId).big_integer())
+                    .col(ColumnDef::new(TaskSuiteAgent::CreatorId).big_integer())
                     .foreign_key(
                         ForeignKey::create()
-                            .name("fk-task_suite_node_manager-task_suite_id")
-                            .from(
-                                TaskSuiteNodeManager::Table,
-                                TaskSuiteNodeManager::TaskSuiteId,
-                            )
+                            .name("fk-task_suite_agent-task_suite_id")
+                            .from(TaskSuiteAgent::Table, TaskSuiteAgent::TaskSuiteId)
                             .to(TaskSuites::Table, TaskSuites::Id)
                             .on_delete(ForeignKeyAction::Cascade)
                             .on_update(ForeignKeyAction::Cascade),
                     )
                     .foreign_key(
                         ForeignKey::create()
-                            .name("fk-task_suite_node_manager-manager_id")
-                            .from(TaskSuiteNodeManager::Table, TaskSuiteNodeManager::ManagerId)
-                            .to(NodeManagers::Table, NodeManagers::Id)
+                            .name("fk-task_suite_agent-agent_id")
+                            .from(TaskSuiteAgent::Table, TaskSuiteAgent::AgentId)
+                            .to(Agents::Table, Agents::Id)
                             .on_delete(ForeignKeyAction::Cascade)
                             .on_update(ForeignKeyAction::Cascade),
                     )
                     .foreign_key(
                         ForeignKey::create()
-                            .name("fk-task_suite_node_manager-creator_id")
-                            .from(TaskSuiteNodeManager::Table, TaskSuiteNodeManager::CreatorId)
+                            .name("fk-task_suite_agent-creator_id")
+                            .from(TaskSuiteAgent::Table, TaskSuiteAgent::CreatorId)
                             .to(Users::Table, Users::Id)
                             .on_delete(ForeignKeyAction::SetNull)
                             .on_update(ForeignKeyAction::Cascade),
@@ -150,14 +139,14 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // Unique constraint on (task_suite_id, manager_id)
+        // Unique constraint on (task_suite_id, agent_id)
         manager
             .create_index(
                 Index::create()
-                    .name("idx_task_suite_node_manager-task_suite_id-manager_id")
-                    .table(TaskSuiteNodeManager::Table)
-                    .col(TaskSuiteNodeManager::TaskSuiteId)
-                    .col(TaskSuiteNodeManager::ManagerId)
+                    .name("idx_task_suite_agent-task_suite_id-agent_id")
+                    .table(TaskSuiteAgent::Table)
+                    .col(TaskSuiteAgent::TaskSuiteId)
+                    .col(TaskSuiteAgent::AgentId)
                     .unique()
                     .to_owned(),
             )
@@ -166,9 +155,9 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_task_suite_node_manager-task_suite_id")
-                    .table(TaskSuiteNodeManager::Table)
-                    .col(TaskSuiteNodeManager::TaskSuiteId)
+                    .name("idx_task_suite_agent-task_suite_id")
+                    .table(TaskSuiteAgent::Table)
+                    .col(TaskSuiteAgent::TaskSuiteId)
                     .to_owned(),
             )
             .await?;
@@ -176,9 +165,9 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_task_suite_node_manager-manager_id")
-                    .table(TaskSuiteNodeManager::Table)
-                    .col(TaskSuiteNodeManager::ManagerId)
+                    .name("idx_task_suite_agent-agent_id")
+                    .table(TaskSuiteAgent::Table)
+                    .col(TaskSuiteAgent::AgentId)
                     .to_owned(),
             )
             .await?;
@@ -186,9 +175,9 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_task_suite_node_manager-selection_type")
-                    .table(TaskSuiteNodeManager::Table)
-                    .col(TaskSuiteNodeManager::SelectionType)
+                    .name("idx_task_suite_agent-selection_type")
+                    .table(TaskSuiteAgent::Table)
+                    .col(TaskSuiteAgent::SelectionType)
                     .to_owned(),
             )
             .await?;
@@ -200,77 +189,77 @@ impl MigrationTrait for Migration {
         manager
             .drop_index(
                 sea_query::Index::drop()
-                    .name("idx_task_suite_node_manager-selection_type")
+                    .name("idx_task_suite_agent-selection_type")
                     .to_owned(),
             )
             .await?;
         manager
             .drop_index(
                 sea_query::Index::drop()
-                    .name("idx_task_suite_node_manager-manager_id")
+                    .name("idx_task_suite_agent-agent_id")
                     .to_owned(),
             )
             .await?;
         manager
             .drop_index(
                 sea_query::Index::drop()
-                    .name("idx_task_suite_node_manager-task_suite_id")
+                    .name("idx_task_suite_agent-task_suite_id")
                     .to_owned(),
             )
             .await?;
         manager
             .drop_index(
                 sea_query::Index::drop()
-                    .name("idx_task_suite_node_manager-task_suite_id-manager_id")
+                    .name("idx_task_suite_agent-task_suite_id-agent_id")
                     .to_owned(),
             )
             .await?;
         manager
-            .drop_table(Table::drop().table(TaskSuiteNodeManager::Table).to_owned())
+            .drop_table(Table::drop().table(TaskSuiteAgent::Table).to_owned())
             .await?;
 
         manager
             .drop_index(
                 sea_query::Index::drop()
-                    .name("idx_group_node_manager-manager_id")
+                    .name("idx_group_agent-agent_id")
                     .to_owned(),
             )
             .await?;
         manager
             .drop_index(
                 sea_query::Index::drop()
-                    .name("idx_group_node_manager-group_id")
+                    .name("idx_group_agent-group_id")
                     .to_owned(),
             )
             .await?;
         manager
             .drop_index(
                 sea_query::Index::drop()
-                    .name("idx_group_node_manager-group_id-manager_id")
+                    .name("idx_group_agent-group_id-agent_id")
                     .to_owned(),
             )
             .await?;
         manager
-            .drop_table(Table::drop().table(GroupNodeManager::Table).to_owned())
+            .drop_table(Table::drop().table(GroupAgent::Table).to_owned())
             .await
     }
 }
 
 #[derive(DeriveIden)]
-enum GroupNodeManager {
+enum GroupAgent {
     Table,
     Id,
     GroupId,
-    ManagerId,
+    AgentId,
     Role,
 }
 
 #[derive(DeriveIden)]
-enum TaskSuiteNodeManager {
+enum TaskSuiteAgent {
     Table,
     Id,
     TaskSuiteId,
-    ManagerId,
+    AgentId,
     SelectionType,
     MatchedTags,
     CreatedAt,
@@ -284,7 +273,7 @@ enum Groups {
 }
 
 #[derive(DeriveIden)]
-enum NodeManagers {
+enum Agents {
     Table,
     Id,
 }

@@ -8,21 +8,61 @@ use uuid::Uuid;
 
 use crate::config::InfraPool;
 use crate::entity::{
-    active_tasks as ActiveTasks, archived_tasks as ArchivedTasks, groups as Group,
-    node_managers as NodeManager,
-    role::UserGroupRole,
-    state::{TaskState, TaskSuiteState},
-    task_suite_node_manager as TaskSuiteNodeManager,
+    active_tasks as ActiveTasks, agents as Agent, archived_tasks as ArchivedTasks,
+    group_agent as GroupAgent, groups as Group,
+    role::{GroupAgentRole, UserGroupRole},
+    state::{SelectionType, TaskState, TaskSuiteState},
+    task_suite_agent as TaskSuiteAgent,
     task_suites::{self as TaskSuites},
     user_group as UserGroup, users as User,
 };
 use crate::error::{ApiError, Error, Result};
 use crate::schema::{
-    CancelSuiteResp, CancelTaskSuiteOp, CountQuery, CreateTaskSuiteReq, CreateTaskSuiteResp,
-    EnvHookSpec, ParsedTaskSuiteInfo, TaskResultSpec, TaskSuiteInfo, TaskSuiteQueryResp,
-    TaskSuitesQueryReq, TaskSuitesQueryResp, WorkerSchedulePlan,
+    AddSuiteAgentsReq, AddSuiteAgentsResp, AgentAssignmentInfo, AgentNotification, CancelSuiteResp,
+    CancelTaskSuiteOp, CountQuery, CreateTaskSuiteReq, CreateTaskSuiteResp, ExecHooks,
+    ParsedTaskSuiteInfo, RefreshSuiteAgentsResp, RemoveSuiteAgentsReq, RemoveSuiteAgentsResp,
+    TaskResultSpec, TaskSuiteInfo, TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp,
+    WorkerSchedulePlan,
 };
+use crate::service::suite_task_dispatcher::SuiteDispatcherOp;
 use crate::service::task::parse_operators_with_number;
+use crate::ws::connection::AgentWsRouter;
+
+/// Runs the auto-close check for inactive suites.
+/// Transitions suites from Open to Closed if no tasks have been submitted
+/// for more than `timeout_secs` seconds.
+///
+/// This function should be called periodically (e.g., every 30 seconds).
+pub async fn auto_close_inactive_suites(db: &DatabaseConnection, timeout_secs: i64) -> Result<u64> {
+    let now = TimeDateTimeWithTimeZone::now_utc();
+
+    let threshold = now - time::Duration::seconds(timeout_secs);
+
+    // Transition Open suites to Closed if:
+    // - State is Open
+    // - last_task_submitted_at is set and older than threshold
+    let updated = TaskSuites::Entity::update_many()
+        .col_expr(
+            TaskSuites::Column::State,
+            Expr::value(TaskSuiteState::Closed),
+        )
+        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+        .filter(TaskSuites::Column::State.eq(TaskSuiteState::Open))
+        .filter(TaskSuites::Column::LastTaskSubmittedAt.is_not_null())
+        .filter(TaskSuites::Column::LastTaskSubmittedAt.lt(threshold))
+        .exec(db)
+        .await?;
+
+    if updated.rows_affected > 0 {
+        tracing::debug!(
+            count = updated.rows_affected,
+            "Auto-closed inactive suites after {} seconds of inactivity",
+            timeout_secs
+        );
+    }
+
+    Ok(updated.rows_affected)
+}
 
 /// Decrements pending_tasks when a task completes or is cancelled.
 /// If pending_tasks reaches 0, transitions the suite to Complete state.
@@ -34,45 +74,51 @@ pub async fn decrement_suite_task_counter<C>(
     now: TimeDateTimeWithTimeZone,
 ) -> Result<()>
 where
-    C: ConnectionTrait,
+    C: TransactionTrait,
 {
-    // First, decrement the pending_tasks counter
-    // We only decrement if pending_tasks > 0 to prevent negative values
-    let updated = TaskSuites::Entity::update_many()
-        .col_expr(
-            TaskSuites::Column::PendingTasks,
-            Expr::col(TaskSuites::Column::PendingTasks).sub(1),
-        )
-        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
-        .filter(TaskSuites::Column::Id.eq(task_suite_id))
-        .filter(TaskSuites::Column::PendingTasks.gt(0))
-        .exec_with_returning(db)
-        .await?;
-
-    // Check if this was the last pending task and transition to Complete if needed
-    if let Some(suite) = updated.into_iter().next() {
-        if suite.pending_tasks == 0 && !suite.state.is_terminal() {
-            // Passively transition to Complete state
-            TaskSuites::Entity::update_many()
+    db.transaction::<_, (), Error>(|txn| {
+        Box::pin(async move {
+            // First, decrement the pending_tasks counter
+            // We only decrement if pending_tasks > 0 to prevent negative values
+            let updated = TaskSuites::Entity::update_many()
                 .col_expr(
-                    TaskSuites::Column::State,
-                    Expr::value(TaskSuiteState::Complete),
+                    TaskSuites::Column::PendingTasks,
+                    Expr::col(TaskSuites::Column::PendingTasks).sub(1),
                 )
-                .col_expr(TaskSuites::Column::CompletedAt, Expr::value(now))
                 .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
                 .filter(TaskSuites::Column::Id.eq(task_suite_id))
-                .filter(TaskSuites::Column::PendingTasks.eq(0))
-                .exec(db)
+                .filter(TaskSuites::Column::PendingTasks.gt(0))
+                .exec_with_returning(txn)
                 .await?;
 
-            tracing::debug!(
-                task_suite_id = task_suite_id,
-                "Task suite transitioned to Complete (all tasks finished)"
-            );
-        }
-    }
+            // Check if this was the last pending task and transition to Complete if needed
+            if let Some(suite) = updated.into_iter().next() {
+                if suite.pending_tasks == 0 && !suite.state.is_terminal() {
+                    // Passively transition to Complete state
+                    TaskSuites::Entity::update_many()
+                        .col_expr(
+                            TaskSuites::Column::State,
+                            Expr::value(TaskSuiteState::Complete),
+                        )
+                        .col_expr(TaskSuites::Column::CompletedAt, Expr::value(now))
+                        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+                        .filter(TaskSuites::Column::Id.eq(task_suite_id))
+                        .filter(TaskSuites::Column::PendingTasks.eq(0))
+                        .exec(txn)
+                        .await?;
 
-    Ok(())
+                    tracing::debug!(
+                        task_suite_id = task_suite_id,
+                        "Task suite transitioned to Complete (all tasks finished)"
+                    );
+                }
+            }
+
+            Ok(())
+        })
+    })
+    .await
+    .map_err(Into::into)
 }
 
 /// Manually closes a task suite, preventing new tasks from being added.
@@ -144,13 +190,12 @@ pub async fn user_create_task_suite(
         labels,
         priority,
         worker_schedule,
-        env_preparation,
-        env_cleanup,
+        exec_hooks,
     }: CreateTaskSuiteReq,
 ) -> Result<CreateTaskSuiteResp> {
     // Validate worker configuration based on the policy variant
     match &worker_schedule {
-        // TODO: this should finnaly be adjusted
+        // TODO: this should finally be adjusted to some more flexible definitions
         WorkerSchedulePlan::FixedWorkers {
             worker_count,
             task_prefetch_count,
@@ -206,10 +251,7 @@ pub async fn user_create_task_suite(
 
     // Serialize JSON fields
     let worker_schedule_json = serde_json::to_value(&worker_schedule)?;
-    let env_preparation_json = env_preparation
-        .map(|h| serde_json::to_value(&h))
-        .transpose()?;
-    let env_cleanup_json = env_cleanup.map(|h| serde_json::to_value(&h)).transpose()?;
+    let exec_hooks_json = exec_hooks.map(|h| serde_json::to_value(&h)).transpose()?;
 
     // Generate UUID
     let suite_uuid = Uuid::new_v4();
@@ -225,8 +267,7 @@ pub async fn user_create_task_suite(
         labels: Set(labels),
         priority: Set(priority),
         worker_schedule: Set(worker_schedule_json),
-        env_preparation: Set(env_preparation_json),
-        env_cleanup: Set(env_cleanup_json),
+        exec_hooks: Set(exec_hooks_json),
         state: Set(TaskSuiteState::Open),
         total_tasks: Set(0),
         pending_tasks: Set(0),
@@ -451,8 +492,7 @@ pub async fn user_query_task_suites(
             (TaskSuites::Entity, TaskSuites::Column::Labels),
             (TaskSuites::Entity, TaskSuites::Column::Priority),
             (TaskSuites::Entity, TaskSuites::Column::WorkerSchedule),
-            (TaskSuites::Entity, TaskSuites::Column::EnvPreparation),
-            (TaskSuites::Entity, TaskSuites::Column::EnvCleanup),
+            (TaskSuites::Entity, TaskSuites::Column::ExecHooks),
             (TaskSuites::Entity, TaskSuites::Column::State),
             (TaskSuites::Entity, TaskSuites::Column::LastTaskSubmittedAt),
             (TaskSuites::Entity, TaskSuites::Column::TotalTasks),
@@ -528,8 +568,7 @@ struct SuiteDetailResult {
     labels: Vec<String>,
     priority: i32,
     worker_schedule: serde_json::Value,
-    env_preparation: Option<serde_json::Value>,
-    env_cleanup: Option<serde_json::Value>,
+    exec_hooks: Option<serde_json::Value>,
     state: TaskSuiteState,
     last_task_submitted_at: Option<TimeDateTimeWithTimeZone>,
     total_tasks: i32,
@@ -540,7 +579,7 @@ struct SuiteDetailResult {
 }
 
 #[derive(FromQueryResult)]
-struct ManagerUuidResult {
+struct AgentUuidResult {
     uuid: Uuid,
 }
 
@@ -564,8 +603,7 @@ pub async fn user_get_task_suite_by_uuid(
             (TaskSuites::Entity, TaskSuites::Column::Labels),
             (TaskSuites::Entity, TaskSuites::Column::Priority),
             (TaskSuites::Entity, TaskSuites::Column::WorkerSchedule),
-            (TaskSuites::Entity, TaskSuites::Column::EnvPreparation),
-            (TaskSuites::Entity, TaskSuites::Column::EnvCleanup),
+            (TaskSuites::Entity, TaskSuites::Column::ExecHooks),
             (TaskSuites::Entity, TaskSuites::Column::State),
             (TaskSuites::Entity, TaskSuites::Column::LastTaskSubmittedAt),
             (TaskSuites::Entity, TaskSuites::Column::TotalTasks),
@@ -607,29 +645,22 @@ pub async fn user_get_task_suite_by_uuid(
             "Task suite with uuid {suite_uuid} or user does not have permission"
         ))))?;
 
-    // Fetch assigned managers in a separate query
-    let manager_stmt = Query::select()
-        .column((NodeManager::Entity, NodeManager::Column::Uuid))
-        .from(NodeManager::Entity)
+    // Fetch assigned agents in a separate query
+    let agent_stmt = Query::select()
+        .column((Agent::Entity, Agent::Column::Uuid))
+        .from(Agent::Entity)
         .join(
             sea_orm::JoinType::Join,
-            TaskSuiteNodeManager::Entity,
-            Expr::col((
-                TaskSuiteNodeManager::Entity,
-                TaskSuiteNodeManager::Column::ManagerId,
-            ))
-            .eq(Expr::col((NodeManager::Entity, NodeManager::Column::Id))),
+            TaskSuiteAgent::Entity,
+            Expr::col((TaskSuiteAgent::Entity, TaskSuiteAgent::Column::AgentId))
+                .eq(Expr::col((Agent::Entity, Agent::Column::Id))),
         )
         .and_where(
-            Expr::col((
-                TaskSuiteNodeManager::Entity,
-                TaskSuiteNodeManager::Column::TaskSuiteId,
-            ))
-            .eq(suite.id),
+            Expr::col((TaskSuiteAgent::Entity, TaskSuiteAgent::Column::TaskSuiteId)).eq(suite.id),
         )
         .to_owned();
 
-    let manager_uuids = ManagerUuidResult::find_by_statement(builder.build(&manager_stmt))
+    let agent_uuids = AgentUuidResult::find_by_statement(builder.build(&agent_stmt))
         .all(&pool.db)
         .await?
         .into_iter()
@@ -638,12 +669,7 @@ pub async fn user_get_task_suite_by_uuid(
 
     // Parse JSON fields
     let worker_schedule: WorkerSchedulePlan = serde_json::from_value(suite.worker_schedule)?;
-    let env_preparation: Option<EnvHookSpec> = suite
-        .env_preparation
-        .map(serde_json::from_value)
-        .transpose()?;
-    let env_cleanup: Option<EnvHookSpec> =
-        suite.env_cleanup.map(serde_json::from_value).transpose()?;
+    let exec_hooks: Option<ExecHooks> = suite.exec_hooks.map(serde_json::from_value).transpose()?;
 
     Ok(TaskSuiteQueryResp {
         info: ParsedTaskSuiteInfo {
@@ -656,8 +682,7 @@ pub async fn user_get_task_suite_by_uuid(
             labels: suite.labels,
             priority: suite.priority,
             worker_schedule,
-            env_preparation,
-            env_cleanup,
+            exec_hooks,
             state: suite.state,
             last_task_submitted_at: suite.last_task_submitted_at,
             total_tasks: suite.total_tasks,
@@ -666,7 +691,7 @@ pub async fn user_get_task_suite_by_uuid(
             updated_at: suite.updated_at,
             completed_at: suite.completed_at,
         },
-        assigned_managers: manager_uuids,
+        assigned_agents: agent_uuids,
     })
 }
 
@@ -717,20 +742,126 @@ pub async fn user_close_task_suite(user_id: i64, pool: &InfraPool, suite_uuid: U
     Ok(())
 }
 
+// ============================================================================
+// Notification helpers
+// ============================================================================
+
+/// Fetch the UUIDs of all agents assigned to `suite_id`.
+async fn get_assigned_agent_uuids(
+    db: &sea_orm::DatabaseConnection,
+    suite_id: i64,
+) -> Result<Vec<Uuid>> {
+    #[derive(FromQueryResult)]
+    struct AgentUuidRow {
+        uuid: Uuid,
+    }
+
+    let builder = db.get_database_backend();
+    let stmt = Query::select()
+        .column((Agent::Entity, Agent::Column::Uuid))
+        .from(TaskSuiteAgent::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            Agent::Entity,
+            Expr::col((TaskSuiteAgent::Entity, TaskSuiteAgent::Column::AgentId))
+                .eq(Expr::col((Agent::Entity, Agent::Column::Id))),
+        )
+        .and_where(
+            Expr::col((TaskSuiteAgent::Entity, TaskSuiteAgent::Column::TaskSuiteId))
+                .eq(suite_id),
+        )
+        .to_owned();
+
+    let rows = AgentUuidRow::find_by_statement(builder.build(&stmt))
+        .all(db)
+        .await?;
+
+    Ok(rows.into_iter().map(|r| r.uuid).collect())
+}
+
+/// Send `SuiteAvailable` to all agents assigned to `suite_id`.
+/// Errors are logged rather than propagated (this is a best-effort notification).
+pub(crate) async fn notify_agents_suite_available(
+    pool: &InfraPool,
+    suite_id: i64,
+    suite_uuid: Uuid,
+    priority: i32,
+) {
+    match get_assigned_agent_uuids(&pool.db, suite_id).await {
+        Ok(agent_uuids) => {
+            for agent_uuid in agent_uuids {
+                let _ = AgentWsRouter::notify(
+                    &pool.ws_router_tx,
+                    agent_uuid,
+                    AgentNotification::SuiteAvailable {
+                        suite_uuid: Some(suite_uuid),
+                        priority,
+                    },
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                suite_uuid = %suite_uuid,
+                "Failed to query assigned agents for SuiteAvailable notification: {}",
+                e
+            );
+        }
+    }
+}
+
+/// Send `SuiteCancelled` to all agents assigned to `suite_id`.
+/// Errors are logged rather than propagated.
+pub(crate) async fn notify_agents_suite_cancelled(
+    pool: &InfraPool,
+    suite_id: i64,
+    suite_uuid: Uuid,
+) {
+    match get_assigned_agent_uuids(&pool.db, suite_id).await {
+        Ok(agent_uuids) => {
+            for agent_uuid in agent_uuids {
+                let _ = AgentWsRouter::notify(
+                    &pool.ws_router_tx,
+                    agent_uuid,
+                    AgentNotification::SuiteCancelled {
+                        suite_uuid,
+                        reason: "Suite was cancelled by user".to_string(),
+                    },
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                suite_uuid = %suite_uuid,
+                "Failed to query assigned agents for SuiteCancelled notification: {}",
+                e
+            );
+        }
+    }
+}
+
 /// Cancel a task suite, optionally cancelling all pending/ready tasks.
 /// User must have Write permission in the suite's group.
+///
+/// `op`:
+/// - `Graceful` (default): cancels Ready/Pending tasks; Running tasks finish naturally.
+/// - `Force`: also cancels Running tasks immediately and notifies the executing agents.
 pub async fn user_cancel_task_suite(
     user_id: i64,
     pool: &InfraPool,
     suite_uuid: Uuid,
-    _op: CancelTaskSuiteOp,
+    op: CancelTaskSuiteOp,
 ) -> Result<CancelSuiteResp> {
     let now = TimeDateTimeWithTimeZone::now_utc();
+    let force = matches!(op, CancelTaskSuiteOp::Force);
 
-    // Cancel suite and tasks in a single transaction
-    let cancelled_count = pool
+    // Cancel suite and tasks in a single transaction.
+    // Returns (cancelled_count, suite_id, running_task_infos) so we can notify agents
+    // after commit. running_task_infos carries (runner_id, task_uuid) pairs for any
+    // Running tasks that were force-cancelled.
+    let (cancelled_count, suite_id, running_task_infos) = pool
         .db
-        .transaction::<_, u64, Error>(|txn| {
+        .transaction::<_, (u64, i64, Vec<(Option<Uuid>, Uuid)>), Error>(|txn| {
             Box::pin(async move {
                 // Fetch suite
                 let suite = TaskSuites::Entity::find()
@@ -760,11 +891,16 @@ pub async fn user_cancel_task_suite(
                     ))));
                 }
 
-                // TODO: check if correctly inform the manager to cancel the task suite
-                // TODO: currently we do not use 'force' to cancel running tasks
-                // Cancel tasks if requested
+                // Shared cancellation result used for all cancelled tasks
+                let result = serde_json::to_value(TaskResultSpec {
+                    exit_status: 0,
+                    msg: Some(crate::schema::TaskResultMessage::UserCancellation),
+                })
+                .inspect_err(|e| tracing::error!("{}", e))?;
+
                 let mut cancelled_count = 0u64;
-                // Find all Ready/Pending tasks for this suite
+
+                // ── Cancel Ready/Pending tasks ──
                 let mut tasks_stmt = ActiveTasks::Entity::find()
                     .filter(ActiveTasks::Column::TaskSuiteId.eq(suite.id))
                     .to_owned();
@@ -772,21 +908,12 @@ pub async fn user_cancel_task_suite(
                     Expr::col(ActiveTasks::Column::State)
                         .eq(PgFunc::any(vec![TaskState::Ready, TaskState::Pending])),
                 );
-
                 let tasks = tasks_stmt.all(txn).await?;
 
                 if !tasks.is_empty() {
                     let task_ids: Vec<i64> = tasks.iter().map(|t| t.id).collect();
-                    cancelled_count = tasks.len() as u64;
+                    cancelled_count += tasks.len() as u64;
 
-                    // Create cancellation result
-                    let result = serde_json::to_value(TaskResultSpec {
-                        exit_status: 0,
-                        msg: Some(crate::schema::TaskResultMessage::UserCancellation),
-                    })
-                    .inspect_err(|e| tracing::error!("{}", e))?;
-
-                    // Prepare archived tasks
                     let archived_tasks: Vec<ArchivedTasks::ActiveModel> = tasks
                         .into_iter()
                         .map(|task| ArchivedTasks::ActiveModel {
@@ -800,31 +927,79 @@ pub async fn user_cancel_task_suite(
                             created_at: Set(task.created_at),
                             updated_at: Set(now),
                             state: Set(TaskState::Cancelled),
-                            assigned_worker: Set(task.assigned_worker),
-                            timeout: Set(task.timeout),
+                            runner_id: Set(task.runner_id),
                             priority: Set(task.priority),
                             spec: Set(task.spec),
+                            exec_options: Set(task.exec_options),
                             result: Set(Some(result.clone())),
                             upstream_task_uuid: Set(task.upstream_task_uuid),
                             downstream_task_uuid: Set(task.downstream_task_uuid),
-                            reporter_uuid: Set(None),
                             task_suite_id: Set(task.task_suite_id),
                         })
                         .collect();
 
-                    // Delete from active_tasks
                     ActiveTasks::Entity::delete_many()
-                        .filter(ActiveTasks::Column::Id.is_in(task_ids.clone()))
+                        .filter(ActiveTasks::Column::Id.is_in(task_ids))
                         .exec(txn)
                         .await?;
 
-                    // Insert into archived_tasks
                     ArchivedTasks::Entity::insert_many(archived_tasks)
                         .exec(txn)
                         .await?;
+                }
 
-                    // Note: We don't remove from task queues in transaction
-                    // Will handle after commit
+                // ── Force-cancel Running tasks ──
+                // Collect (runner_id, task_uuid) for TasksCancelled notifications after commit.
+                let mut running_task_infos: Vec<(Option<Uuid>, Uuid)> = Vec::new();
+                if force {
+                    let running_tasks = ActiveTasks::Entity::find()
+                        .filter(ActiveTasks::Column::TaskSuiteId.eq(suite.id))
+                        .filter(ActiveTasks::Column::State.eq(TaskState::Running))
+                        .all(txn)
+                        .await?;
+
+                    if !running_tasks.is_empty() {
+                        let task_ids: Vec<i64> = running_tasks.iter().map(|t| t.id).collect();
+                        cancelled_count += running_tasks.len() as u64;
+
+                        // Collect runner info before consuming the models
+                        for task in &running_tasks {
+                            running_task_infos.push((task.runner_id, task.uuid));
+                        }
+
+                        let archived_running: Vec<ArchivedTasks::ActiveModel> = running_tasks
+                            .into_iter()
+                            .map(|task| ArchivedTasks::ActiveModel {
+                                id: Set(task.id),
+                                creator_id: Set(task.creator_id),
+                                group_id: Set(task.group_id),
+                                task_id: Set(task.task_id),
+                                uuid: Set(task.uuid),
+                                tags: Set(task.tags),
+                                labels: Set(task.labels),
+                                created_at: Set(task.created_at),
+                                updated_at: Set(now),
+                                state: Set(TaskState::Cancelled),
+                                runner_id: Set(task.runner_id),
+                                priority: Set(task.priority),
+                                spec: Set(task.spec),
+                                exec_options: Set(task.exec_options),
+                                result: Set(Some(result.clone())),
+                                upstream_task_uuid: Set(task.upstream_task_uuid),
+                                downstream_task_uuid: Set(task.downstream_task_uuid),
+                                task_suite_id: Set(task.task_suite_id),
+                            })
+                            .collect();
+
+                        ActiveTasks::Entity::delete_many()
+                            .filter(ActiveTasks::Column::Id.is_in(task_ids))
+                            .exec(txn)
+                            .await?;
+
+                        ArchivedTasks::Entity::insert_many(archived_running)
+                            .exec(txn)
+                            .await?;
+                    }
                 }
 
                 // Update suite state to Cancelled
@@ -846,16 +1021,437 @@ pub async fn user_cancel_task_suite(
                     )));
                 }
 
-                Ok(cancelled_count)
+                Ok((cancelled_count, suite.id, running_task_infos))
             })
         })
         .await?;
 
-    // TODO: Remove cancelled tasks from worker queues
-    // This would require access to the worker_task_queue_tx channel
-    // For now, tasks will be removed lazily when workers try to fetch them
+    // Notify agents about force-cancelled Running tasks so they know not to commit them.
+    // Group task UUIDs by agent UUID (runner_id) to send one message per agent.
+    if !running_task_infos.is_empty() {
+        let mut by_agent: std::collections::HashMap<Uuid, Vec<Uuid>> =
+            std::collections::HashMap::new();
+        for (runner_id, task_uuid) in running_task_infos {
+            if let Some(agent_uuid) = runner_id {
+                by_agent.entry(agent_uuid).or_default().push(task_uuid);
+            }
+        }
+        for (agent_uuid, task_uuids) in by_agent {
+            let _ = AgentWsRouter::notify(
+                &pool.ws_router_tx,
+                agent_uuid,
+                AgentNotification::TasksCancelled { task_uuids },
+            );
+        }
+    }
+
+    // Notify all assigned agents that the suite has been cancelled so they
+    // can abort any in-progress execution.
+    notify_agents_suite_cancelled(pool, suite_id, suite_uuid).await;
+
+    // Free the in-memory task buffer — no more fetches should be served for
+    // this suite.
+    let _ = pool
+        .suite_task_dispatcher_tx
+        .send(SuiteDispatcherOp::DropBuffer { suite_id });
 
     Ok(CancelSuiteResp {
         cancelled_task_count: cancelled_count,
     })
+}
+
+/// Refresh tag-matched agents for a suite.
+/// This will:
+/// 1. Remove all existing tag-matched agents
+/// 2. Find eligible agents where agent.tags contains suite.tags AND group has Write role on agent
+/// 3. Insert new tag-matched agents
+pub async fn user_refresh_suite_agents(
+    user_id: i64,
+    pool: &InfraPool,
+    suite_uuid: Uuid,
+) -> Result<RefreshSuiteAgentsResp> {
+    let now = TimeDateTimeWithTimeZone::now_utc();
+
+    let resp = pool
+        .db
+        .transaction::<_, RefreshSuiteAgentsResp, Error>(|txn| {
+            Box::pin(async move {
+                // Fetch suite with group info
+                let suite = TaskSuites::Entity::find()
+                    .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
+                    .one(txn)
+                    .await?
+                    .ok_or(Error::ApiError(ApiError::NotFound(format!(
+                        "Task suite with uuid {suite_uuid}"
+                    ))))?;
+
+                // Check permission - user must have Write or Admin role in suite's group
+                UserGroup::Entity::find()
+                    .filter(UserGroup::Column::UserId.eq(user_id))
+                    .filter(UserGroup::Column::GroupId.eq(suite.group_id))
+                    .one(txn)
+                    .await?
+                    .and_then(|ug| match ug.role {
+                        UserGroupRole::Write | UserGroupRole::Admin => Some(()),
+                        _ => None,
+                    })
+                    .ok_or(Error::AuthError(crate::error::AuthError::PermissionDenied))?;
+
+                // Get existing tag-matched agents (to report removed ones)
+                let existing_tag_matched: Vec<Uuid> = {
+                    let builder = txn.get_database_backend();
+                    let stmt = Query::select()
+                        .column((Agent::Entity, Agent::Column::Uuid))
+                        .from(TaskSuiteAgent::Entity)
+                        .join(
+                            sea_orm::JoinType::Join,
+                            Agent::Entity,
+                            Expr::col((TaskSuiteAgent::Entity, TaskSuiteAgent::Column::AgentId))
+                                .eq(Expr::col((Agent::Entity, Agent::Column::Id))),
+                        )
+                        .and_where(
+                            Expr::col((
+                                TaskSuiteAgent::Entity,
+                                TaskSuiteAgent::Column::TaskSuiteId,
+                            ))
+                            .eq(suite.id),
+                        )
+                        .and_where(
+                            Expr::col((
+                                TaskSuiteAgent::Entity,
+                                TaskSuiteAgent::Column::SelectionType,
+                            ))
+                            .eq(SelectionType::TagMatched),
+                        )
+                        .to_owned();
+                    AgentUuidResult::find_by_statement(builder.build(&stmt))
+                        .all(txn)
+                        .await?
+                        .into_iter()
+                        .map(|m| m.uuid)
+                        .collect()
+                };
+
+                // Remove all existing tag-matched agents
+                TaskSuiteAgent::Entity::delete_many()
+                    .filter(TaskSuiteAgent::Column::TaskSuiteId.eq(suite.id))
+                    .filter(TaskSuiteAgent::Column::SelectionType.eq(SelectionType::TagMatched))
+                    .exec(txn)
+                    .await?;
+
+                // Find eligible agents:
+                // 1. agent.tags contains all suite.tags (agent.tags ⊇ suite.tags)
+                // 2. suite.group_id has Write role on agent via group_agent
+                let builder = txn.get_database_backend();
+                let eligible_stmt = Query::select()
+                    .columns([
+                        (Agent::Entity, Agent::Column::Id),
+                        (Agent::Entity, Agent::Column::Uuid),
+                        (Agent::Entity, Agent::Column::Tags),
+                    ])
+                    .from(Agent::Entity)
+                    .join(
+                        sea_orm::JoinType::Join,
+                        GroupAgent::Entity,
+                        Expr::col((GroupAgent::Entity, GroupAgent::Column::AgentId))
+                            .eq(Expr::col((Agent::Entity, Agent::Column::Id))),
+                    )
+                    .and_where(
+                        Expr::col((GroupAgent::Entity, GroupAgent::Column::GroupId))
+                            .eq(suite.group_id),
+                    )
+                    .and_where(
+                        Expr::col((GroupAgent::Entity, GroupAgent::Column::Role))
+                            .gte(GroupAgentRole::Write),
+                    )
+                    // Agent's tags must contain all suite's tags
+                    .and_where(
+                        Expr::col((Agent::Entity, Agent::Column::Tags))
+                            .contains(suite.tags.clone()),
+                    )
+                    .to_owned();
+
+                #[derive(FromQueryResult)]
+                struct EligibleAgent {
+                    id: i64,
+                    uuid: Uuid,
+                    tags: Vec<String>,
+                }
+
+                let eligible_agents =
+                    EligibleAgent::find_by_statement(builder.build(&eligible_stmt))
+                        .all(txn)
+                        .await?;
+
+                // Insert new tag-matched agents
+                let mut added_agents = Vec::new();
+                for agent in eligible_agents {
+                    // Calculate matched tags (intersection)
+                    let matched_tags: Vec<String> = suite
+                        .tags
+                        .iter()
+                        .filter(|t| agent.tags.contains(t))
+                        .cloned()
+                        .collect();
+
+                    let assignment = TaskSuiteAgent::ActiveModel {
+                        task_suite_id: Set(suite.id),
+                        agent_id: Set(agent.id),
+                        selection_type: Set(SelectionType::TagMatched),
+                        matched_tags: Set(Some(matched_tags.clone())),
+                        created_at: Set(now),
+                        creator_id: Set(Some(user_id)),
+                        ..Default::default()
+                    };
+                    assignment.insert(txn).await?;
+
+                    added_agents.push(AgentAssignmentInfo {
+                        agent_uuid: agent.uuid,
+                        matched_tags,
+                        selection_type: SelectionType::TagMatched,
+                    });
+                }
+
+                // Calculate removed agents (ones that were tag-matched before but aren't now)
+                let new_uuids: std::collections::HashSet<Uuid> =
+                    added_agents.iter().map(|m| m.agent_uuid).collect();
+                let removed_agents: Vec<Uuid> = existing_tag_matched
+                    .into_iter()
+                    .filter(|uuid| !new_uuids.contains(uuid))
+                    .collect();
+
+                // Count total assigned agents
+                let total_assigned = TaskSuiteAgent::Entity::find()
+                    .filter(TaskSuiteAgent::Column::TaskSuiteId.eq(suite.id))
+                    .count(txn)
+                    .await?;
+
+                Ok(RefreshSuiteAgentsResp {
+                    added_agents,
+                    removed_agents,
+                    total_assigned,
+                })
+            })
+        })
+        .await?;
+
+    // Notify newly added agents if the suite already has pending tasks.
+    // They should start looking for the suite rather than waiting for the next heartbeat.
+    if !resp.added_agents.is_empty() {
+        if let Ok(suite) = TaskSuites::Entity::find()
+            .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
+            .one(&pool.db)
+            .await
+        {
+            if let Some(suite) = suite {
+                if suite.pending_tasks > 0 {
+                    for assignment in &resp.added_agents {
+                        let _ = AgentWsRouter::notify(
+                            &pool.ws_router_tx,
+                            assignment.agent_uuid,
+                            AgentNotification::SuiteAvailable {
+                                suite_uuid: Some(suite.uuid),
+                                priority: suite.priority,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(resp)
+}
+
+/// Manually add agents to a suite.
+/// User must have Write permission in the suite's group.
+/// Group must have Write role on each agent to add it.
+pub async fn user_add_suite_agents(
+    user_id: i64,
+    pool: &InfraPool,
+    suite_uuid: Uuid,
+    req: AddSuiteAgentsReq,
+) -> Result<AddSuiteAgentsResp> {
+    let now = TimeDateTimeWithTimeZone::now_utc();
+
+    let resp = pool
+        .db
+        .transaction::<_, AddSuiteAgentsResp, Error>(|txn| {
+            Box::pin(async move {
+                // Fetch suite
+                let suite = TaskSuites::Entity::find()
+                    .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
+                    .one(txn)
+                    .await?
+                    .ok_or(Error::ApiError(ApiError::NotFound(format!(
+                        "Task suite with uuid {suite_uuid}"
+                    ))))?;
+
+                // Check user permission in suite's group
+                UserGroup::Entity::find()
+                    .filter(UserGroup::Column::UserId.eq(user_id))
+                    .filter(UserGroup::Column::GroupId.eq(suite.group_id))
+                    .one(txn)
+                    .await?
+                    .and_then(|ug| match ug.role {
+                        UserGroupRole::Write | UserGroupRole::Admin => Some(()),
+                        _ => None,
+                    })
+                    .ok_or(Error::AuthError(crate::error::AuthError::PermissionDenied))?;
+
+                let mut added_agents = Vec::new();
+                let mut rejected_agents = Vec::new();
+                let mut rejection_reason = None;
+
+                for agent_uuid in req.agent_uuids {
+                    // Find agent
+                    let agent = match Agent::Entity::find()
+                        .filter(Agent::Column::Uuid.eq(agent_uuid))
+                        .one(txn)
+                        .await?
+                    {
+                        Some(m) => m,
+                        None => {
+                            rejected_agents.push(agent_uuid);
+                            rejection_reason = Some(format!("Agent {agent_uuid} not found"));
+                            continue;
+                        }
+                    };
+
+                    // Check if group has Write role on agent
+                    let has_permission = GroupAgent::Entity::find()
+                        .filter(GroupAgent::Column::GroupId.eq(suite.group_id))
+                        .filter(GroupAgent::Column::AgentId.eq(agent.id))
+                        .one(txn)
+                        .await?
+                        .map(|gnm| gnm.role.has_write_access())
+                        .unwrap_or(false);
+
+                    if !has_permission {
+                        rejected_agents.push(agent_uuid);
+                        rejection_reason = Some(format!(
+                            "Group does not have Write role on agent {agent_uuid}"
+                        ));
+                        continue;
+                    }
+
+                    // Check if already assigned
+                    let existing = TaskSuiteAgent::Entity::find()
+                        .filter(TaskSuiteAgent::Column::TaskSuiteId.eq(suite.id))
+                        .filter(TaskSuiteAgent::Column::AgentId.eq(agent.id))
+                        .one(txn)
+                        .await?;
+
+                    if existing.is_some() {
+                        // Already assigned, skip but don't reject
+                        added_agents.push(agent_uuid);
+                        continue;
+                    }
+
+                    // Insert assignment
+                    let assignment = TaskSuiteAgent::ActiveModel {
+                        task_suite_id: Set(suite.id),
+                        agent_id: Set(agent.id),
+                        selection_type: Set(SelectionType::UserSpecified),
+                        matched_tags: Set(None),
+                        created_at: Set(now),
+                        creator_id: Set(Some(user_id)),
+                        ..Default::default()
+                    };
+                    assignment.insert(txn).await?;
+                    added_agents.push(agent_uuid);
+                }
+
+                Ok(AddSuiteAgentsResp {
+                    added_agents,
+                    rejected_agents,
+                    reason: rejection_reason,
+                })
+            })
+        })
+        .await?;
+
+    // Notify newly added agents if the suite already has pending tasks.
+    if !resp.added_agents.is_empty() {
+        if let Ok(suite) = TaskSuites::Entity::find()
+            .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
+            .one(&pool.db)
+            .await
+        {
+            if let Some(suite) = suite {
+                if suite.pending_tasks > 0 {
+                    for &agent_uuid in &resp.added_agents {
+                        let _ = AgentWsRouter::notify(
+                            &pool.ws_router_tx,
+                            agent_uuid,
+                            AgentNotification::SuiteAvailable {
+                                suite_uuid: Some(suite.uuid),
+                                priority: suite.priority,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(resp)
+}
+
+/// Remove agents from a suite.
+/// User must have Write permission in the suite's group.
+pub async fn user_remove_suite_agents(
+    user_id: i64,
+    pool: &InfraPool,
+    suite_uuid: Uuid,
+    req: RemoveSuiteAgentsReq,
+) -> Result<RemoveSuiteAgentsResp> {
+    let resp = pool
+        .db
+        .transaction::<_, RemoveSuiteAgentsResp, Error>(|txn| {
+            Box::pin(async move {
+                // Fetch suite
+                let suite = TaskSuites::Entity::find()
+                    .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
+                    .one(txn)
+                    .await?
+                    .ok_or(Error::ApiError(ApiError::NotFound(format!(
+                        "Task suite with uuid {suite_uuid}"
+                    ))))?;
+
+                // Check user permission
+                UserGroup::Entity::find()
+                    .filter(UserGroup::Column::UserId.eq(user_id))
+                    .filter(UserGroup::Column::GroupId.eq(suite.group_id))
+                    .one(txn)
+                    .await?
+                    .and_then(|ug| match ug.role {
+                        UserGroupRole::Write | UserGroupRole::Admin => Some(()),
+                        _ => None,
+                    })
+                    .ok_or(Error::AuthError(crate::error::AuthError::PermissionDenied))?;
+
+                // Find agent IDs from UUIDs
+                let agents = Agent::Entity::find()
+                    .filter(Agent::Column::Uuid.is_in(req.agent_uuids.clone()))
+                    .all(txn)
+                    .await?;
+
+                let agent_ids: Vec<i64> = agents.iter().map(|m| m.id).collect();
+
+                // Delete assignments
+                let result = TaskSuiteAgent::Entity::delete_many()
+                    .filter(TaskSuiteAgent::Column::TaskSuiteId.eq(suite.id))
+                    .filter(TaskSuiteAgent::Column::AgentId.is_in(agent_ids))
+                    .exec(txn)
+                    .await?;
+
+                Ok(RemoveSuiteAgentsResp {
+                    removed_count: result.rows_affected,
+                })
+            })
+        })
+        .await?;
+
+    Ok(resp)
 }

@@ -101,7 +101,7 @@ impl Display for GroupWorkerRole {
     }
 }
 
-/// The role of a group to a node manager.
+/// The role of a group to an agent.
 #[derive(
     EnumIter,
     DeriveActiveEnum,
@@ -116,19 +116,19 @@ impl Display for GroupWorkerRole {
     Copy,
 )]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
-pub enum GroupNodeManagerRole {
-    /// Reserved for future use (view manager status).
+pub enum GroupAgentRole {
+    /// Reserved for future use (view agent status).
     #[serde(alias = "read", alias = "READ")]
     Read = 0,
-    /// The group can submit task suites to the manager.
+    /// The group can submit task suites to the agent.
     #[serde(alias = "write", alias = "WRITE")]
     Write = 1,
-    /// The group can manage the manager's ACL and settings.
+    /// The group can manage the agent's ACL and settings.
     #[serde(alias = "admin", alias = "ADMIN")]
     Admin = 2,
 }
 
-impl FromStr for GroupNodeManagerRole {
+impl FromStr for GroupAgentRole {
     type Err = crate::error::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -137,19 +137,19 @@ impl FromStr for GroupNodeManagerRole {
             "write" | "Write" | "WRITE" => Ok(Self::Write),
             "admin" | "Admin" | "ADMIN" => Ok(Self::Admin),
             _ => Err(crate::error::Error::Custom(format!(
-                "Invalid GroupNodeManagerRole: {s}"
+                "Invalid GroupAgentRole: {s}"
             ))),
         }
     }
 }
 
-impl Display for GroupNodeManagerRole {
+impl Display for GroupAgentRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
 
-impl GroupNodeManagerRole {
+impl GroupAgentRole {
     pub fn has_write_access(&self) -> bool {
         matches!(self, Self::Write | Self::Admin)
     }

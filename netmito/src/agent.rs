@@ -6,7 +6,7 @@
 //! - WebSocket connection for real-time notifications
 //! - HTTP API calls for suite lifecycle management
 //! - Heartbeat mechanism for health reporting
-//! - Basic state machine for suite execution
+//! - State machine for suite execution with real task fetch/report
 
 use std::time::Duration;
 
@@ -36,6 +36,12 @@ struct AgentClient {
     assigned_suite_uuid: Option<Uuid>,
     heartbeat_interval: Duration,
     http_client: reqwest::Client,
+    /// Set to true when a SuiteCancelled or PreemptSuite notification arrives for the
+    /// current suite. Checked at the start of each task-fetch iteration to abort the loop.
+    suite_cancelled: bool,
+    /// Token used to signal shutdown from coordinator Shutdown notifications.
+    /// Cancelling this token exits the main run loop.
+    shutdown_token: tokio_util::sync::CancellationToken,
 }
 
 impl MitoAgent {
@@ -81,6 +87,17 @@ impl MitoAgent {
         )
         .await?;
 
+        // Resolve machine_code: explicit config wins, fall back to /etc/machine-id.
+        let machine_code = config.machine_code.take().or_else(|| {
+            std::fs::read_to_string("/etc/machine-id")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+        if let Some(ref code) = machine_code {
+            tracing::info!("Machine code: {}", code);
+        }
+
         // Register as an agent
         let mut register_url = config.coordinator_addr.clone();
         register_url.set_path("agents");
@@ -89,6 +106,7 @@ impl MitoAgent {
             labels: config.labels.clone(),
             groups: config.groups.clone(),
             lifetime: config.lifetime,
+            machine_code,
         };
         let resp = http_client
             .post(register_url.as_str())
@@ -138,6 +156,8 @@ impl MitoAgent {
             assigned_suite_uuid: None,
             heartbeat_interval: config.heartbeat_interval,
             http_client,
+            suite_cancelled: false,
+            shutdown_token: tokio_util::sync::CancellationToken::new(),
         };
 
         // Run the main loop
@@ -167,8 +187,9 @@ impl AgentClient {
 
     /// Main run loop for the agent
     async fn run(&mut self) -> crate::error::Result<()> {
-        // Create cancellation token for graceful shutdown
-        let cancel_token = tokio_util::sync::CancellationToken::new();
+        // Clone shutdown_token for use in the select loop and spawned tasks.
+        // Cancelling either self.shutdown_token or this clone cancels both.
+        let cancel_token = self.shutdown_token.clone();
         let cancel_token_clone = cancel_token.clone();
 
         // Setup SIGINT handler
@@ -178,8 +199,10 @@ impl AgentClient {
             cancel_token_clone.cancel();
         });
 
-        // Start WebSocket connection in background
-        let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel::<AgentNotification>(32);
+        // Start WebSocket connection in background.
+        // The channel carries WsNotificationEvent so the main loop can update the
+        // notification counter from the event's sequence ID.
+        let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel::<WsNotificationEvent>(32);
         let ws_handle = self.spawn_websocket_client(ws_tx, cancel_token.clone());
 
         // Heartbeat timer
@@ -196,9 +219,10 @@ impl AgentClient {
                     break;
                 }
 
-                // Handle WebSocket notifications
-                Some(notification) = ws_rx.recv() => {
-                    self.handle_notification(notification).await;
+                // Handle WebSocket notifications; advance the notification counter.
+                Some(event) = ws_rx.recv() => {
+                    self.notification_counter = self.notification_counter.max(event.id);
+                    self.handle_notification(event.event).await;
                 }
 
                 // Periodic heartbeat
@@ -227,7 +251,7 @@ impl AgentClient {
     /// Spawn WebSocket client task
     fn spawn_websocket_client(
         &self,
-        notification_tx: tokio::sync::mpsc::Sender<AgentNotification>,
+        notification_tx: tokio::sync::mpsc::Sender<WsNotificationEvent>,
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let ws_url = self.ws_url("api/ws/agents");
@@ -266,7 +290,7 @@ impl AgentClient {
         ws_url: &str,
         token: &str,
         _agent_uuid: Uuid,
-        notification_tx: &tokio::sync::mpsc::Sender<AgentNotification>,
+        notification_tx: &tokio::sync::mpsc::Sender<WsNotificationEvent>,
     ) -> crate::error::Result<()> {
         let (ws_stream, _) = tokio_tungstenite::connect_async(
             tokio_tungstenite::tungstenite::http::Request::builder()
@@ -291,7 +315,7 @@ impl AgentClient {
 
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
-        // Send initial ping
+        // Send initial pong to confirm connection
         let pong_msg = AgentWsMessage::Pong {
             client_time: time::OffsetDateTime::now_utc().unix_timestamp(),
         };
@@ -323,8 +347,8 @@ impl AgentClient {
                                 let _ = ws_write.send(WsMessage::Binary(ack_bytes.into())).await;
                             }
 
-                            // Forward notification to main loop
-                            if notification_tx.send(event.event).await.is_err() {
+                            // Forward the full event (with sequence ID) to the main loop
+                            if notification_tx.send(event).await.is_err() {
                                 tracing::error!("Failed to send notification to main loop");
                                 break;
                             }
@@ -390,13 +414,14 @@ impl AgentClient {
             error::Error::Custom(format!("Failed to parse heartbeat response: {}", e))
         })?;
 
-        // Process any missed notifications from heartbeat
+        // Process any missed notifications from heartbeat; advance the counter for each.
         for event in heartbeat_resp.notifications {
             tracing::debug!(
                 "Received missed notification via heartbeat: id={}, type={:?}",
                 event.id,
                 event.event
             );
+            self.notification_counter = self.notification_counter.max(event.id);
             self.handle_notification(event.event).await;
         }
 
@@ -404,7 +429,7 @@ impl AgentClient {
         Ok(())
     }
 
-    /// Handle incoming notification from WebSocket
+    /// Handle incoming notification from WebSocket or heartbeat catch-up
     async fn handle_notification(&mut self, notification: AgentNotification) {
         match notification {
             AgentNotification::SuiteAvailable {
@@ -430,17 +455,20 @@ impl AgentClient {
                     new_priority
                 );
 
-                // Idempotency guard: Only preempt if actually executing current suite
+                // Idempotency guard: only react if we're actually executing the specified suite
                 if self.assigned_suite_uuid == Some(current_suite_uuid) {
                     tracing::info!(
                         "Preempting current suite {} for higher priority suite {}",
                         current_suite_uuid,
                         new_suite_uuid
                     );
-                    // TODO: Implement preemption logic
+                    // Mark suite as cancelled to stop the task loop; after cleanup the
+                    // agent will return to Idle and pick up the new suite naturally.
+                    self.suite_cancelled = true;
                 } else {
                     tracing::debug!(
-                        "Ignoring PreemptSuite - not executing expected current suite (expected: {}, actual: {:?})",
+                        "Ignoring PreemptSuite - not executing expected suite \
+                         (expected: {}, actual: {:?})",
                         current_suite_uuid,
                         self.assigned_suite_uuid
                     );
@@ -453,13 +481,14 @@ impl AgentClient {
                     reason
                 );
 
-                // Idempotency guard: Only cancel if actually assigned to this suite
+                // Idempotency guard: only react if we're assigned to this suite
                 if self.assigned_suite_uuid == Some(suite_uuid) {
-                    tracing::info!("Cancelling suite {} (reason: {})", suite_uuid, reason);
-                    // TODO: Implement cancellation logic
+                    tracing::info!("Marking suite {} as cancelled", suite_uuid);
+                    self.suite_cancelled = true;
                 } else {
                     tracing::debug!(
-                        "Ignoring SuiteCancelled - not executing expected suite (expected: {}, actual: {:?})",
+                        "Ignoring SuiteCancelled - not executing expected suite \
+                         (expected: {}, actual: {:?})",
                         suite_uuid,
                         self.assigned_suite_uuid
                     );
@@ -467,14 +496,17 @@ impl AgentClient {
             }
             AgentNotification::TasksCancelled { task_uuids } => {
                 tracing::warn!(
-                    "Received TasksCancelled notification ({} tasks)",
+                    "Received TasksCancelled notification ({} tasks) — \
+                     cancellation will be detected at Commit time",
                     task_uuids.len()
                 );
-                // TODO: Implement task cancellation logic
+                // Individual task cancellation is detected when the agent tries to
+                // Commit: the coordinator returns an error if the task was already
+                // cancelled by the user. No client-side tracking is needed.
             }
             AgentNotification::Shutdown { graceful } => {
                 tracing::warn!("Received Shutdown notification (graceful: {})", graceful);
-                // TODO: Implement shutdown logic
+                self.shutdown_token.cancel();
             }
             AgentNotification::Ping { server_time } => {
                 tracing::trace!("Received Ping notification (server_time: {})", server_time);
@@ -486,7 +518,7 @@ impl AgentClient {
                     boot_id
                 );
 
-                // Check if coordinator has restarted
+                // Check if coordinator has restarted (different boot_id)
                 if self.coordinator_boot_id.is_none() || self.coordinator_boot_id != Some(boot_id) {
                     if let Some(old_boot_id) = self.coordinator_boot_id {
                         tracing::warn!(
@@ -498,13 +530,11 @@ impl AgentClient {
                         tracing::info!("Initial coordinator boot_id: {}", boot_id);
                     }
 
-                    // Coordinator restarted - reset counter to new value
                     self.coordinator_boot_id = Some(boot_id);
                     self.notification_counter = counter;
-
                     tracing::info!("Reset notification counter to {}", counter);
                 } else {
-                    // Same coordinator - just update counter if it's higher
+                    // Same coordinator — only update counter if it's higher
                     if counter > self.notification_counter {
                         self.notification_counter = counter;
                         tracing::debug!("Updated notification counter to {}", counter);
@@ -530,29 +560,40 @@ impl AgentClient {
                     if self.accept_suite(suite.uuid).await? {
                         tracing::info!("Accepted suite: {}", suite.uuid);
                         self.assigned_suite_uuid = Some(suite.uuid);
+                        self.suite_cancelled = false; // reset for each new suite
                         self.state = AgentState::Provision;
 
-                        // Fake env preparation
+                        // Run provision hook (fake)
                         self.fake_env_preparation(&suite).await?;
 
-                        // Start suite execution
+                        // Notify coordinator: provision done → Executing
                         self.start_suite(suite.uuid).await?;
                         self.state = AgentState::Executing;
 
-                        // Fake execution
-                        self.fake_suite_execution(&suite).await?;
+                        // Fetch and execute all tasks using real coordinator APIs
+                        let (tasks_completed, tasks_failed) =
+                            self.fake_suite_execution(&suite).await?;
 
-                        // Complete suite
+                        // Notify coordinator: execution done → Cleanup
+                        self.enter_cleanup_api().await?;
                         self.state = AgentState::Cleanup;
+
+                        // Run cleanup hook (fake)
                         self.fake_env_cleanup(&suite).await?;
 
-                        let next_available = self.complete_suite(suite.uuid, 0, 0).await?;
+                        // Notify coordinator: cleanup done → Idle
+                        let next_available = self
+                            .complete_suite(suite.uuid, tasks_completed, tasks_failed)
+                            .await?;
                         self.assigned_suite_uuid = None;
+                        self.suite_cancelled = false;
                         self.state = AgentState::Idle;
 
                         tracing::info!(
-                            "Suite {} completed. Next available: {}",
+                            "Suite {} completed ({} done, {} failed). Next available: {}",
                             suite.uuid,
+                            tasks_completed,
+                            tasks_failed,
                             next_available
                         );
                     } else {
@@ -561,15 +602,12 @@ impl AgentClient {
                 }
             }
             AgentState::Provision => {
-                // Waiting for env preparation to complete
-                tracing::trace!("In Preparing state");
+                tracing::trace!("In Provision state");
             }
             AgentState::Executing => {
-                // Executing tasks
                 tracing::trace!("In Executing state");
             }
             AgentState::Cleanup => {
-                // Cleaning up
                 tracing::trace!("In Cleanup state");
             }
             AgentState::Offline => {
@@ -579,6 +617,10 @@ impl AgentClient {
 
         Ok(())
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Suite lifecycle API calls
+    // ─────────────────────────────────────────────────────────────────────────
 
     /// Fetch an available suite from coordinator
     async fn fetch_suite(
@@ -642,7 +684,9 @@ impl AgentClient {
         let accept_resp: AcceptSuiteResp = resp
             .json()
             .await
-            .map_err(|e| error::Error::Custom(format!("Failed to parse accept response: {}", e)))?;
+            .map_err(|e| {
+                error::Error::Custom(format!("Failed to parse accept response: {}", e))
+            })?;
 
         if !accept_resp.accepted {
             tracing::warn!(
@@ -654,7 +698,7 @@ impl AgentClient {
         Ok(accept_resp.accepted)
     }
 
-    /// Report suite execution started
+    /// Notify coordinator that provision is done and execution is starting (→ Executing)
     async fn start_suite(&self, suite_uuid: Uuid) -> crate::error::Result<()> {
         let url = self.api_url("api/agents/suite/start");
 
@@ -681,7 +725,31 @@ impl AgentClient {
         Ok(())
     }
 
-    /// Report suite execution completed
+    /// Notify coordinator that execution is done and cleanup is starting (→ Cleanup)
+    async fn enter_cleanup_api(&self) -> crate::error::Result<()> {
+        let url = self.api_url("api/agents/suite/cleanup");
+
+        let resp = self
+            .http_client
+            .post(url.as_str())
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| error::Error::Custom(format!("Failed to enter cleanup: {}", e)))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(error::Error::Custom(format!(
+                "Enter cleanup failed: {} - {}",
+                status, body
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Notify coordinator that cleanup is done and agent is going Idle
     async fn complete_suite(
         &self,
         suite_uuid: Uuid,
@@ -722,7 +790,86 @@ impl AgentClient {
         Ok(complete_resp.next_suite_available)
     }
 
-    // Fake handlers for testing
+    // ─────────────────────────────────────────────────────────────────────────
+    // Task API calls
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Batch-fetch up to `max_count` tasks from the assigned suite
+    async fn fetch_tasks(
+        &self,
+        suite_uuid: Uuid,
+        max_count: u32,
+    ) -> crate::error::Result<Vec<WorkerTaskResp>> {
+        let url = self.api_url("api/agents/tasks/fetch");
+
+        let req = FetchTasksReq {
+            suite_uuid,
+            max_count,
+        };
+
+        let resp = self
+            .http_client
+            .post(url.as_str())
+            .bearer_auth(&self.token)
+            .json(&req)
+            .send()
+            .await
+            .map_err(|e| error::Error::Custom(format!("Failed to fetch tasks: {}", e)))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(error::Error::Custom(format!(
+                "Fetch tasks failed: {} - {}",
+                status, body
+            )));
+        }
+
+        let fetch_resp: FetchTasksResp = resp.json().await.map_err(|e| {
+            error::Error::Custom(format!("Failed to parse fetch tasks response: {}", e))
+        })?;
+
+        Ok(fetch_resp.tasks)
+    }
+
+    /// Report the result of a single task execution step
+    async fn report_task(
+        &self,
+        task_uuid: Uuid,
+        op: ReportTaskOp,
+    ) -> crate::error::Result<Option<String>> {
+        let url = self.api_url(&format!("api/agents/tasks/{}/report", task_uuid));
+
+        let req = ReportAgentTaskReq { op };
+
+        let resp = self
+            .http_client
+            .post(url.as_str())
+            .bearer_auth(&self.token)
+            .json(&req)
+            .send()
+            .await
+            .map_err(|e| error::Error::Custom(format!("Failed to report task: {}", e)))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(error::Error::Custom(format!(
+                "Report task failed: {} - {}",
+                status, body
+            )));
+        }
+
+        let presigned_url: Option<String> = resp.json().await.map_err(|e| {
+            error::Error::Custom(format!("Failed to parse report task response: {}", e))
+        })?;
+
+        Ok(presigned_url)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Fake execution stubs
+    // ─────────────────────────────────────────────────────────────────────────
 
     async fn fake_env_preparation(&self, suite: &TaskSuiteSpec) -> crate::error::Result<()> {
         tracing::info!(
@@ -743,23 +890,123 @@ impl AgentClient {
         Ok(())
     }
 
-    async fn fake_suite_execution(&self, suite: &TaskSuiteSpec) -> crate::error::Result<()> {
-        tracing::info!("=== FAKE: Executing suite {} ===", suite.uuid);
-        tracing::info!(
-            "Total tasks: {}, Pending tasks: {}",
-            suite.total_tasks,
-            suite.pending_tasks
-        );
-        tracing::info!("Worker schedule: {:?}", suite.worker_schedule);
+    /// Fetch and execute all tasks for the suite using real coordinator APIs.
+    ///
+    /// The batch size is derived from the suite's `WorkerSchedulePlan`
+    /// (`worker_count * task_prefetch_count`), matching the `UpdateCapacity` formula
+    /// sent to the `SuiteTaskDispatcher` on `accept_suite`.
+    ///
+    /// Loops until:
+    /// - No tasks remain (empty response after `MAX_EMPTY_RETRIES` retries), or
+    /// - The suite is cancelled (`self.suite_cancelled`).
+    ///
+    /// Returns `(tasks_completed, tasks_failed)`.
+    async fn fake_suite_execution(
+        &mut self,
+        suite: &TaskSuiteSpec,
+    ) -> crate::error::Result<(u64, u64)> {
+        let batch_size = match suite.worker_schedule {
+            WorkerSchedulePlan::FixedWorkers {
+                worker_count,
+                task_prefetch_count,
+                ..
+            } => worker_count.saturating_mul(task_prefetch_count).max(1),
+        };
 
-        // Simulate some work
-        for i in 0..3 {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            tracing::info!("FAKE: Processing batch {} of tasks...", i + 1);
+        tracing::info!(
+            "=== Starting task execution for suite {} (batch_size={}) ===",
+            suite.uuid,
+            batch_size
+        );
+
+        let mut tasks_completed: u64 = 0;
+        let mut tasks_failed: u64 = 0;
+        let mut empty_retries: u32 = 0;
+        const MAX_EMPTY_RETRIES: u32 = 3;
+
+        loop {
+            if self.suite_cancelled {
+                tracing::info!("Suite {} cancelled, stopping task execution", suite.uuid);
+                break;
+            }
+
+            let tasks = match self.fetch_tasks(suite.uuid, batch_size).await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::error!("Failed to fetch tasks from suite {}: {}", suite.uuid, e);
+                    break;
+                }
+            };
+
+            if tasks.is_empty() {
+                empty_retries += 1;
+                if empty_retries >= MAX_EMPTY_RETRIES {
+                    tracing::info!(
+                        "No more tasks available after {} retries, finishing execution",
+                        MAX_EMPTY_RETRIES
+                    );
+                    break;
+                }
+                tracing::debug!(
+                    "No tasks in batch ({}/{}), waiting before retry...",
+                    empty_retries,
+                    MAX_EMPTY_RETRIES
+                );
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+
+            empty_retries = 0;
+            tracing::info!(
+                "Fetched {} task(s) from suite {}",
+                tasks.len(),
+                suite.uuid
+            );
+
+            for task in tasks {
+                tracing::info!(
+                    "FAKE: executing task {} | spec={:?}",
+                    task.uuid,
+                    task.spec
+                );
+
+                // Mark task as started (→ Finished, awaiting Commit)
+                if let Err(e) = self.report_task(task.uuid, ReportTaskOp::Finish).await {
+                    tracing::error!("Failed to report Finish for task {}: {}", task.uuid, e);
+                    tasks_failed += 1;
+                    continue;
+                }
+
+                // Fake work: nothing to execute — immediately commit with success
+                let result = TaskResultSpec {
+                    exit_status: 0,
+                    msg: None,
+                };
+                match self
+                    .report_task(task.uuid, ReportTaskOp::Commit(result))
+                    .await
+                {
+                    Ok(_) => {
+                        tasks_completed += 1;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to report Commit for task {}: {}",
+                            task.uuid,
+                            e
+                        );
+                        tasks_failed += 1;
+                    }
+                }
+            }
         }
 
-        tracing::info!("=== FAKE: Suite execution completed ===");
-        Ok(())
+        tracing::info!(
+            "=== Task execution finished: {} completed, {} failed ===",
+            tasks_completed,
+            tasks_failed
+        );
+        Ok((tasks_completed, tasks_failed))
     }
 
     async fn fake_env_cleanup(&self, suite: &TaskSuiteSpec) -> crate::error::Result<()> {

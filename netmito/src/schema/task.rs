@@ -117,7 +117,7 @@ pub struct TaskQueryInfo {
     pub result: Option<serde_json::Value>,
     pub upstream_task_uuid: Option<Uuid>,
     pub downstream_task_uuid: Option<Uuid>,
-    pub reporter_uuid: Option<Uuid>,
+    pub runner_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -137,7 +137,7 @@ pub struct ParsedTaskQueryInfo {
     pub result: Option<TaskResultSpec>,
     pub upstream_task_uuid: Option<Uuid>,
     pub downstream_task_uuid: Option<Uuid>,
-    pub reporter_uuid: Option<Uuid>,
+    pub runner_id: Option<Uuid>,
 }
 
 /// Each field in the query request is optional, and the server will return all tasks if no field is specified.
@@ -152,8 +152,8 @@ pub struct TasksQueryReq {
     pub states: Option<HashSet<TaskState>>,
     pub exit_status: Option<String>,
     pub priority: Option<String>,
-    /// Set reporter_uuid will automatically exclude all non-completed tasks.
-    pub reporter_uuid: Option<Uuid>,
+    /// Set runner_id will automatically exclude all non-completed tasks.
+    pub runner_id: Option<Uuid>,
     /// Filter tasks by suite UUID
     pub suite_uuid: Option<Uuid>,
     pub limit: Option<u64>,

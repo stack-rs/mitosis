@@ -1,16 +1,16 @@
-//! `SeaORM` Entity for task_suite_node_manager table
+//! `SeaORM` Entity for task_suite_agent table
 
 use sea_orm::entity::prelude::*;
 
 use super::state::SelectionType;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
-#[sea_orm(table_name = "task_suite_node_manager")]
+#[sea_orm(table_name = "task_suite_agent")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
     pub task_suite_id: i64,
-    pub manager_id: i64,
+    pub agent_id: i64,
     pub selection_type: SelectionType,
     pub matched_tags: Option<Vec<String>>,
     pub created_at: TimeDateTimeWithTimeZone,
@@ -28,13 +28,13 @@ pub enum Relation {
     )]
     TaskSuites,
     #[sea_orm(
-        belongs_to = "super::node_managers::Entity",
-        from = "Column::ManagerId",
-        to = "super::node_managers::Column::Id",
+        belongs_to = "super::agents::Entity",
+        from = "Column::AgentId",
+        to = "super::agents::Column::Id",
         on_update = "Cascade",
         on_delete = "Cascade"
     )]
-    Managers,
+    Agents,
     #[sea_orm(
         belongs_to = "super::users::Entity",
         from = "Column::CreatorId",
@@ -51,9 +51,9 @@ impl Related<super::task_suites::Entity> for Entity {
     }
 }
 
-impl Related<super::node_managers::Entity> for Entity {
+impl Related<super::agents::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Managers.def()
+        Relation::Agents.def()
     }
 }
 

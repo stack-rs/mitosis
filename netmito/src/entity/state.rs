@@ -67,7 +67,7 @@ pub enum TaskState {
     Running = 2,
     /// Task has been successfully executed, but not sure if it succeeded or not
     Finished = 3,
-    /// Task is canceled by the worker due to timeout
+    /// Task is cancelled by the worker due to timeout
     Cancelled = 4,
     Unknown = 5,
 }
@@ -297,7 +297,17 @@ impl Display for WorkerState {
 }
 
 #[derive(
-    EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy, Hash,
+    EnumIter,
+    DeriveActiveEnum,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Copy,
+    Hash,
+    ValueEnum,
 )]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum TaskSuiteState {
@@ -327,8 +337,19 @@ impl TaskSuiteState {
         matches!(self, Self::Complete | Self::Cancelled)
     }
 
+    /// Returns true if the suite can accept new tasks.
+    /// - Open: directly accepts tasks
+    /// - Complete: can accept tasks (will be reopened)
+    /// - Closed: can accept tasks (will be reopened)
+    /// - Cancelled: terminal state, cannot accept tasks
     pub fn can_accept_tasks(&self) -> bool {
-        !matches!(self, Self::Closed)
+        !matches!(self, Self::Cancelled)
+    }
+
+    /// Returns true if the suite needs to be reopened before accepting tasks.
+    /// This is true for Closed and Complete states.
+    pub fn needs_reopen(&self) -> bool {
+        matches!(self, Self::Closed | Self::Complete)
     }
 
     pub fn is_closed(&self) -> bool {
@@ -336,50 +357,61 @@ impl TaskSuiteState {
     }
 }
 
-#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
+#[derive(
+    EnumIter,
+    DeriveActiveEnum,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Copy,
+    ValueEnum,
+)]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
-pub enum NodeManagerState {
-    /// Manager is idle and available for assignment
+pub enum AgentState {
+    /// Agent is idle and available for assignment
     Idle = 0,
-    /// Manager is preparing environment for task suite
-    Preparing = 1,
-    /// Manager is executing tasks from a suite
+    /// Agent is provisioning environment for task suite
+    Provision = 1,
+    /// Agent is executing tasks from a suite
     Executing = 2,
-    /// Manager is cleaning up after task suite completion
+    /// Agent is cleaning up after task suite completion
     Cleanup = 3,
-    // TODO: may remove offline
-    /// Manager is offline
+    /// Agent is offline
     Offline = 4,
 }
 
-impl Display for NodeManagerState {
+impl Display for AgentState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NodeManagerState::Idle => write!(f, "Idle"),
-            NodeManagerState::Preparing => write!(f, "Preparing"),
-            NodeManagerState::Executing => write!(f, "Executing"),
-            NodeManagerState::Cleanup => write!(f, "Cleanup"),
-            NodeManagerState::Offline => write!(f, "Offline"),
+            AgentState::Idle => write!(f, "Idle"),
+            AgentState::Provision => write!(f, "Provision"),
+            AgentState::Executing => write!(f, "Executing"),
+            AgentState::Cleanup => write!(f, "Cleanup"),
+            AgentState::Offline => write!(f, "Offline"),
         }
     }
 }
 
-impl NodeManagerState {
+impl AgentState {
     pub fn is_available(&self) -> bool {
         matches!(self, Self::Idle)
     }
 
     pub fn is_busy(&self) -> bool {
-        matches!(self, Self::Preparing | Self::Executing | Self::Cleanup)
+        matches!(self, Self::Provision | Self::Executing | Self::Cleanup)
     }
 }
 
 #[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum SelectionType {
-    /// Manager was manually selected by user
+    /// Agent was manually selected by user
     UserSpecified = 0,
-    /// Manager was selected by tag matching
+    /// Agent was selected by tag matching
     TagMatched = 1,
 }
 
@@ -389,5 +421,58 @@ impl Display for SelectionType {
             SelectionType::UserSpecified => write!(f, "UserSpecified"),
             SelectionType::TagMatched => write!(f, "TagMatched"),
         }
+    }
+}
+
+/// Types of suite hooks that can be executed by agents
+#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
+#[sea_orm(rs_type = "i32", db_type = "Integer")]
+pub enum HookType {
+    /// Environment provision hook (setup before task execution)
+    Provision = 0,
+    /// Environment cleanup hook (teardown after suite completion)
+    Cleanup = 1,
+    /// Background/sidecar process
+    Background = 2,
+}
+
+impl Display for HookType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HookType::Provision => write!(f, "Provision"),
+            HookType::Cleanup => write!(f, "Cleanup"),
+            HookType::Background => write!(f, "Background"),
+        }
+    }
+}
+
+/// Lifecycle state of a suite hook execution
+#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
+#[sea_orm(rs_type = "i32", db_type = "Integer")]
+pub enum HookExecState {
+    /// Hook is currently running
+    Running = 0,
+    /// Hook completed successfully
+    Completed = 1,
+    /// Hook failed
+    Failed = 2,
+    /// Hook was cancelled
+    Cancelled = 3,
+}
+
+impl Display for HookExecState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HookExecState::Running => write!(f, "Running"),
+            HookExecState::Completed => write!(f, "Completed"),
+            HookExecState::Failed => write!(f, "Failed"),
+            HookExecState::Cancelled => write!(f, "Cancelled"),
+        }
+    }
+}
+
+impl HookExecState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
 }

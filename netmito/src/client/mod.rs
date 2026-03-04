@@ -633,7 +633,7 @@ impl MitoClient {
     pub async fn upload_artifact(
         &mut self,
         args: UploadArtifactArgs,
-    ) -> crate::error::Result<bool> {
+    ) -> crate::error::Result<()> {
         let metadata = args
             .local_file
             .metadata()
@@ -653,13 +653,13 @@ impl MitoClient {
         self.http_client
             .upload_file(resp.url.as_str(), content_length, args.local_file, args.pb)
             .await?;
-        Ok(resp.exist)
+        Ok(())
     }
 
     pub async fn upload_attachment(
         &mut self,
         args: UploadAttachmentArgs,
-    ) -> crate::error::Result<bool> {
+    ) -> crate::error::Result<()> {
         fn get_fname<P: AsRef<std::path::Path>>(p: P) -> crate::error::Result<String> {
             let fname = p
                 .as_ref()
@@ -723,7 +723,7 @@ impl MitoClient {
         self.http_client
             .upload_file(resp.url.as_str(), content_length, args.local_file, args.pb)
             .await?;
-        Ok(resp.exist)
+        Ok(())
     }
 
     pub async fn admin_workers_cancel(
@@ -865,7 +865,7 @@ impl MitoClient {
     pub async fn tasks_artifacts_upload(
         &mut self,
         args: TaskArtifactUploadArgs,
-    ) -> crate::error::Result<bool> {
+    ) -> crate::error::Result<()> {
         self.upload_artifact(args).await
     }
 
@@ -879,7 +879,7 @@ impl MitoClient {
     pub async fn groups_attachments_upload(
         &mut self,
         args: GroupAttachmentUploadArgs,
-    ) -> crate::error::Result<bool> {
+    ) -> crate::error::Result<()> {
         self.upload_attachment(args).await
     }
 
@@ -1204,6 +1204,93 @@ impl MitoClient {
     ) -> crate::error::Result<TasksSubmitResp> {
         let req: TasksSubmitReq = args.try_into()?;
         self.http_client.batch_submit_tasks(req).await
+    }
+
+    // -------------------------------------------------------------------------
+    // Suite wrapper methods
+    // -------------------------------------------------------------------------
+
+    pub async fn suites_create(
+        &mut self,
+        args: CreateSuiteArgs,
+    ) -> crate::error::Result<CreateTaskSuiteResp> {
+        self.http_client.create_task_suite(args.into()).await
+    }
+
+    pub async fn suites_query(
+        &mut self,
+        args: QuerySuitesArgs,
+    ) -> crate::error::Result<TaskSuitesQueryResp> {
+        self.http_client.query_task_suites(args.into()).await
+    }
+
+    pub async fn suites_get(
+        &mut self,
+        args: GetSuiteArgs,
+    ) -> crate::error::Result<TaskSuiteQueryResp> {
+        self.http_client.get_task_suite(args.uuid).await
+    }
+
+    pub async fn suites_cancel(
+        &mut self,
+        args: CancelSuiteArgs,
+    ) -> crate::error::Result<CancelSuiteResp> {
+        self.http_client
+            .cancel_task_suite(args.uuid, args.force)
+            .await
+    }
+
+    pub async fn suites_close(&mut self, args: CloseSuiteArgs) -> crate::error::Result<()> {
+        self.http_client.close_task_suite(args.uuid).await
+    }
+
+    pub async fn suites_refresh_agents(
+        &mut self,
+        args: RefreshSuiteAgentsArgs,
+    ) -> crate::error::Result<RefreshSuiteAgentsResp> {
+        self.http_client.refresh_suite_agents(args.uuid).await
+    }
+
+    pub async fn suites_add_agents(
+        &mut self,
+        args: AddSuiteAgentsArgs,
+    ) -> crate::error::Result<AddSuiteAgentsResp> {
+        let uuid = args.uuid;
+        self.http_client.add_suite_agents(uuid, args.into()).await
+    }
+
+    pub async fn suites_remove_agents(
+        &mut self,
+        args: RemoveSuiteAgentsArgs,
+    ) -> crate::error::Result<RemoveSuiteAgentsResp> {
+        let uuid = args.uuid;
+        self.http_client
+            .remove_suite_agents(uuid, args.into())
+            .await
+    }
+
+    // -------------------------------------------------------------------------
+    // Agent wrapper methods
+    // -------------------------------------------------------------------------
+
+    pub async fn agents_register(
+        &mut self,
+        args: RegisterAgentArgs,
+    ) -> crate::error::Result<RegisterAgentResp> {
+        self.http_client.register_agent(args.into()).await
+    }
+
+    pub async fn agents_query(
+        &mut self,
+        args: QueryAgentsArgs,
+    ) -> crate::error::Result<AgentsQueryResp> {
+        self.http_client.query_agents(args.into()).await
+    }
+
+    pub async fn agents_shutdown(&mut self, args: ShutdownAgentArgs) -> crate::error::Result<()> {
+        self.http_client
+            .shutdown_agent(args.uuid, args.force)
+            .await
     }
 
     pub async fn handle_command<T>(&mut self, cmd: T) -> bool
@@ -1540,8 +1627,8 @@ impl MitoClient {
                         }
                     }
                     AttachmentsCommands::Upload(args) => match self.upload_attachment(args).await {
-                        Ok(exist) => {
-                            output_upload_attachment_resp(exist);
+                        Ok(()) => {
+                            output_upload_attachment_resp();
                         }
                         Err(e) => {
                             tracing::error!("{}", e);
@@ -1842,8 +1929,8 @@ impl MitoClient {
                         }
                     }
                     ArtifactsCommands::Upload(args) => match self.upload_artifact(args).await {
-                        Ok(exist) => {
-                            output_upload_artifact_resp(exist);
+                        Ok(()) => {
+                            output_upload_artifact_resp();
                         }
                         Err(e) => {
                             tracing::error!("{}", e);
@@ -1937,6 +2024,160 @@ impl MitoClient {
                     }
                 },
             },
+            ClientCommand::Suites(args) => match args.command {
+                SuitesCommands::Create(args) => match self.suites_create(args).await {
+                    Ok(resp) => {
+                        tracing::info!("Suite created successfully: {}", resp.uuid);
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                SuitesCommands::Query(args) => {
+                    let verbose = args.verbose;
+                    let counted = args.count;
+                    match self.suites_query(args).await {
+                        Ok(resp) => {
+                            let TaskSuitesQueryResp {
+                                count,
+                                suites,
+                                group_name,
+                            } = resp;
+                            tracing::info!("Found {} suites in group {}", count, group_name);
+                            if !counted {
+                                if verbose {
+                                    for suite in suites {
+                                        output_suite_list_info(&suite);
+                                    }
+                                } else {
+                                    for suite in suites {
+                                        tracing::info!("{} ({})", suite.uuid, suite.state);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    }
+                }
+                SuitesCommands::Get(args) => match self.suites_get(args).await {
+                    Ok(resp) => {
+                        output_suite_info(&resp.info, &resp.assigned_agents);
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                SuitesCommands::Cancel(args) => match self.suites_cancel(args).await {
+                    Ok(resp) => {
+                        tracing::info!(
+                            "Suite cancelled; {} task(s) cancelled",
+                            resp.cancelled_task_count
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                SuitesCommands::Close(args) => match self.suites_close(args).await {
+                    Ok(_) => {
+                        tracing::info!("Suite closed successfully");
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                SuitesCommands::RefreshAgents(args) => {
+                    match self.suites_refresh_agents(args).await {
+                        Ok(resp) => {
+                            tracing::info!(
+                                "Agent refresh done: {} added, {} removed, {} total assigned",
+                                resp.added_agents.len(),
+                                resp.removed_agents.len(),
+                                resp.total_assigned
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    }
+                }
+                SuitesCommands::AddAgents(args) => match self.suites_add_agents(args).await {
+                    Ok(resp) => {
+                        tracing::info!("Added {} agent(s)", resp.added_agents.len());
+                        if !resp.rejected_agents.is_empty() {
+                            tracing::warn!(
+                                "Rejected {} agent(s): {:?}",
+                                resp.rejected_agents.len(),
+                                resp.rejected_agents
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                SuitesCommands::RemoveAgents(args) => match self.suites_remove_agents(args).await {
+                    Ok(resp) => {
+                        tracing::info!("Removed {} agent(s)", resp.removed_count);
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+            },
+            ClientCommand::Agents(args) => match args.command {
+                AgentsCommands::Register(args) => match self.agents_register(args).await {
+                    Ok(resp) => {
+                        tracing::info!("Agent registered: {}", resp.agent_uuid);
+                        tracing::info!("Token: {}", resp.token);
+                        tracing::info!(
+                            "Notification counter: {}",
+                            resp.notification_counter
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                AgentsCommands::Query(args) => {
+                    let verbose = args.verbose;
+                    let counted = args.count;
+                    match self.agents_query(args).await {
+                        Ok(resp) => {
+                            let AgentsQueryResp {
+                                count,
+                                agents,
+                                group_name,
+                            } = resp;
+                            tracing::info!("Found {} agents in group {}", count, group_name);
+                            if !counted {
+                                if verbose {
+                                    for agent in agents {
+                                        output_agent_info(&agent);
+                                    }
+                                } else {
+                                    for agent in agents {
+                                        tracing::info!("{} ({})", agent.uuid, agent.state);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    }
+                }
+                AgentsCommands::Shutdown(args) => match self.agents_shutdown(args).await {
+                    Ok(_) => {
+                        tracing::info!("Agent shutdown signal sent successfully");
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+            },
             ClientCommand::Quit => {
                 return false;
             }
@@ -1945,23 +2186,28 @@ impl MitoClient {
     }
 
     fn gen_submit_task_req(&self, args: SubmitTaskArgs) -> SubmitTaskReq {
-        let task_spec = TaskSpec::new(
-            args.command,
-            args.envs,
-            args.resources,
-            args.terminal_output,
-            args.watch,
-        );
+        use crate::schema::{ExecSpec, TaskExecOptions};
+
+        let spec = ExecSpec {
+            args: args.command,
+            envs: args.envs.into_iter().collect(),
+            resources: args.resources,
+            timeout: Some(args.timeout),
+            terminal_output: args.terminal_output,
+        };
+        let exec_options = args
+            .watch
+            .map(|watch| TaskExecOptions { watch: Some(watch) });
         let mut req = SubmitTaskReq {
             group_name: args.group_name.unwrap_or(self.username.clone()),
             suite_uuid: args.suite_uuid,
             tags: args.tags.into_iter().collect(),
             labels: args.labels.into_iter().collect(),
-            timeout: args.timeout,
             priority: args.priority,
-            task_spec,
+            spec,
+            exec_options,
         };
-        req.task_spec.resources.iter_mut().for_each(|r| {
+        req.spec.resources.iter_mut().for_each(|r| {
             if let RemoteResource::Attachment { ref key } = r.remote_file {
                 r.remote_file = RemoteResource::Attachment {
                     key: path_clean::clean(key).display().to_string(),

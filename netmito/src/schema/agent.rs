@@ -25,6 +25,12 @@ pub struct RegisterAgentReq {
     /// Optional token lifetime (default: forever)
     #[serde(default, with = "humantime_serde")]
     pub lifetime: Option<std::time::Duration>,
+    /// Stable identifier for the physical/virtual machine running this agent.
+    /// When provided, the coordinator upserts a record in the `machines` table
+    /// and links `agents.machine_id` to it. Typically auto-detected from
+    /// `/etc/machine-id` on Linux.
+    #[serde(default)]
+    pub machine_code: Option<String>,
 }
 
 /// Response after registering an agent
@@ -240,12 +246,9 @@ pub struct FetchTasksResp {
 }
 
 /// Request to report task execution result
+/// The task UUID is provided in the URL path (`/agents/tasks/{uuid}/report`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportAgentTaskReq {
-    /// Task ID
-    pub task_id: i64,
-    /// Task UUID
-    pub task_uuid: Uuid,
     /// Operation to perform
     pub op: ReportTaskOp,
 }

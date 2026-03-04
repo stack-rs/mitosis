@@ -17,11 +17,11 @@ use sea_orm::{entity::prelude::*, Set};
 
 use crate::{
     config::InfraPool,
-    entity::{state::UserState, users as User, workers as Worker},
+    entity::{agents as Agent, state::UserState, users as User, workers as Worker},
     error::{ApiError, AuthError},
     schema::{UserChangePasswordReq, UserLoginReq},
 };
-use token::{generate_token, verify_token};
+use token::{generate_token, generate_worker_token, verify_token};
 
 #[derive(Debug, Clone)]
 pub struct AuthUser {
@@ -43,6 +43,20 @@ pub struct AuthAdminUser {
 pub struct AuthWorker {
     pub id: i64,
     pub uuid: Uuid,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthAgent {
+    pub id: i64,
+    // TODO: check if this is necessary in the future
+    pub uuid: Uuid,
+}
+
+/// Payload for agent JWT tokens
+#[derive(Debug, Clone)]
+pub struct AgentJwtPayload {
+    pub agent_id: i64,
+    pub agent_uuid: Uuid,
 }
 
 pub(crate) fn get_and_prompt_username(
@@ -347,6 +361,45 @@ async fn worker_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<AuthWor
         .ok_or(AuthError::WrongCredentials)?;
     Ok(AuthWorker {
         id: worker.id,
+        uuid,
+    })
+}
+
+/// Generate JWT token for an agent
+pub fn gen_agent_jwt(
+    payload: &AgentJwtPayload,
+    lifetime: std::time::Duration,
+) -> crate::error::Result<String> {
+    // Use agent UUID as the subject and agent_id as the sign
+    generate_worker_token(payload.agent_uuid.to_string(), 0, Some(lifetime))
+}
+
+/// Middleware for authenticating agents
+pub async fn agent_auth_middleware(
+    State(pool): State<InfraPool>,
+    TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
+    mut req: Request<Body>,
+    next: Next,
+) -> Result<impl IntoResponse, ApiError> {
+    let auth_agent = agent_auth(&pool.db, &bearer).await?;
+    req.extensions_mut().insert(auth_agent);
+    Ok(next.run(req).await)
+}
+
+async fn agent_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<AuthAgent, AuthError> {
+    let token = bearer.token();
+    let claims = verify_token(token).map_err(|_| AuthError::InvalidToken)?;
+    let uuid = Uuid::parse_str(&claims.sub).map_err(|_| AuthError::InvalidToken)?;
+
+    let agent = Agent::Entity::find()
+        .filter(Agent::Column::Uuid.eq(uuid))
+        .one(db)
+        .await
+        .map_err(|_| AuthError::WrongCredentials)?
+        .ok_or(AuthError::WrongCredentials)?;
+
+    Ok(AuthAgent {
+        id: agent.id,
         uuid,
     })
 }

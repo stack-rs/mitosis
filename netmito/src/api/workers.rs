@@ -135,7 +135,7 @@ pub async fn worker_fetch_task(
     Extension(w): Extension<AuthWorker>,
     State(pool): State<InfraPool>,
 ) -> ApiResult<Json<Option<WorkerTaskResp>>> {
-    match service::worker::fetch_task(w.id, &pool).await {
+    match service::worker::fetch_task(w.id, w.uuid, &pool).await {
         Ok(t) => Ok(Json(t)),
         Err(Error::ApiError(e)) => Err(e),
         Err(e) => {

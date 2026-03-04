@@ -2,22 +2,31 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use argon2::password_hash::rand_core::OsRng;
+use rand::Rng;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::api::router;
 use crate::config::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 use crate::migration::{Migrator, MigratorTrait};
+use crate::service::agent_heartbeat::AgentHeartbeatQueue;
 use crate::service::s3::setup_buckets;
+use crate::service::suite::auto_close_inactive_suites;
+use crate::service::suite_task_dispatcher::SuiteTaskDispatcher;
 use crate::service::worker::{restore_workers, HeartbeatQueue, TaskDispatcher};
 use crate::signal::shutdown_signal;
+use crate::ws::connection::AgentWsRouter;
 
 pub struct MitoCoordinator {
     pub infra_pool: InfraPool,
     pub worker_task_queue: TaskDispatcher,
     pub worker_heartbeat_queue: HeartbeatQueue,
+    pub agent_heartbeat_queue: AgentHeartbeatQueue,
+    pub suite_task_dispatcher: SuiteTaskDispatcher,
+    pub ws_router: AgentWsRouter,
     pub cancel_token: CancellationToken,
     pub log_dir: PathBuf,
+    pub suite_auto_close_timeout_secs: i64,
 }
 
 impl MitoCoordinator {
@@ -85,24 +94,34 @@ impl MitoCoordinator {
             .map_err(|_| crate::error::Error::Custom("set shutdown secret failed".to_string()))?;
         let cancel_token = CancellationToken::new();
 
-        #[cfg(not(feature = "crossfire-channel"))]
-        let (worker_task_queue_tx, worker_task_queue_rx) = tokio::sync::mpsc::unbounded_channel();
-        #[cfg(feature = "crossfire-channel")]
         let (worker_task_queue_tx, worker_task_queue_rx) = crossfire::mpsc::unbounded_async();
-        #[cfg(not(feature = "crossfire-channel"))]
-        let (worker_heartbeat_queue_tx, worker_heartbeat_queue_rx) =
-            tokio::sync::mpsc::unbounded_channel();
-        #[cfg(feature = "crossfire-channel")]
         let (worker_heartbeat_queue_tx, worker_heartbeat_queue_rx) =
             crossfire::mpsc::unbounded_async();
+        let (agent_heartbeat_queue_tx, agent_heartbeat_queue_rx) =
+            crossfire::mpsc::unbounded_async();
+        let (ws_tx, ws_rx) = crossfire::mpsc::unbounded_async();
+        let (suite_dispatcher_tx, suite_dispatcher_rx) = crossfire::mpsc::unbounded_async();
 
         // Setup worker task queue
         let worker_task_queue =
             config.build_worker_task_queue(cancel_token.clone(), worker_task_queue_rx);
 
+        // Setup WS router
+        let ws_router = config.build_agent_ws_router(cancel_token.clone(), ws_rx);
+
+        // Setup suite task dispatcher
+        let suite_task_dispatcher =
+            config.build_suite_task_dispatcher(cancel_token.clone(), suite_dispatcher_rx);
+
         // Setup infra pool
         let infra_pool = config
-            .build_infra_pool(worker_task_queue_tx, worker_heartbeat_queue_tx)
+            .build_infra_pool(
+                worker_task_queue_tx,
+                worker_heartbeat_queue_tx,
+                agent_heartbeat_queue_tx,
+                ws_tx,
+                suite_dispatcher_tx,
+            )
             .await?;
 
         // Setup worker heartbeat queue
@@ -111,6 +130,15 @@ impl MitoCoordinator {
             infra_pool.clone(),
             worker_heartbeat_queue_rx,
         );
+
+        // Setup agent heartbeat queue
+        let agent_heartbeat_queue = config.build_agent_heartbeat_queue(
+            cancel_token.clone(),
+            infra_pool.clone(),
+            agent_heartbeat_queue_rx,
+        );
+
+        let suite_auto_close_timeout_secs = config.suite_auto_close_timeout.as_secs() as i64;
 
         // Setup s3 storage
         // List all buckets and create if not exist
@@ -137,8 +165,12 @@ impl MitoCoordinator {
             infra_pool,
             worker_task_queue,
             worker_heartbeat_queue,
+            agent_heartbeat_queue,
+            suite_task_dispatcher,
+            ws_router,
             cancel_token,
             log_dir,
+            suite_auto_close_timeout_secs,
         })
     }
 
@@ -148,13 +180,37 @@ impl MitoCoordinator {
             infra_pool,
             mut worker_task_queue,
             mut worker_heartbeat_queue,
+            mut agent_heartbeat_queue,
+            mut suite_task_dispatcher,
+            mut ws_router,
             cancel_token,
+            suite_auto_close_timeout_secs,
             ..
         } = self;
 
         // Create TaskTracker to manage background tasks
         let task_tracker = TaskTracker::new();
-        // TODO: auto close task suite
+
+        // Spawn auto-close task suite background task
+        {
+            let db = infra_pool.db.clone();
+            let cancel = cancel_token.clone();
+            task_tracker.spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            tracing::info!("Auto-close task_suite job stopped");
+                            break;
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(30 + rand::rng().random_range(0..30))) => {
+                            if let Err(e) = auto_close_inactive_suites(&db, suite_auto_close_timeout_secs).await {
+                                tracing::error!("Failed to auto-close inactive suites: {}", e);
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         // Spawn background tasks using TaskTracker
         task_tracker.spawn(async move {
@@ -167,7 +223,26 @@ impl MitoCoordinator {
             tracing::info!("Heartbeat queue stopped");
         });
 
+        task_tracker.spawn(async move {
+            agent_heartbeat_queue.run().await;
+            tracing::info!("Agent heartbeat queue stopped");
+        });
+
+        task_tracker.spawn(async move {
+            suite_task_dispatcher.run().await;
+            tracing::info!("Suite task dispatcher stopped");
+        });
+
+        task_tracker.spawn(async move {
+            ws_router.run().await;
+            tracing::info!("Agent WebSocket Router stopped");
+        });
+
         restore_workers(&infra_pool).await?;
+
+        // Notify all agents about coordinator restart
+        crate::service::agent::notify_all_agents_of_restart(&infra_pool).await?;
+
         let app = router(infra_pool, cancel_token.clone());
         let addr = crate::config::SERVER_CONFIG
             .get()

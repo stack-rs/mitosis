@@ -1298,25 +1298,10 @@ pub async fn cancel_tasks_by_uuids(
         // Query all matching tasks in a single query with permission checks
         // Join with user_group to check Write permission
         let builder = pool.db.get_database_backend();
-        let stmt = Query::select()
-            .columns([
-                (ActiveTasks::Entity, ActiveTasks::Column::Id),
-                (ActiveTasks::Entity, ActiveTasks::Column::Uuid),
-                (ActiveTasks::Entity, ActiveTasks::Column::TaskId),
-                (ActiveTasks::Entity, ActiveTasks::Column::CreatorId),
-                (ActiveTasks::Entity, ActiveTasks::Column::GroupId),
-                (ActiveTasks::Entity, ActiveTasks::Column::Tags),
-                (ActiveTasks::Entity, ActiveTasks::Column::Labels),
-                (ActiveTasks::Entity, ActiveTasks::Column::CreatedAt),
-                (ActiveTasks::Entity, ActiveTasks::Column::UpdatedAt),
-                (ActiveTasks::Entity, ActiveTasks::Column::State),
-                (ActiveTasks::Entity, ActiveTasks::Column::AssignedWorker),
-                (ActiveTasks::Entity, ActiveTasks::Column::Timeout),
-                (ActiveTasks::Entity, ActiveTasks::Column::Priority),
-                (ActiveTasks::Entity, ActiveTasks::Column::Spec),
-                (ActiveTasks::Entity, ActiveTasks::Column::UpstreamTaskUuid),
-                (ActiveTasks::Entity, ActiveTasks::Column::DownstreamTaskUuid),
-            ])
+
+        // Build a single-column subquery that selects only task IDs with permission checks.
+        let id_subquery = Query::select()
+            .column((ActiveTasks::Entity, ActiveTasks::Column::Id))
             .from(ActiveTasks::Entity)
             // Join with user_group to verify user has Write permission on the group
             .join(
@@ -1351,18 +1336,9 @@ pub async fn cancel_tasks_by_uuids(
 
         // Build CTE for DELETE RETURNING + INSERT SELECT to avoid parameter limits
         // Convert the SELECT statement into a subquery for the DELETE
-        let task_id_subquery = stmt.clone();
-
         let delete_stmt = DeleteStatement::new()
             .from_table(ActiveTasks::Entity)
-            .and_where(
-                Expr::col(ActiveTasks::Column::Id).in_subquery(
-                    Query::select()
-                        .column(ActiveTasks::Column::Id)
-                        .from_subquery(task_id_subquery, Alias::new("matching_tasks"))
-                        .to_owned(),
-                ),
-            )
+            .and_where(Expr::col(ActiveTasks::Column::Id).in_subquery(id_subquery))
             .returning_all()
             .to_owned();
 
@@ -1435,8 +1411,7 @@ pub async fn cancel_tasks_by_uuids(
                         .to_owned();
 
                     insert_stmt.select_from(select_from_cte).unwrap();
-                    insert_stmt.returning_col(ArchivedTasks::Column::Id);
-                    insert_stmt.returning_col(ArchivedTasks::Column::Uuid);
+                    insert_stmt.returning_all();
                     let insert_with_cte = insert_stmt.with(cte.into());
 
                     let stmt = builder.build(&insert_with_cte);

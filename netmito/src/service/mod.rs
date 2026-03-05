@@ -1,7 +1,11 @@
+pub mod agent;
+pub mod agent_heartbeat;
+pub mod agent_task;
 pub mod auth;
 pub mod group;
 pub mod s3;
 pub mod suite;
+pub mod suite_task_dispatcher;
 pub mod task;
 pub mod user;
 pub mod worker;

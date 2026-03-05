@@ -53,8 +53,7 @@ impl MigrationTrait for Migration {
                             .json_binary()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(TaskSuites::EnvPreparation).json_binary())
-                    .col(ColumnDef::new(TaskSuites::EnvCleanup).json_binary())
+                    .col(ColumnDef::new(TaskSuites::ExecHooks).json_binary())
                     .col(
                         ColumnDef::new(TaskSuites::State)
                             .integer()
@@ -69,7 +68,7 @@ impl MigrationTrait for Migration {
                             .default(0),
                     )
                     .col(
-                        ColumnDef::new(TaskSuites::PendingTasks)
+                        ColumnDef::new(TaskSuites::IncompleteTasks)
                             .integer()
                             .not_null()
                             .default(0),
@@ -222,7 +221,12 @@ impl MigrationTrait for Migration {
             )
             .await?;
         manager
-            .drop_table(Table::drop().table(TaskSuites::Table).to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(TaskSuites::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await
     }
 }
@@ -240,12 +244,11 @@ enum TaskSuites {
     Labels,
     Priority,
     WorkerSchedule,
-    EnvPreparation,
-    EnvCleanup,
+    ExecHooks,
     State,
     LastTaskSubmittedAt,
     TotalTasks,
-    PendingTasks,
+    IncompleteTasks,
     CreatedAt,
     UpdatedAt,
     CompletedAt,

@@ -17,13 +17,15 @@ use redis::{acl::Rule, AsyncCommands};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use time::Duration;
-#[cfg(not(feature = "crossfire-channel"))]
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
+use crate::service::suite_task_dispatcher::{SuiteDispatcherOp, SuiteTaskDispatcher};
+use crate::ws::connection::RouterOp;
+use crate::ws::AgentWsRouter;
 use crate::{
     error::Error,
+    service::agent_heartbeat::{AgentHeartbeatOp, AgentHeartbeatQueue},
     service::worker::{HeartbeatOp, HeartbeatQueue, TaskDispatcher, TaskDispatcherOp},
 };
 
@@ -60,6 +62,15 @@ pub struct CoordinatorConfig {
     pub(crate) access_token_expires_in: std::time::Duration,
     #[serde(with = "humantime_serde")]
     pub(crate) heartbeat_timeout: std::time::Duration,
+    /// Timeout before an agent is marked offline if no heartbeat received (default 300s)
+    #[serde(with = "humantime_serde", default = "default_agent_heartbeat_timeout")]
+    pub(crate) agent_heartbeat_timeout: std::time::Duration,
+    /// Timeout in seconds before an inactive suite (no new tasks submitted) is auto-closed (default 180s)
+    #[serde(with = "humantime_serde", default = "default_suite_auto_close_timeout")]
+    pub(crate) suite_auto_close_timeout: std::time::Duration,
+    /// Interval for WebSocket keepalive pings sent to connected agents (default 30s)
+    #[serde(with = "humantime_serde", default = "default_ws_ping_interval")]
+    pub(crate) ws_ping_interval: std::time::Duration,
     pub(crate) log_path: Option<RelativePathBuf>,
     pub(crate) file_log: bool,
 }
@@ -74,6 +85,18 @@ fn default_artifacts_bucket() -> String {
 
 fn default_attachments_bucket() -> String {
     "mitosis-attachments".to_string()
+}
+
+fn default_agent_heartbeat_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(300)
+}
+
+fn default_suite_auto_close_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(180)
+}
+
+fn default_ws_ping_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(30)
 }
 
 #[derive(Args, Debug, Serialize, Default)]
@@ -149,6 +172,18 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub heartbeat_timeout: Option<String>,
+    /// The agent heartbeat timeout, default to 300 seconds
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub agent_heartbeat_timeout: Option<String>,
+    /// The suite auto-close timeout (inactive suites), default to 180 seconds
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub suite_auto_close_timeout: Option<String>,
+    /// WebSocket keepalive ping interval, default to 30 seconds
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub ws_ping_interval: Option<String>,
     /// The log file path. If not specified, then the default rolling log file path would be used.
     /// If specified, then the log file would be exactly at the path specified.
     #[arg(long)]
@@ -190,6 +225,9 @@ impl Default for CoordinatorConfig {
             access_token_public_path: "public.pem".to_string().into(),
             access_token_expires_in: std::time::Duration::from_secs(60 * 60 * 24 * 7),
             heartbeat_timeout: std::time::Duration::from_secs(600),
+            agent_heartbeat_timeout: default_agent_heartbeat_timeout(),
+            suite_auto_close_timeout: default_suite_auto_close_timeout(),
+            ws_ping_interval: default_ws_ping_interval(),
             log_path: None,
             file_log: false,
         }
@@ -220,8 +258,7 @@ impl CoordinatorConfig {
     pub fn build_worker_task_queue(
         &self,
         cancel_token: CancellationToken,
-        #[cfg(not(feature = "crossfire-channel"))] rx: UnboundedReceiver<TaskDispatcherOp>,
-        #[cfg(feature = "crossfire-channel")] rx: crossfire::AsyncRx<TaskDispatcherOp>,
+        rx: crossfire::AsyncRx<TaskDispatcherOp>,
     ) -> TaskDispatcher {
         TaskDispatcher::new(cancel_token, rx)
     }
@@ -230,10 +267,34 @@ impl CoordinatorConfig {
         &self,
         cancel_token: CancellationToken,
         pool: InfraPool,
-        #[cfg(not(feature = "crossfire-channel"))] rx: UnboundedReceiver<HeartbeatOp>,
-        #[cfg(feature = "crossfire-channel")] rx: crossfire::AsyncRx<HeartbeatOp>,
+        rx: crossfire::AsyncRx<HeartbeatOp>,
     ) -> HeartbeatQueue {
         HeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
+    }
+
+    pub fn build_agent_heartbeat_queue(
+        &self,
+        cancel_token: CancellationToken,
+        pool: InfraPool,
+        rx: crossfire::AsyncRx<AgentHeartbeatOp>,
+    ) -> AgentHeartbeatQueue {
+        AgentHeartbeatQueue::new(cancel_token, self.agent_heartbeat_timeout, pool, rx)
+    }
+
+    pub fn build_suite_task_dispatcher(
+        &self,
+        cancel_token: CancellationToken,
+        rx: crossfire::AsyncRx<SuiteDispatcherOp>,
+    ) -> SuiteTaskDispatcher {
+        SuiteTaskDispatcher::new(cancel_token, rx)
+    }
+
+    pub fn build_agent_ws_router(
+        &self,
+        cancel_token: CancellationToken,
+        rx: crossfire::AsyncRx<RouterOp>,
+    ) -> AgentWsRouter {
+        AgentWsRouter::new(cancel_token, rx)
     }
 
     pub async fn build_redis_connection_info(
@@ -298,18 +359,11 @@ impl CoordinatorConfig {
 
     pub async fn build_infra_pool(
         &self,
-        #[cfg(not(feature = "crossfire-channel"))] worker_task_queue_tx: UnboundedSender<
-            TaskDispatcherOp,
-        >,
-        #[cfg(feature = "crossfire-channel")] worker_task_queue_tx: crossfire::MTx<
-            TaskDispatcherOp,
-        >,
-        #[cfg(not(feature = "crossfire-channel"))] worker_heartbeat_queue_tx: UnboundedSender<
-            HeartbeatOp,
-        >,
-        #[cfg(feature = "crossfire-channel")] worker_heartbeat_queue_tx: crossfire::MTx<
-            HeartbeatOp,
-        >,
+        worker_task_queue_tx: crossfire::MTx<TaskDispatcherOp>,
+        worker_heartbeat_queue_tx: crossfire::MTx<HeartbeatOp>,
+        agent_heartbeat_queue_tx: crossfire::MTx<AgentHeartbeatOp>,
+        ws_router_tx: crossfire::MTx<RouterOp>,
+        suite_task_dispatcher_tx: crossfire::MTx<SuiteDispatcherOp>,
     ) -> crate::error::Result<InfraPool> {
         let db = sea_orm::Database::connect(&self.db_url).await?;
         let credential = Credentials::new(
@@ -326,6 +380,8 @@ impl CoordinatorConfig {
             .force_path_style(self.s3_force_path_style)
             .build();
         let s3 = S3Client::from_conf(config);
+        let boot_uuid = uuid::Uuid::new_v4();
+
         Ok(InfraPool {
             db,
             s3,
@@ -333,6 +389,11 @@ impl CoordinatorConfig {
             attachments_bucket: self.attachments_bucket.clone(),
             worker_task_queue_tx,
             worker_heartbeat_queue_tx,
+            agent_heartbeat_queue_tx,
+            ws_router_tx,
+            suite_task_dispatcher_tx,
+            boot_uuid,
+            ws_ping_interval: self.ws_ping_interval,
         })
     }
 
@@ -438,14 +499,13 @@ pub struct InfraPool {
     pub s3: S3Client,
     pub artifacts_bucket: String,
     pub attachments_bucket: String,
-    #[cfg(not(feature = "crossfire-channel"))]
-    pub worker_task_queue_tx: UnboundedSender<TaskDispatcherOp>,
-    #[cfg(feature = "crossfire-channel")]
     pub worker_task_queue_tx: crossfire::MTx<TaskDispatcherOp>,
-    #[cfg(not(feature = "crossfire-channel"))]
-    pub worker_heartbeat_queue_tx: UnboundedSender<HeartbeatOp>,
-    #[cfg(feature = "crossfire-channel")]
     pub worker_heartbeat_queue_tx: crossfire::MTx<HeartbeatOp>,
+    pub agent_heartbeat_queue_tx: crossfire::MTx<AgentHeartbeatOp>,
+    pub ws_router_tx: crossfire::MTx<RouterOp>,
+    pub suite_task_dispatcher_tx: crossfire::MTx<SuiteDispatcherOp>,
+    pub boot_uuid: uuid::Uuid,
+    pub ws_ping_interval: std::time::Duration,
 }
 
 #[derive(Debug)]

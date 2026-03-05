@@ -1,14 +1,15 @@
 use sea_orm::sea_query::{
     extension::postgres::PgExpr, Alias, CommonTableExpression, DeleteStatement, ExprTrait,
-    InsertStatement, PgFunc, Query, SimpleExpr, Value,
+    InsertStatement, PgFunc, Query,
 };
 use sea_orm::ActiveValue::NotSet;
 use sea_orm::{prelude::*, FromQueryResult, Set, TransactionTrait};
 use std::collections::HashSet;
 use uuid::Uuid;
 
+use crate::config::InfraPool;
 use crate::entity::role::{GroupWorkerRole, UserGroupRole};
-use crate::entity::state::TaskState;
+use crate::entity::state::{TaskState, TaskSuiteState};
 use crate::entity::{
     active_tasks as ActiveTasks, archived_tasks as ArchivedTasks, artifacts as Artifact,
     group_worker as GroupWorker, groups as Group, task_suites as TaskSuites,
@@ -16,18 +17,19 @@ use crate::entity::{
 };
 use crate::error::{ApiError, Error, ErrorMsg};
 use crate::schema::{
-    ArtifactQueryResp, ChangeTaskReq, CountQuery, ParsedTaskQueryInfo, SubmitTaskReq,
+    ArtifactQueryResp, ChangeTaskReq, CountQuery, ExecSpec, ParsedTaskQueryInfo, SubmitTaskReq,
     SubmitTaskResp, TaskQueryInfo, TaskQueryResp, TaskResultSpec, TasksCancelByFilterReq,
     TasksCancelByFilterResp, TasksCancelByUuidsReq, TasksCancelByUuidsResp, TasksQueryReq,
     TasksQueryResp, UpdateTaskLabelsReq,
 };
-use crate::{config::InfraPool, schema::TaskSpec};
+
+use crate::service::suite_task_dispatcher::SuiteDispatcherOp;
 
 use super::worker::{remove_task, TaskDispatcherOp};
 
 // XXX: Not sure if we can relax the constrains on local path checking.
 // We currently only check if the path is absolute or contains `..` and not check for `.`.
-fn check_task_spec(spec: &TaskSpec) -> crate::error::Result<()> {
+fn check_exec_spec(spec: &ExecSpec) -> crate::error::Result<()> {
     if spec.resources.iter().any(|r| {
         r.local_path.is_absolute()
             || r.local_path
@@ -51,10 +53,10 @@ pub async fn user_submit_task(
     creator_id: i64,
     req: SubmitTaskReq,
 ) -> crate::error::Result<SubmitTaskResp> {
-    interval_submit_task(pool, creator_id, Submitter::User, req).await
+    internal_submit_task(pool, creator_id, Submitter::User, req).await
 }
 
-async fn interval_submit_task(
+async fn internal_submit_task(
     pool: &InfraPool,
     creator_id: i64,
     submitter: Submitter,
@@ -63,9 +65,9 @@ async fn interval_submit_task(
         suite_uuid,
         tags,
         labels,
-        timeout,
         priority,
-        task_spec,
+        spec,
+        exec_options,
     }: SubmitTaskReq,
 ) -> crate::error::Result<SubmitTaskResp> {
     let tags = Vec::from_iter(tags);
@@ -80,103 +82,160 @@ async fn interval_submit_task(
     };
     match suite_uuid {
         Some(suite_uuid) => {
-            // Check task spec
-            check_task_spec(&task_spec)?;
-            let spec = serde_json::to_value(task_spec)?;
-            let (task, suite_uuid) = pool
+            // Check exec spec
+            check_exec_spec(&spec)?;
+            let spec_json = serde_json::to_value(&spec)?;
+            let exec_options_json = exec_options
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()?;
+            // Also capture suite.incomplete_tasks and suite.priority so we can notify
+            // assigned agents if this is the first task added (incomplete_tasks 0 → 1).
+            let (task, suite_uuid, suite_incomplete_tasks, suite_priority) = pool
                 .db
-                .transaction::<_, (ActiveTasks::Model, Uuid), crate::error::Error>(|txn| {
-                    Box::pin(async move {
-                        // Fetch suite
-                        let suite = TaskSuites::Entity::update_many()
-                            .col_expr(
-                                TaskSuites::Column::TotalTasks,
-                                Expr::col(TaskSuites::Column::TotalTasks).add(1),
-                            )
-                            .col_expr(
-                                TaskSuites::Column::PendingTasks,
-                                Expr::col(TaskSuites::Column::PendingTasks).add(1),
-                            )
-                            .col_expr(TaskSuites::Column::LastTaskSubmittedAt, Expr::value(now))
-                            .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
-                            .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
-                            .exec_with_returning(txn)
-                            .await?;
-                        let suite = match suite.into_iter().next() {
-                            Some(suite) => suite,
-                            None => {
-                                return Err(Error::ApiError(crate::error::ApiError::NotFound(
-                                    format!("Task suite with uuid {suite_uuid}"),
-                                )));
-                            }
-                        };
+                .transaction::<_, (ActiveTasks::Model, Uuid, i32, i32), crate::error::Error>(
+                    |txn| {
+                        Box::pin(async move {
+                            // Fetch suite
+                            let suite = TaskSuites::Entity::update_many()
+                                .col_expr(
+                                    TaskSuites::Column::TotalTasks,
+                                    Expr::col(TaskSuites::Column::TotalTasks).add(1),
+                                )
+                                .col_expr(
+                                    TaskSuites::Column::IncompleteTasks,
+                                    Expr::col(TaskSuites::Column::IncompleteTasks).add(1),
+                                )
+                                .col_expr(TaskSuites::Column::LastTaskSubmittedAt, Expr::value(now))
+                                .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+                                .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
+                                .exec_with_returning(txn)
+                                .await?;
+                            let suite = match suite.into_iter().next() {
+                                Some(suite) => suite,
+                                None => {
+                                    return Err(Error::ApiError(crate::error::ApiError::NotFound(
+                                        format!("Task suite with uuid {suite_uuid}"),
+                                    )));
+                                }
+                            };
 
-                        // Check suite state - cannot submit to cancelled suite
-                        if !suite.state.can_accept_tasks() {
-                            return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
-                                format!(
-                                    "Suite is in {} state and cannot accept new tasks",
-                                    suite.state
-                                ),
-                            )));
-                        }
-                        // Permission check: user must be member of suite's group
-                        UserGroup::Entity::find()
-                            .filter(UserGroup::Column::UserId.eq(creator_id))
-                            .filter(UserGroup::Column::GroupId.eq(suite.group_id))
-                            .one(txn)
-                            .await?
-                            .and_then(|ug| match ug.role {
-                                UserGroupRole::Admin | UserGroupRole::Write => Some(()),
-                                _ => None,
-                            })
-                            .ok_or(Error::AuthError(crate::error::AuthError::PermissionDenied))?;
-                        let group = Group::Entity::update_many()
-                            .col_expr(
-                                Group::Column::TaskCount,
-                                Expr::col(Group::Column::TaskCount).add(1),
-                            )
-                            .col_expr(Group::Column::UpdatedAt, Expr::value(now))
-                            .filter(Group::Column::Id.eq(suite.group_id))
-                            .filter(Group::Column::GroupName.eq(&group_name))
-                            .exec_with_returning(txn)
-                            .await?;
-                        let group = match group.into_iter().next() {
-                            Some(group) => group,
-                            None => {
-                                return Err(Error::ApiError(crate::error::ApiError::NotFound(
-                                    format!("User or group with name {group_name}"),
-                                )));
+                            // Check suite state - cannot submit to cancelled suite
+                            if !suite.state.can_accept_tasks() {
+                                return Err(Error::ApiError(
+                                    crate::error::ApiError::InvalidRequest(format!(
+                                        "Suite is in {} state and cannot accept new tasks",
+                                        suite.state
+                                    )),
+                                ));
                             }
-                        };
-                        let group_id = group.id;
-                        let task_id = group.task_count;
-                        let uuid = Uuid::new_v4();
-                        let task = ActiveTasks::ActiveModel {
-                            creator_id: Set(creator_id),
-                            group_id: Set(group_id),
-                            task_id: Set(task_id),
-                            uuid: Set(uuid),
-                            tags: Set(tags),
-                            labels: Set(labels),
-                            created_at: Set(now),
-                            updated_at: Set(now),
-                            state,
-                            assigned_worker: Set(None),
-                            timeout: Set(timeout.as_secs() as i64),
-                            priority: Set(priority),
-                            spec: Set(spec),
-                            result: Set(None),
-                            upstream_task_uuid,
-                            task_suite_id: Set(Some(suite.id)),
-                            ..Default::default()
-                        };
-                        let task = task.insert(txn).await?;
-                        Ok((task, suite.uuid))
-                    })
-                })
+
+                            // Reopen suite if it was Closed or Complete
+                            if suite.state.needs_reopen() {
+                                TaskSuites::Entity::update_many()
+                                    .col_expr(
+                                        TaskSuites::Column::State,
+                                        Expr::value(TaskSuiteState::Open),
+                                    )
+                                    .col_expr(
+                                        TaskSuites::Column::CompletedAt,
+                                        Expr::value(None::<TimeDateTimeWithTimeZone>),
+                                    )
+                                    .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+                                    .filter(TaskSuites::Column::Id.eq(suite.id))
+                                    .exec(txn)
+                                    .await?;
+
+                                tracing::info!(
+                                    suite_uuid = %suite.uuid,
+                                    previous_state = %suite.state,
+                                    "Suite reopened due to new task submission"
+                                );
+                            }
+                            // Permission check: user must be member of suite's group
+                            UserGroup::Entity::find()
+                                .filter(UserGroup::Column::UserId.eq(creator_id))
+                                .filter(UserGroup::Column::GroupId.eq(suite.group_id))
+                                .one(txn)
+                                .await?
+                                .and_then(|ug| match ug.role {
+                                    UserGroupRole::Admin | UserGroupRole::Write => Some(()),
+                                    _ => None,
+                                })
+                                .ok_or(Error::AuthError(
+                                    crate::error::AuthError::PermissionDenied,
+                                ))?;
+                            let group = Group::Entity::update_many()
+                                .col_expr(
+                                    Group::Column::TaskCount,
+                                    Expr::col(Group::Column::TaskCount).add(1),
+                                )
+                                .col_expr(Group::Column::UpdatedAt, Expr::value(now))
+                                .filter(Group::Column::Id.eq(suite.group_id))
+                                .exec_with_returning(txn)
+                                .await?;
+                            let group = match group.into_iter().next() {
+                                Some(group) => group,
+                                None => {
+                                    return Err(Error::ApiError(crate::error::ApiError::NotFound(
+                                        format!("Suite group (id={})", suite.group_id),
+                                    )));
+                                }
+                            };
+                            let group_id = group.id;
+                            let task_id = group.task_count;
+                            let uuid = Uuid::new_v4();
+                            // Tags and group are auto-inherited from the suite
+                            let task = ActiveTasks::ActiveModel {
+                                creator_id: Set(creator_id),
+                                group_id: Set(group_id),
+                                task_id: Set(task_id),
+                                uuid: Set(uuid),
+                                tags: Set(suite.tags.clone()),
+                                labels: Set(labels),
+                                created_at: Set(now),
+                                updated_at: Set(now),
+                                state,
+                                runner_uuid: Set(None),
+                                priority: Set(priority),
+                                spec: Set(spec_json),
+                                exec_options: Set(exec_options_json),
+                                result: Set(None),
+                                upstream_task_uuid,
+                                task_suite_id: Set(Some(suite.id)),
+                                ..Default::default()
+                            };
+                            let task = task.insert(txn).await?;
+                            Ok((task, suite.uuid, suite.incomplete_tasks, suite.priority))
+                        })
+                    },
+                )
                 .await?;
-            // TODO: add task to suite's task queue
+            // Add task to the suite's in-memory dispatcher buffer.
+            let suite_id = task.task_suite_id;
+            if let Some(suite_id) = suite_id {
+                let _ = pool
+                    .suite_task_dispatcher_tx
+                    .send(SuiteDispatcherOp::AddTask {
+                        suite_id,
+                        task_id: task.id,
+                        priority: task.priority,
+                    });
+
+                // When incomplete_tasks == 1 the suite just transitioned from zero pending tasks
+                // (new suite, or a Complete/Closed suite that was reopened). Notify all assigned
+                // agents so idle agents can fetch the suite immediately rather than waiting for
+                // the next heartbeat cycle.
+                if suite_incomplete_tasks == 1 {
+                    crate::service::suite::notify_agents_suite_available(
+                        pool,
+                        suite_id,
+                        suite_uuid,
+                        suite_priority,
+                    )
+                    .await;
+                }
+            }
             Ok(SubmitTaskResp {
                 task_id: task.task_id,
                 uuid: task.uuid,
@@ -184,9 +243,13 @@ async fn interval_submit_task(
             })
         }
         None => {
-            // Check task spec
-            check_task_spec(&task_spec)?;
-            let spec = serde_json::to_value(task_spec)?;
+            // Check exec spec
+            check_exec_spec(&spec)?;
+            let spec_json = serde_json::to_value(&spec)?;
+            let exec_options_json = exec_options
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()?;
             let task = pool
                 .db
                 .transaction::<_, ActiveTasks::Model, crate::error::Error>(|txn| {
@@ -221,10 +284,10 @@ async fn interval_submit_task(
                             created_at: Set(now),
                             updated_at: Set(now),
                             state,
-                            assigned_worker: Set(None),
-                            timeout: Set(timeout.as_secs() as i64),
+                            runner_uuid: Set(None),
                             priority: Set(priority),
-                            spec: Set(spec),
+                            spec: Set(spec_json),
+                            exec_options: Set(exec_options_json),
                             result: Set(None),
                             upstream_task_uuid,
                             ..Default::default()
@@ -295,7 +358,7 @@ pub async fn worker_submit_pending_task(
     upstream_task_uuid: Uuid,
     req: SubmitTaskReq,
 ) -> crate::error::Result<SubmitTaskResp> {
-    interval_submit_task(pool, creator_id, Submitter::Worker(upstream_task_uuid), req).await
+    internal_submit_task(pool, creator_id, Submitter::Worker(upstream_task_uuid), req).await
 }
 
 pub async fn worker_trigger_pending_task(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<()> {
@@ -312,40 +375,60 @@ pub async fn worker_trigger_pending_task(pool: &InfraPool, uuid: Uuid) -> crate:
     task.state = Set(TaskState::Ready);
     task.updated_at = Set(TimeDateTimeWithTimeZone::now_utc());
     let task = task.update(&pool.db).await?;
-    // Batch add task to worker task queues
-    let builder = pool.db.get_database_backend();
-    let tasks_stmt = Query::select()
-        .column((Worker::Entity, ActiveTasks::Column::Id))
-        .from(Worker::Entity)
-        .join(
-            sea_orm::JoinType::Join,
-            GroupWorker::Entity,
-            Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId))
-                .eq(Expr::col((Worker::Entity, Worker::Column::Id))),
-        )
-        .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::GroupId)).eq(task.group_id))
-        .and_where(
-            Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).eq(PgFunc::any(vec![
-                GroupWorkerRole::Write,
-                GroupWorkerRole::Admin,
-            ])),
-        )
-        .and_where(Expr::col((Worker::Entity, Worker::Column::Tags)).contains(task.tags))
-        .to_owned();
-    let workers: Vec<PartialWorkerId> =
-        PartialWorkerId::find_by_statement(builder.build(&tasks_stmt))
-            .all(&pool.db)
-            .await?;
-    let op = TaskDispatcherOp::BatchAddTask(
-        workers.into_iter().map(i64::from).collect(),
-        task.id,
-        task.priority,
-    );
-    if pool.worker_task_queue_tx.send(op).is_err() {
-        Err(Error::Custom("send batch add task failed".to_string()))
+
+    if let Some(suite_id) = task.task_suite_id {
+        // Suite task: re-add to the suite dispatcher buffer now that it is Ready.
+        // The task was already speculatively added when it was submitted (Pending state),
+        // but the fetch claim would have failed silently. Re-adding ensures it is
+        // immediately available regardless of buffer state or refill timing.
+        let op = SuiteDispatcherOp::AddTask {
+            suite_id,
+            task_id: task.id,
+            priority: task.priority,
+        };
+        if pool.suite_task_dispatcher_tx.send(op).is_err() {
+            return Err(Error::Custom(
+                "send suite AddTask failed: dispatcher channel closed".to_string(),
+            ));
+        }
     } else {
-        Ok(())
+        // Independent task: batch add to worker task queues (original behaviour).
+        let builder = pool.db.get_database_backend();
+        let tasks_stmt = Query::select()
+            .column((Worker::Entity, ActiveTasks::Column::Id))
+            .from(Worker::Entity)
+            .join(
+                sea_orm::JoinType::Join,
+                GroupWorker::Entity,
+                Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId))
+                    .eq(Expr::col((Worker::Entity, Worker::Column::Id))),
+            )
+            .and_where(
+                Expr::col((GroupWorker::Entity, GroupWorker::Column::GroupId)).eq(task.group_id),
+            )
+            .and_where(
+                Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).eq(PgFunc::any(vec![
+                    GroupWorkerRole::Write,
+                    GroupWorkerRole::Admin,
+                ])),
+            )
+            .and_where(Expr::col((Worker::Entity, Worker::Column::Tags)).contains(task.tags))
+            .to_owned();
+        let workers: Vec<PartialWorkerId> =
+            PartialWorkerId::find_by_statement(builder.build(&tasks_stmt))
+                .all(&pool.db)
+                .await?;
+        let op = TaskDispatcherOp::BatchAddTask(
+            workers.into_iter().map(i64::from).collect(),
+            task.id,
+            task.priority,
+        );
+        if pool.worker_task_queue_tx.send(op).is_err() {
+            return Err(Error::Custom("send batch add task failed".to_string()));
+        }
     }
+
+    Ok(())
 }
 
 pub async fn user_change_task(
@@ -354,12 +437,12 @@ pub async fn user_change_task(
     uuid: Uuid,
     ChangeTaskReq {
         tags,
-        timeout,
         priority,
-        task_spec,
+        spec,
+        exec_options,
     }: ChangeTaskReq,
 ) -> crate::error::Result<()> {
-    if tags.is_none() && timeout.is_none() && priority.is_none() && task_spec.is_none() {
+    if tags.is_none() && priority.is_none() && spec.is_none() && exec_options.is_none() {
         return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
             "No change specified".to_string(),
         )));
@@ -396,13 +479,14 @@ pub async fn user_change_task(
                 if let Some(tags) = tags {
                     task.tags = Set(Vec::from_iter(tags));
                 }
-                if let Some(task_spec) = task_spec {
-                    check_task_spec(&task_spec)?;
-                    let spec = serde_json::to_value(task_spec)?;
-                    task.spec = Set(spec);
+                if let Some(spec) = spec {
+                    check_exec_spec(&spec)?;
+                    let spec_json = serde_json::to_value(spec)?;
+                    task.spec = Set(spec_json);
                 }
-                if let Some(timeout) = timeout {
-                    task.timeout = Set(timeout.as_secs() as i64);
+                if let Some(exec_options) = exec_options {
+                    let exec_options_json = serde_json::to_value(exec_options)?;
+                    task.exec_options = Set(Some(exec_options_json));
                 }
                 if let Some(priority) = priority {
                     task.priority = Set(priority);
@@ -573,14 +657,13 @@ pub async fn user_cancel_task(
                     created_at: Set(task.created_at),
                     updated_at: Set(now),
                     state: Set(TaskState::Cancelled),
-                    assigned_worker: Set(task.assigned_worker),
-                    timeout: Set(task.timeout),
+                    runner_uuid: Set(task.runner_uuid),
                     priority: Set(task.priority),
                     spec: Set(task.spec),
+                    exec_options: Set(task.exec_options),
                     result: Set(Some(result)),
                     upstream_task_uuid: Set(task.upstream_task_uuid),
                     downstream_task_uuid: Set(task.downstream_task_uuid),
-                    reporter_uuid: Set(None),
                     task_suite_id: Set(task.task_suite_id),
                 };
                 archived_task.insert(txn).await?;
@@ -604,15 +687,15 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             (ActiveTasks::Entity, ActiveTasks::Column::CreatedAt),
             (ActiveTasks::Entity, ActiveTasks::Column::UpdatedAt),
             (ActiveTasks::Entity, ActiveTasks::Column::State),
-            (ActiveTasks::Entity, ActiveTasks::Column::Timeout),
             (ActiveTasks::Entity, ActiveTasks::Column::Priority),
             (ActiveTasks::Entity, ActiveTasks::Column::Spec),
+            (ActiveTasks::Entity, ActiveTasks::Column::ExecOptions),
             (ActiveTasks::Entity, ActiveTasks::Column::Result),
             (ActiveTasks::Entity, ActiveTasks::Column::UpstreamTaskUuid),
             (ActiveTasks::Entity, ActiveTasks::Column::DownstreamTaskUuid),
         ])
-        // Active tasks do not have reporter_uuid; return NULL
-        .expr_as(Expr::val(Value::Uuid(None)), Alias::new("reporter_uuid"))
+        // Active tasks have runner_uuid directly in the column
+        .column((ActiveTasks::Entity, ActiveTasks::Column::RunnerUuid))
         .expr_as(
             Expr::col((User::Entity, User::Column::Username)),
             Alias::new("creator_username"),
@@ -648,9 +731,9 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             (ArchivedTasks::Entity, ArchivedTasks::Column::CreatedAt),
             (ArchivedTasks::Entity, ArchivedTasks::Column::UpdatedAt),
             (ArchivedTasks::Entity, ArchivedTasks::Column::State),
-            (ArchivedTasks::Entity, ArchivedTasks::Column::Timeout),
             (ArchivedTasks::Entity, ArchivedTasks::Column::Priority),
             (ArchivedTasks::Entity, ArchivedTasks::Column::Spec),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::ExecOptions),
             (ArchivedTasks::Entity, ArchivedTasks::Column::Result),
             (
                 ArchivedTasks::Entity,
@@ -660,7 +743,7 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
                 ArchivedTasks::Entity,
                 ArchivedTasks::Column::DownstreamTaskUuid,
             ),
-            (ArchivedTasks::Entity, ArchivedTasks::Column::ReporterUuid),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::RunnerUuid),
         ])
         .expr_as(
             Expr::col((User::Entity, User::Column::Username)),
@@ -720,13 +803,13 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
         created_at: info.created_at,
         updated_at: info.updated_at,
         state: info.state,
-        timeout: info.timeout,
         priority: info.priority,
         spec: serde_json::from_value(info.spec)?,
+        exec_options: info.exec_options.map(serde_json::from_value).transpose()?,
         result: info.result.map(serde_json::from_value).transpose()?,
         upstream_task_uuid: info.upstream_task_uuid,
         downstream_task_uuid: info.downstream_task_uuid,
-        reporter_uuid: info.reporter_uuid,
+        runner_uuid: info.runner_uuid,
     };
     Ok(TaskQueryResp { info, artifacts })
 }
@@ -852,13 +935,13 @@ pub(crate) fn apply_task_filters(
     archive_stmt: &mut sea_orm::sea_query::SelectStatement,
     query: &TasksQueryReq,
 ) -> crate::error::Result<()> {
-    if let Some(reporter_uuid) = query.reporter_uuid {
-        // reporter_uuid applies only to archived tasks. Ensure active query returns nothing.
-        // Exclude active tasks by adding a false condition.
-        active_stmt.and_where(Expr::value(false));
+    if let Some(runner_uuid) = query.runner_uuid {
+        // Filter both active and archived tasks by runner_uuid
+        active_stmt.and_where(
+            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::RunnerUuid)).eq(runner_uuid),
+        );
         archive_stmt.and_where(
-            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::ReporterUuid))
-                .eq(reporter_uuid),
+            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::RunnerUuid)).eq(runner_uuid),
         );
     }
     if let Some(ref creator_usernames) = query.creator_usernames {
@@ -1084,15 +1167,15 @@ pub async fn query_tasks_by_filter(
                 (ActiveTasks::Entity, ActiveTasks::Column::CreatedAt),
                 (ActiveTasks::Entity, ActiveTasks::Column::UpdatedAt),
                 (ActiveTasks::Entity, ActiveTasks::Column::State),
-                (ActiveTasks::Entity, ActiveTasks::Column::Timeout),
                 (ActiveTasks::Entity, ActiveTasks::Column::Priority),
                 (ActiveTasks::Entity, ActiveTasks::Column::Spec),
+                (ActiveTasks::Entity, ActiveTasks::Column::ExecOptions),
                 (ActiveTasks::Entity, ActiveTasks::Column::Result),
                 (ActiveTasks::Entity, ActiveTasks::Column::UpstreamTaskUuid),
                 (ActiveTasks::Entity, ActiveTasks::Column::DownstreamTaskUuid),
             ])
-            // Active tasks do not have reporter_uuid; return NULL
-            .expr_as(Expr::val(Value::Uuid(None)), Alias::new("reporter_uuid"))
+            // Active tasks have runner_uuid directly in the column
+            .column((ActiveTasks::Entity, ActiveTasks::Column::RunnerUuid))
             .expr_as(
                 Expr::col((User::Entity, User::Column::Username)),
                 Alias::new("creator_username"),
@@ -1131,9 +1214,9 @@ pub async fn query_tasks_by_filter(
                 (ArchivedTasks::Entity, ArchivedTasks::Column::CreatedAt),
                 (ArchivedTasks::Entity, ArchivedTasks::Column::UpdatedAt),
                 (ArchivedTasks::Entity, ArchivedTasks::Column::State),
-                (ArchivedTasks::Entity, ArchivedTasks::Column::Timeout),
                 (ArchivedTasks::Entity, ArchivedTasks::Column::Priority),
                 (ArchivedTasks::Entity, ArchivedTasks::Column::Spec),
+                (ArchivedTasks::Entity, ArchivedTasks::Column::ExecOptions),
                 (ArchivedTasks::Entity, ArchivedTasks::Column::Result),
                 (
                     ArchivedTasks::Entity,
@@ -1143,7 +1226,7 @@ pub async fn query_tasks_by_filter(
                     ArchivedTasks::Entity,
                     ArchivedTasks::Column::DownstreamTaskUuid,
                 ),
-                (ArchivedTasks::Entity, ArchivedTasks::Column::ReporterUuid),
+                (ArchivedTasks::Entity, ArchivedTasks::Column::RunnerUuid),
             ])
             .expr_as(
                 Expr::col((User::Entity, User::Column::Username)),
@@ -1226,7 +1309,7 @@ pub async fn cancel_tasks_by_filter(
         group_name: req.group_name,
         tags: req.tags,
         labels: req.labels,
-        reporter_uuid: None,
+        runner_uuid: None,
         suite_uuid: req.suite_uuid,
         // Filter for Ready and Pending tasks (cancellable states)
         states: {
@@ -1324,14 +1407,13 @@ pub async fn cancel_tasks_by_filter(
                     .expr(Expr::col(Alias::new("created_at")))
                     .expr(Expr::value(now))
                     .expr(Expr::value(TaskState::Cancelled))
-                    .expr(Expr::col(Alias::new("assigned_worker")))
-                    .expr(Expr::col(Alias::new("timeout")))
+                    .expr(Expr::col(Alias::new("runner_uuid")))
                     .expr(Expr::col(Alias::new("priority")))
                     .expr(Expr::col(Alias::new("spec")))
+                    .expr(Expr::col(Alias::new("exec_options")))
                     .expr(Expr::value(result.clone()))
                     .expr(Expr::col(Alias::new("upstream_task_uuid")))
                     .expr(Expr::col(Alias::new("downstream_task_uuid")))
-                    .expr(SimpleExpr::Constant(Value::Uuid(None)))
                     .expr(Expr::col(Alias::new("task_suite_id")))
                     .from(Alias::new("deleted"))
                     .to_owned();
@@ -1350,14 +1432,13 @@ pub async fn cancel_tasks_by_filter(
                         ArchivedTasks::Column::CreatedAt,
                         ArchivedTasks::Column::UpdatedAt,
                         ArchivedTasks::Column::State,
-                        ArchivedTasks::Column::AssignedWorker,
-                        ArchivedTasks::Column::Timeout,
+                        ArchivedTasks::Column::RunnerUuid,
                         ArchivedTasks::Column::Priority,
                         ArchivedTasks::Column::Spec,
+                        ArchivedTasks::Column::ExecOptions,
                         ArchivedTasks::Column::Result,
                         ArchivedTasks::Column::UpstreamTaskUuid,
                         ArchivedTasks::Column::DownstreamTaskUuid,
-                        ArchivedTasks::Column::ReporterUuid,
                         ArchivedTasks::Column::TaskSuiteId,
                     ])
                     .to_owned();
@@ -1497,14 +1578,13 @@ pub async fn cancel_tasks_by_uuids(
                         .expr(Expr::col(Alias::new("created_at")))
                         .expr(Expr::value(now))
                         .expr(Expr::value(TaskState::Cancelled))
-                        .expr(Expr::col(Alias::new("assigned_worker")))
-                        .expr(Expr::col(Alias::new("timeout")))
+                        .expr(Expr::col(Alias::new("runner_uuid")))
                         .expr(Expr::col(Alias::new("priority")))
                         .expr(Expr::col(Alias::new("spec")))
+                        .expr(Expr::col(Alias::new("exec_options")))
                         .expr(Expr::value(result.clone()))
                         .expr(Expr::col(Alias::new("upstream_task_uuid")))
                         .expr(Expr::col(Alias::new("downstream_task_uuid")))
-                        .expr(SimpleExpr::Constant(Value::Uuid(None)))
                         .expr(Expr::col(Alias::new("task_suite_id")))
                         .from(Alias::new("deleted"))
                         .to_owned();
@@ -1523,14 +1603,13 @@ pub async fn cancel_tasks_by_uuids(
                             ArchivedTasks::Column::CreatedAt,
                             ArchivedTasks::Column::UpdatedAt,
                             ArchivedTasks::Column::State,
-                            ArchivedTasks::Column::AssignedWorker,
-                            ArchivedTasks::Column::Timeout,
+                            ArchivedTasks::Column::RunnerUuid,
                             ArchivedTasks::Column::Priority,
                             ArchivedTasks::Column::Spec,
+                            ArchivedTasks::Column::ExecOptions,
                             ArchivedTasks::Column::Result,
                             ArchivedTasks::Column::UpstreamTaskUuid,
                             ArchivedTasks::Column::DownstreamTaskUuid,
-                            ArchivedTasks::Column::ReporterUuid,
                             ArchivedTasks::Column::TaskSuiteId,
                         ])
                         .to_owned();
@@ -1601,6 +1680,13 @@ pub async fn user_batch_submit_tasks(
     }
 
     let mut results = Vec::with_capacity(req.tasks.len());
+    tracing::debug!(
+        target: "/tasks/submit",
+        "User {} is submitting batch of {} tasks at {}",
+        user_id,
+        req.tasks.len(),
+        TimeDateTimeWithTimeZone::now_utc()
+    );
 
     for task_req in req.tasks {
         let result = user_submit_task(pool, user_id, task_req)
@@ -1616,6 +1702,14 @@ pub async fn user_batch_submit_tasks(
             .map_err(ErrorMsg::from);
         results.push(result);
     }
+
+    tracing::debug!(
+        target: "/tasks/submit",
+        "User {} finish submitting batch of {} tasks at {}",
+        user_id,
+        results.len(),
+        TimeDateTimeWithTimeZone::now_utc()
+    );
 
     Ok(crate::schema::TasksSubmitResp { results })
 }

@@ -1,17 +1,17 @@
-//! `SeaORM` Entity for group_node_manager table
+//! `SeaORM` Entity for group_agent table
 
 use sea_orm::entity::prelude::*;
 
-use super::role::GroupNodeManagerRole;
+use super::role::GroupAgentRole;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
-#[sea_orm(table_name = "group_node_manager")]
+#[sea_orm(table_name = "group_agent")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
     pub group_id: i64,
-    pub manager_id: i64,
-    pub role: GroupNodeManagerRole,
+    pub agent_id: i64,
+    pub role: GroupAgentRole,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -25,13 +25,13 @@ pub enum Relation {
     )]
     Groups,
     #[sea_orm(
-        belongs_to = "super::node_managers::Entity",
-        from = "Column::ManagerId",
-        to = "super::node_managers::Column::Id",
+        belongs_to = "super::agents::Entity",
+        from = "Column::AgentId",
+        to = "super::agents::Column::Id",
         on_update = "Cascade",
         on_delete = "Restrict"
     )]
-    Managers,
+    Agents,
 }
 
 impl Related<super::groups::Entity> for Entity {
@@ -40,9 +40,9 @@ impl Related<super::groups::Entity> for Entity {
     }
 }
 
-impl Related<super::node_managers::Entity> for Entity {
+impl Related<super::agents::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Managers.def()
+        Relation::Agents.def()
     }
 }
 

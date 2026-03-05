@@ -135,7 +135,7 @@ pub struct ParsedTaskSuiteInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_task_submitted_at: Option<OffsetDateTime>,
     pub total_tasks: i32,
-    pub pending_tasks: i32,
+    pub incomplete_tasks: i32,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,7 +168,7 @@ pub struct TaskSuiteInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_task_submitted_at: Option<OffsetDateTime>,
     pub total_tasks: i32,
-    pub pending_tasks: i32,
+    pub incomplete_tasks: i32,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
     #[serde(skip_serializing_if = "Option::is_none")]

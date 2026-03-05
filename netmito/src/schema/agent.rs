@@ -25,6 +25,15 @@ pub struct RegisterAgentReq {
     /// Optional token lifetime (default: forever)
     #[serde(default, with = "humantime_serde")]
     pub lifetime: Option<std::time::Duration>,
+    /// Stable identifier for the physical/virtual machine running this agent.
+    /// When provided, the coordinator upserts a record in the `machines` table
+    /// and links `agents.machine_id` to it. Typically auto-detected from
+    /// `/etc/machine-id` on Linux.
+    #[serde(default)]
+    pub machine_code: Option<String>,
+    /// Static metadata about the agent process (e.g., version)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<AgentMetadata>,
 }
 
 /// Response after registering an agent
@@ -56,8 +65,19 @@ pub struct AgentHeartbeatReq {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMetrics {
     pub active_workers: u32,
+    // TODO: might remove the following fields as they may not be necessary, might add other
+    // metrics like CPU load, memory usage, etc. for better scheduling decisions and diagnostics
     pub tasks_completed: u64,
     pub tasks_failed: u64,
+}
+
+/// Static metadata reported by the agent at registration time
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentMetadata {
+    /// Agent binary version (e.g. "0.6.8")
+    pub version: String,
+    /// Long version string (e.g. includes build metadata)
+    pub long_version: String,
 }
 
 /// Query parameters for listing agents
@@ -86,6 +106,8 @@ pub struct AgentInfo {
     pub assigned_suite_uuid: Option<Uuid>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Response for agent query
@@ -154,7 +176,7 @@ pub struct TaskSuiteSpec {
     pub exec_hooks: Option<ExecHooks>,
     pub state: crate::entity::state::TaskSuiteState,
     pub total_tasks: i32,
-    pub pending_tasks: i32,
+    pub incomplete_tasks: i32,
 }
 
 /// Request to accept a suite assignment (claim it for execution)
@@ -240,12 +262,9 @@ pub struct FetchTasksResp {
 }
 
 /// Request to report task execution result
+/// The task UUID is provided in the URL path (`/agents/tasks/{uuid}/report`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportAgentTaskReq {
-    /// Task ID
-    pub task_id: i64,
-    /// Task UUID
-    pub task_uuid: Uuid,
     /// Operation to perform
     pub op: ReportTaskOp,
 }

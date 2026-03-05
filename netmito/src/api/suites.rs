@@ -4,11 +4,12 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
+use axum_extra::extract::Query as ExtraQuery;
 use uuid::Uuid;
 
 use crate::{
     config::InfraPool,
-    error::ApiError,
+    error::{map_service_error, ApiError},
     schema::*,
     service::{
         self,
@@ -22,6 +23,13 @@ pub fn suites_router(st: InfraPool) -> Router<InfraPool> {
         .route("/query", post(query_suites))
         .route("/{uuid}", get(get_suite_details).delete(cancel_suite))
         .route("/{uuid}/close", post(close_suite))
+        // Agent assignment routes
+        .route("/{uuid}/agents/refresh", post(refresh_suite_agents))
+        .route(
+            "/{uuid}/agents",
+            post(add_suite_agents).delete(remove_suite_agents_params),
+        )
+        .route("/{uuid}/agents/remove", post(remove_suite_agents))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -29,7 +37,6 @@ pub fn suites_router(st: InfraPool) -> Router<InfraPool> {
         .with_state(st)
 }
 
-/// POST /suites - Create a new task suite
 pub async fn create_suite(
     Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
@@ -48,7 +55,6 @@ pub async fn create_suite(
     Ok(Json(resp))
 }
 
-/// POST /suites/query - Query suites with filters
 pub async fn query_suites(
     Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
@@ -67,7 +73,6 @@ pub async fn query_suites(
     Ok(Json(resp))
 }
 
-/// GET /suites/{uuid} - Get detailed information about a suite
 pub async fn get_suite_details(
     Extension(_): Extension<AuthUser>,
     State(pool): State<InfraPool>,
@@ -86,7 +91,6 @@ pub async fn get_suite_details(
     Ok(Json(details))
 }
 
-/// POST /suites/{uuid}/close - Close a suite (Open -> Closed)
 pub async fn close_suite(
     Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
@@ -105,7 +109,6 @@ pub async fn close_suite(
     Ok(())
 }
 
-/// POST /suites/{uuid}/cancel - Cancel a suite (optionally with its tasks)
 pub async fn cancel_suite(
     Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
@@ -122,5 +125,52 @@ pub async fn cancel_suite(
                 ApiError::InternalServerError
             }
         })?;
+    Ok(Json(resp))
+}
+
+pub async fn refresh_suite_agents(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<RefreshSuiteAgentsResp>, ApiError> {
+    let resp = service::suite::user_refresh_suite_agents(u.id, &pool, uuid)
+        .await
+        .map_err(map_service_error)?;
+    Ok(Json(resp))
+}
+
+pub async fn add_suite_agents(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<AddSuiteAgentsReq>,
+) -> Result<Json<AddSuiteAgentsResp>, ApiError> {
+    let resp = service::suite::user_add_suite_agents(u.id, &pool, uuid, req)
+        .await
+        .map_err(map_service_error)?;
+    Ok(Json(resp))
+}
+
+pub async fn remove_suite_agents_params(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    ExtraQuery(req): ExtraQuery<RemoveSuiteAgentsReq>,
+) -> Result<Json<RemoveSuiteAgentsResp>, ApiError> {
+    let resp = service::suite::user_remove_suite_agents(u.id, &pool, uuid, req)
+        .await
+        .map_err(map_service_error)?;
+    Ok(Json(resp))
+}
+
+pub async fn remove_suite_agents(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<RemoveSuiteAgentsReq>,
+) -> Result<Json<RemoveSuiteAgentsResp>, ApiError> {
+    let resp = service::suite::user_remove_suite_agents(u.id, &pool, uuid, req)
+        .await
+        .map_err(map_service_error)?;
     Ok(Json(resp))
 }

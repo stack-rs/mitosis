@@ -16,7 +16,7 @@ pub struct ExecSpec {
     /// Remote resources to download before execution
     #[serde(default)]
     pub resources: Vec<RemoteResourceDownload>,
-    /// Execution timeout
+    /// Execution timeout, will run forever before exist if not set
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub timeout: Option<std::time::Duration>,

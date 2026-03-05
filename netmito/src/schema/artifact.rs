@@ -47,8 +47,9 @@ pub struct ArtifactsDownloadByFilterReq {
     pub states: Option<HashSet<TaskState>>,
     pub exit_status: Option<String>,
     pub priority: Option<String>,
-    /// Set reporter_uuid will automatically exclude all non-completed tasks.
-    pub reporter_uuid: Option<Uuid>,
+    /// TODO: before, Set runner_uuid will automatically exclude all non-completed tasks, it won't
+    /// now, it will only exclude ready and pending tasks
+    pub runner_uuid: Option<Uuid>,
     /// Filter tasks by suite UUID
     pub suite_uuid: Option<Uuid>,
     pub content_type: ArtifactContentType,
@@ -85,8 +86,7 @@ pub struct ArtifactsDeleteByFilterReq {
     pub states: Option<HashSet<TaskState>>,
     pub exit_status: Option<String>,
     pub priority: Option<String>,
-    /// Set reporter_uuid will automatically exclude all non-completed tasks.
-    pub reporter_uuid: Option<Uuid>,
+    pub runner_uuid: Option<Uuid>,
     /// Filter tasks by suite UUID
     pub suite_uuid: Option<Uuid>,
     pub content_type: ArtifactContentType,

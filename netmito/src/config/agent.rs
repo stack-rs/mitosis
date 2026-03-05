@@ -28,6 +28,9 @@ pub struct AgentConfig {
     pub(crate) lifetime: Option<Duration>,
     #[serde(default)]
     pub(crate) retain: bool,
+    /// Explicit machine code override. When None, agent auto-detects from /etc/machine-id.
+    #[serde(default)]
+    pub(crate) machine_code: Option<String>,
 }
 
 #[derive(Args, Debug, Serialize, Default, Clone)]
@@ -77,6 +80,10 @@ pub struct AgentConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "<&bool>::not")]
     pub retain: bool,
+    /// Explicit machine code (overrides /etc/machine-id auto-detection)
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub machine_code: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -92,6 +99,7 @@ impl Default for AgentConfig {
             heartbeat_interval: Duration::from_secs(60),
             lifetime: None,
             retain: false,
+            machine_code: None,
         }
     }
 }

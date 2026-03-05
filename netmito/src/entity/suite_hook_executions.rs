@@ -1,23 +1,26 @@
-//! `SeaORM` Entity for task_execution_failures table
+//! `SeaORM` Entity for suite_hook_executions table
+//!
+//! Tracks individual hook execution attempts (provision, cleanup, background)
+//! with full lifecycle state. Each row represents one execution attempt
+//! of a hook by an agent for a suite.
 
 use sea_orm::entity::prelude::*;
 
+use super::state::{HookExecState, HookType};
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
-#[sea_orm(table_name = "task_execution_failures")]
+#[sea_orm(table_name = "suite_hook_executions")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
-    pub task_id: i64,
-    // TODO: these fields may be removed as they are redundant
-    // But if they are removed finally upon completion, I think it is also fine.
-    pub task_uuid: Uuid,
-    pub task_suite_id: Option<i64>,
-    pub manager_id: i64,
-    pub failure_count: i32,
-    pub last_failure_at: TimeDateTimeWithTimeZone,
-    pub error_messages: Option<Vec<String>>,
-    // TODO: this maybe removed as not necessary
-    pub worker_local_id: Option<i32>,
+    pub task_suite_id: i64,
+    pub agent_id: i64,
+    pub hook_type: HookType,
+    pub spec: Json,
+    pub state: HookExecState,
+    pub result: Option<Json>,
+    pub started_at: Option<TimeDateTimeWithTimeZone>,
+    pub completed_at: Option<TimeDateTimeWithTimeZone>,
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
 }
@@ -33,13 +36,13 @@ pub enum Relation {
     )]
     TaskSuites,
     #[sea_orm(
-        belongs_to = "super::node_managers::Entity",
-        from = "Column::ManagerId",
-        to = "super::node_managers::Column::Id",
+        belongs_to = "super::agents::Entity",
+        from = "Column::AgentId",
+        to = "super::agents::Column::Id",
         on_update = "Cascade",
         on_delete = "Cascade"
     )]
-    Managers,
+    Agents,
 }
 
 impl Related<super::task_suites::Entity> for Entity {
@@ -48,9 +51,9 @@ impl Related<super::task_suites::Entity> for Entity {
     }
 }
 
-impl Related<super::node_managers::Entity> for Entity {
+impl Related<super::agents::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Managers.def()
+        Relation::Agents.def()
     }
 }
 

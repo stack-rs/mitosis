@@ -12,8 +12,8 @@ pub use queue::{TaskDispatcher, TaskDispatcherOp};
 use sea_orm::{
     prelude::*,
     sea_query::{
-        extension::postgres::PgExpr, Alias, Asterisk, CommonTableExpression, Nullable, OnConflict,
-        PgFunc, Query, WithClause,
+        extension::postgres::PgExpr, Alias, Asterisk, CommonTableExpression, DeleteStatement,
+        Nullable, OnConflict, PgFunc, Query, WithClause,
     },
     FromQueryResult, QuerySelect, Set, TransactionTrait,
 };
@@ -945,7 +945,8 @@ pub async fn shutdown_workers_by_filter(
         );
     }
 
-    // Execute shutdown operations in a transaction using subqueries
+    // Execute shutdown operations in a transaction using CTEs.
+    let builder = pool.db.get_database_backend();
     let (shutdown_count, tasks_to_reassign, removed_worker_ids) = pool
         .db
         .transaction::<_, (u64, Vec<ActiveTask::Model>, Vec<i64>), crate::error::Error>(|txn| {
@@ -957,9 +958,8 @@ pub async fn shutdown_workers_by_filter(
 
                 match req.op {
                     WorkerShutdownOp::Force => {
-                        // Force shutdown: remove all workers immediately using subqueries
-
-                        // 1. Update tasks assigned to matching workers, get them back for reassignment
+                        // 1. Reassign tasks assigned to matching workers.
+                        //    The subquery joins group_worker which still exists at this point.
                         tasks_to_reassign = ActiveTask::Entity::update_many()
                             .col_expr(
                                 ActiveTask::Column::AssignedWorker,
@@ -974,68 +974,104 @@ pub async fn shutdown_workers_by_filter(
                             .exec_with_returning(txn)
                             .await?;
 
-                        // 2. Delete group_worker relations using subquery
-                        GroupWorker::Entity::delete_many()
-                            .filter(
-                                GroupWorker::Column::WorkerId
-                                    .in_subquery(worker_filter_subquery.clone()),
+                        // 2. CTE: delete all matching workers and their group_worker entries.
+                        let del_gw_cte = CommonTableExpression::new()
+                            .query(
+                                DeleteStatement::new()
+                                    .from_table(GroupWorker::Entity)
+                                    .and_where(
+                                        GroupWorker::Column::WorkerId
+                                            .in_subquery(worker_filter_subquery),
+                                    )
+                                    .returning_col(GroupWorker::Column::WorkerId)
+                                    .to_owned(),
                             )
-                            .exec(txn)
-                            .await?;
-
-                        // 3. Delete workers using subquery, get back deleted IDs
-                        let deleted_workers = Worker::Entity::delete_many()
-                            .filter(Worker::Column::Id.in_subquery(worker_filter_subquery.clone()))
-                            .exec_with_returning(txn)
-                            .await?;
-
-                        removed_worker_ids = deleted_workers.into_iter().map(|w| w.id).collect();
+                            .table_name(Alias::new("del_gw"))
+                            .column(Alias::new("worker_id"))
+                            .to_owned();
+                        let del_workers = DeleteStatement::new()
+                            .from_table(Worker::Entity)
+                            .and_where(
+                                Worker::Column::Id.in_subquery(
+                                    Query::select()
+                                        .column(Alias::new("worker_id"))
+                                        .from(Alias::new("del_gw"))
+                                        .to_owned(),
+                                ),
+                            )
+                            .returning_col(Worker::Column::Id)
+                            .to_owned();
+                        let stmt = builder
+                            .build(&del_workers.with(WithClause::new().cte(del_gw_cte).to_owned()));
+                        removed_worker_ids = super::task::PartialWorkerId::find_by_statement(stmt)
+                            .all(txn)
+                            .await?
+                            .into_iter()
+                            .map(|r| r.id)
+                            .collect();
                     }
                     WorkerShutdownOp::Graceful => {
                         // Graceful shutdown: separate workers with/without tasks
                         // No tasks to reassign in graceful mode
                         tasks_to_reassign = Vec::new();
 
-                        // 1. Delete workers without tasks using subquery with additional filter
+                        // 1. CTE: delete no-task workers and their group_worker entries.
                         let mut worker_filter_no_task = worker_filter_subquery.clone();
                         worker_filter_no_task.and_where(
                             Expr::col((Worker::Entity, Worker::Column::AssignedTaskId)).is_null(),
                         );
-
-                        // Delete group_worker relations for workers without tasks
-                        GroupWorker::Entity::delete_many()
-                            .filter(
-                                GroupWorker::Column::WorkerId
-                                    .in_subquery(worker_filter_no_task.clone()),
+                        let del_gw_cte = CommonTableExpression::new()
+                            .query(
+                                DeleteStatement::new()
+                                    .from_table(GroupWorker::Entity)
+                                    .and_where(
+                                        GroupWorker::Column::WorkerId
+                                            .in_subquery(worker_filter_no_task),
+                                    )
+                                    .returning_col(GroupWorker::Column::WorkerId)
+                                    .to_owned(),
                             )
-                            .exec(txn)
-                            .await?;
+                            .table_name(Alias::new("del_gw"))
+                            .column(Alias::new("worker_id"))
+                            .to_owned();
+                        let del_workers = DeleteStatement::new()
+                            .from_table(Worker::Entity)
+                            .and_where(
+                                Worker::Column::Id.in_subquery(
+                                    Query::select()
+                                        .column(Alias::new("worker_id"))
+                                        .from(Alias::new("del_gw"))
+                                        .to_owned(),
+                                ),
+                            )
+                            .returning_col(Worker::Column::Id)
+                            .to_owned();
+                        let stmt = builder
+                            .build(&del_workers.with(WithClause::new().cte(del_gw_cte).to_owned()));
+                        removed_worker_ids = super::task::PartialWorkerId::find_by_statement(stmt)
+                            .all(txn)
+                            .await?
+                            .into_iter()
+                            .map(|r| r.id)
+                            .collect();
 
-                        // Delete workers without tasks
-                        let deleted_workers = Worker::Entity::delete_many()
-                            .filter(Worker::Column::Id.in_subquery(worker_filter_no_task.clone()))
-                            .exec_with_returning(txn)
-                            .await?;
-
-                        removed_worker_ids = deleted_workers.into_iter().map(|w| w.id).collect();
-
-                        // 2. Update workers with tasks to GracefulShutdown using subquery
-                        let mut worker_filter_with_task = worker_filter_subquery.clone();
+                        // 2. Mark with-task workers as GracefulShutdown.
+                        //    After step 1, only with-task workers still have group_worker entries,
+                        //    so the subquery correctly selects only those workers.
+                        let mut worker_filter_with_task = worker_filter_subquery;
                         worker_filter_with_task.and_where(
                             Expr::col((Worker::Entity, Worker::Column::AssignedTaskId))
                                 .is_not_null(),
                         );
-
                         let updated_workers = Worker::Entity::update_many()
                             .col_expr(
                                 Worker::Column::State,
                                 Expr::value(WorkerState::GracefulShutdown),
                             )
                             .col_expr(Worker::Column::UpdatedAt, Expr::value(now))
-                            .filter(Worker::Column::Id.in_subquery(worker_filter_with_task.clone()))
+                            .filter(Worker::Column::Id.in_subquery(worker_filter_with_task))
                             .exec_with_returning(txn)
                             .await?;
-
                         graceful_worker_ids = updated_workers.len() as u64;
                     }
                 }

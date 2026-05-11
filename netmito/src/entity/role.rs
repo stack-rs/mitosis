@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 // TODO: we should add another role between write and admin. For Read, users can only view the
 // group's tasks and status. For the Write role, users can manage the remote file resources for this group
-// in the S3. For the new role, users can submit tasks to the group and bring up workers
+// in the S3. For the new role `Operate`, users can submit tasks to the group and bring up workers
 // for the group. For Admin, users can manage the group's membership and settings.
 /// The role of a user to a group.
 #[derive(

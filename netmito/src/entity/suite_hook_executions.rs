@@ -8,6 +8,12 @@ use sea_orm::entity::prelude::*;
 
 use super::state::{HookExecState, HookType};
 
+// TODO: this have to be some temporary tasks executed by the agent. We record them for better
+// observability and debugging. We should add an expiry mechanism to wipe out outdated records to
+// save storage. We can also add a TTL index on `completed_at` to automatically delete old records
+// after certain period of time. More fields might be required to better serve this purpose.
+// TODO: I'm not sure if we have to support some kinds of 'temp tasks' for some checks, for example
+// check for some system information.
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
 #[sea_orm(table_name = "suite_hook_executions")]
 pub struct Model {

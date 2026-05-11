@@ -112,6 +112,8 @@ async fn extract_credential(
     }
 }
 
+// TODO: we might upgrade our credential storage format to include the coordinator address to avoid
+// conflict
 pub(crate) async fn modify_or_append_credential(
     cred_path: &std::path::PathBuf,
     username: &String,

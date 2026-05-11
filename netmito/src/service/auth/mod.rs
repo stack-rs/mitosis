@@ -23,6 +23,10 @@ use crate::{
 };
 use token::{generate_token, generate_worker_token, verify_token};
 
+// TODO: should check if the structure and logic is high cohesive and low coupling enough, and
+// refactor if necessary.
+// TODO: check if we allow non-expiry lifetime
+
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub id: i64,

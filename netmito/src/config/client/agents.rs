@@ -34,9 +34,11 @@ pub struct RegisterAgentArgs {
     /// Groups to associate with this agent (agent gets Write role from these groups)
     #[arg(short, long, num_args = 0.., value_delimiter = ',')]
     pub groups: Vec<String>,
-    /// Stable identifier for the machine (default: auto-detected from /etc/machine-id)
+    /// Stable identifier of the machine the registered agent will run on
+    /// (e.g., its /etc/machine-id). Required: this command registers on
+    /// behalf of another host, so the machine cannot be auto-detected.
     #[arg(long)]
-    pub machine_code: Option<String>,
+    pub machine_code: String,
 }
 
 impl From<RegisterAgentArgs> for RegisterAgentReq {

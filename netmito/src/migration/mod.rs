@@ -14,6 +14,7 @@ mod m20251117_120000_create_join_tables;
 mod m20251117_130000_create_task_execution_failures;
 mod m20251117_140000_alter_active_tasks;
 mod m20251117_140001_alter_archived_tasks;
+mod m20260611_100000_create_suite_agent_runs;
 
 pub struct Migrator;
 
@@ -35,6 +36,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20251117_130000_create_task_execution_failures::Migration),
             Box::new(m20251117_140000_alter_active_tasks::Migration),
             Box::new(m20251117_140001_alter_archived_tasks::Migration),
+            Box::new(m20260611_100000_create_suite_agent_runs::Migration),
         ]
     }
 }

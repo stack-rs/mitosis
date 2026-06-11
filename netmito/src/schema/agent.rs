@@ -26,11 +26,11 @@ pub struct RegisterAgentReq {
     #[serde(default, with = "humantime_serde")]
     pub lifetime: Option<std::time::Duration>,
     /// Stable identifier for the physical/virtual machine running this agent.
-    /// When provided, the coordinator upserts a record in the `machines` table
-    /// and links `agents.machine_id` to it. Typically auto-detected from
-    /// `/etc/machine-id` on Linux.
-    #[serde(default)]
-    pub machine_code: Option<String>,
+    /// The coordinator upserts a record in the `machines` table and links
+    /// `agents.machine_id` to it. The agent client always resolves one:
+    /// config override → cached value → `/etc/machine-id` → generated UUID
+    /// (persisted to the cache).
+    pub machine_code: String,
     /// Static metadata about the agent process (e.g., version)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<AgentMetadata>,
@@ -231,6 +231,32 @@ pub enum SuiteCompletionReason {
     CleanupFailed,
     /// Other error
     Error(String),
+}
+
+/// Machine-readable category for why a suite run terminated abnormally
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RunFailureKind {
+    /// Provision hook failed
+    ProvisionFailed,
+    /// Background hook exited before the run finished
+    BackgroundExited,
+    /// Task execution phase failed (e.g., worker pool crashed)
+    ExecutionError,
+    /// Cleanup hook failed
+    CleanupFailed,
+    /// Agent heartbeat timed out or agent was removed mid-run
+    AgentLost,
+    /// Suite was cancelled while the run was in flight
+    SuiteCancelled,
+}
+
+/// One-line, run-level summary of abnormal termination, stored as JSON in
+/// `suite_agent_runs.failure_reason`. This is a summary only — full hook
+/// stdout/stderr lives in `suite_hook_executions.result`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunFailureReason {
+    pub kind: RunFailureKind,
+    pub message: String,
 }
 
 /// Response after completing a suite

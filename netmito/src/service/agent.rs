@@ -39,7 +39,12 @@ pub async fn user_register_agent(
     let tags: Vec<String> = req.tags.into_iter().collect();
     let labels: Vec<String> = req.labels.into_iter().collect();
     let groups: Vec<String> = req.groups.into_iter().collect();
-    let machine_code = req.machine_code;
+    let machine_code = req.machine_code.trim().to_string();
+    if machine_code.is_empty() {
+        return Err(Error::ApiError(ApiError::InvalidRequest(
+            "machine_code must not be empty".to_string(),
+        )));
+    }
     let metadata_json: Option<serde_json::Value> = req
         .metadata
         .as_ref()
@@ -77,28 +82,24 @@ pub async fn user_register_agent(
                     }
                 }
 
-                // Upsert machine record if machine_code was provided.
+                // Upsert machine record.
                 // INSERT ... ON CONFLICT (machine_code) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at
                 // This ensures first_seen_at is preserved and last_seen_at is always refreshed.
-                let machine_id: i64 = if let Some(code) = machine_code {
-                    let machine = Machines::Entity::insert(Machines::ActiveModel {
-                        machine_code: Set(code),
-                        metadata: Set(None),
-                        first_seen_at: Set(now),
-                        last_seen_at: Set(now),
-                        ..Default::default()
-                    })
-                    .on_conflict(
-                        OnConflict::column(Machines::Column::MachineCode)
-                            .update_column(Machines::Column::LastSeenAt)
-                            .to_owned(),
-                    )
-                    .exec_with_returning(txn)
-                    .await?;
-                    machine.id
-                } else {
-                    0
-                };
+                let machine = Machines::Entity::insert(Machines::ActiveModel {
+                    machine_code: Set(machine_code),
+                    metadata: Set(None),
+                    first_seen_at: Set(now),
+                    last_seen_at: Set(now),
+                    ..Default::default()
+                })
+                .on_conflict(
+                    OnConflict::column(Machines::Column::MachineCode)
+                        .update_column(Machines::Column::LastSeenAt)
+                        .to_owned(),
+                )
+                .exec_with_returning(txn)
+                .await?;
+                let machine_id: i64 = machine.id;
 
                 // Create agent
                 let agent_uuid = Uuid::new_v4();

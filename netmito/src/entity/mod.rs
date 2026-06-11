@@ -14,6 +14,7 @@ pub mod groups;
 pub mod machines;
 pub mod role;
 pub mod state;
+pub mod suite_agent_runs;
 pub mod suite_hook_executions;
 pub mod task_suite_agent;
 pub mod task_suites;

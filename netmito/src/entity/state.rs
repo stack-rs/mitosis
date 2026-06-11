@@ -483,3 +483,58 @@ impl HookExecState {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
 }
+
+/// Lifecycle state of one attempt of an agent running a task suite.
+#[derive(
+    EnumIter,
+    DeriveActiveEnum,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Copy,
+    ValueEnum,
+)]
+#[sea_orm(rs_type = "i32", db_type = "Integer")]
+pub enum SuiteRunState {
+    /// Run accepted, provision hook running
+    Provision = 0,
+    /// Tasks being executed
+    Executing = 1,
+    /// Cleanup hook running
+    Cleanup = 2,
+    /// Terminal: run finished successfully
+    Completed = 3,
+    /// Terminal: run failed (failure_reason has phase and cause)
+    Failed = 4,
+    /// Terminal: suite was cancelled while the run was in flight
+    Cancelled = 5,
+    /// Terminal: agent heartbeat timed out or agent was removed mid-run
+    Lost = 6,
+}
+
+impl Display for SuiteRunState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SuiteRunState::Provision => write!(f, "Provision"),
+            SuiteRunState::Executing => write!(f, "Executing"),
+            SuiteRunState::Cleanup => write!(f, "Cleanup"),
+            SuiteRunState::Completed => write!(f, "Completed"),
+            SuiteRunState::Failed => write!(f, "Failed"),
+            SuiteRunState::Cancelled => write!(f, "Cancelled"),
+            SuiteRunState::Lost => write!(f, "Lost"),
+        }
+    }
+}
+
+impl SuiteRunState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Lost
+        )
+    }
+}

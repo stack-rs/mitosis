@@ -61,7 +61,11 @@ State transitions to wire into existing services:
 - heartbeat timeout (`agent_heartbeat`) / `mark_agent_offline` / `remove_agent` → any non-terminal run → `Lost`.
 - suite cancellation (`user_cancel_task_suite`) → in-flight runs → `Cancelled`.
 
-**Live counters.** On a `report_task` `Commit` for a **non-terminal** run, increment that run's `tasks_completed` / `tasks_failed` alongside the existing `commit_suite_task` suite-counter update. `agent_complete_suite` then writes the agent's authoritative totals as a final reconcile (`req.tasks_completed`/`tasks_failed`), so transient drift self-corrects at run end. (If the run is terminal, the report is rejected — see A.5 — so no counter update happens.)
+**Live counters — coordinator-authoritative.** The run's `tasks_completed` / `tasks_failed` are mutated **only** on a `report_task` `Commit` for a **non-terminal** run (incremented alongside the existing `commit_suite_task` suite-counter update). Every task's terminal fate — success *or* failure — flows through the coordinator as a `Commit` (the worker, and the agent mirroring it, reports a failed run-to-completion as `Finish` + `Commit{exit_status≠0}`, *not* as a silent retry), so this counter is the coordinator's own complete, first-hand ledger, attributed to the run via the `run` field on the report. (If the run is terminal, the report is rejected — see A.5 — so no counter update happens.)
+
+`agent_complete_suite` does **not** overwrite these counters with the agent's `req.tasks_completed`/`tasks_failed`. The agent's numbers are a *claim* about the same events the coordinator already recorded authoritatively; `/complete` **compares** them against the stored run counters and emits a `warn!` on any disagreement (a cheap drift/bug signal), then writes only the terminal state + `finished_at`. The stored counters remain exactly what the `Commit` path recorded.
+
+> Revisit only if the agent's task-execution layer ever gains *internal* retry (re-running a failed task without committing each attempt) — then the agent would see failures the coordinator doesn't, and would become authoritative for attempt-level counts. Neither the worker nor the (current `fake_*`) agent does this today, and there is no user-facing task-restart path either.
 
 Hook timing (for A.3): `provision` runs during `Provision` (before `/start`); `background` runs alongside workers during `Executing`; `cleanup` runs during `Cleanup` (before `/complete`).
 
@@ -116,7 +120,7 @@ All behind `agent_auth_middleware`. New / changed fields in **bold**.
 | `POST /agents/suite/accept` | `{ suite_uuid }` | create run (`Provision`); resp `{ accepted, `**`run: i64`**`, reason? }` |
 | `POST /agents/suite/start` | **`{ run }`** | `Provision → Executing`; terminal/not-owned → **409** |
 | `POST /agents/suite/cleanup` | **`{ run }`** | `Executing → Cleanup`; terminal/not-owned → **409** |
-| `POST /agents/suite/complete` | **`{ run, tasks_completed, tasks_failed, outcome }`** | non-terminal → terminal + reconcile counters + release; terminal → **409** |
+| `POST /agents/suite/complete` | **`{ run, tasks_completed, tasks_failed, outcome }`** | non-terminal → terminal + release; counters are **not** overwritten (compare to stored, `warn!` on mismatch); terminal → **409** |
 | **`POST /agents/suite/hook`** | **`{ run, hook_type, op: Upload{content_type, content_length} \| Result(TaskResultSpec) }`** | write `suite_hook_executions` row; **accepted even if terminal** (append-only; ownership checked) |
 | `POST /agents/tasks/{uuid}/report` | **`{ run, op }`** | task report; on non-terminal `Commit`, also bump run counters; terminal run → **409** |
 

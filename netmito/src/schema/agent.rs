@@ -191,6 +191,10 @@ pub struct AcceptSuiteReq {
 pub struct AcceptSuiteResp {
     /// Whether the suite was successfully accepted
     pub accepted: bool,
+    /// Opaque run handle (`suite_agent_runs.id`) the agent echoes on every
+    /// later run-scoped call. Present only when `accepted` is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<i64>,
     /// Reason if not accepted (e.g., already taken by another agent)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -199,13 +203,22 @@ pub struct AcceptSuiteResp {
 /// Request to report suite execution started
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartSuiteReq {
-    pub suite_uuid: Uuid,
+    /// Opaque run handle from `AcceptSuiteResp`
+    pub run: i64,
+}
+
+/// Request to report the agent entering the cleanup phase
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnterCleanupReq {
+    /// Opaque run handle from `AcceptSuiteResp`
+    pub run: i64,
 }
 
 /// Request to report suite completion
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompleteSuiteReq {
-    pub suite_uuid: Uuid,
+    /// Opaque run handle from `AcceptSuiteResp`
+    pub run: i64,
     /// Total tasks completed during this execution
     pub tasks_completed: u64,
     /// Total tasks failed during this execution

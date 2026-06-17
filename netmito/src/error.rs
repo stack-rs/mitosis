@@ -133,6 +133,8 @@ pub enum ApiError {
     AlreadyExists(String),
     #[error("{0} not found")]
     NotFound(String),
+    #[error("Conflict: {0}")]
+    Conflict(String),
     #[error("Resource quota exceeded")]
     QuotaExceeded,
     #[error(transparent)]
@@ -193,6 +195,7 @@ impl GetStatusCode for ApiError {
             ApiError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::AlreadyExists(_) => StatusCode::CONFLICT,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
+            ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::QuotaExceeded => StatusCode::FORBIDDEN,
             ApiError::PresignS3Error(_) => StatusCode::BAD_REQUEST,
         }

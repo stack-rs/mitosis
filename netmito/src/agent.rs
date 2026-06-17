@@ -34,6 +34,9 @@ struct AgentClient {
     coordinator_boot_id: Option<Uuid>,
     state: AgentState,
     assigned_suite_uuid: Option<Uuid>,
+    /// Opaque run handle (`suite_agent_runs.id`) for the current suite, returned
+    /// by `accept_suite` and echoed on every later run-scoped call.
+    current_run: Option<i64>,
     heartbeat_interval: Duration,
     http_client: reqwest::Client,
     /// Set to true when a SuiteCancelled or PreemptSuite notification arrives for the
@@ -151,6 +154,7 @@ impl MitoAgent {
             coordinator_boot_id: None,
             state: AgentState::Idle,
             assigned_suite_uuid: None,
+            current_run: None,
             heartbeat_interval: config.heartbeat_interval,
             http_client,
             suite_cancelled: false,
@@ -616,10 +620,11 @@ impl AgentClient {
                         suite.name.as_ref().unwrap_or(&"<unnamed>".to_string())
                     );
 
-                    // Accept the suite
-                    if self.accept_suite(suite.uuid).await? {
-                        tracing::info!("Accepted suite: {}", suite.uuid);
+                    // Accept the suite — the coordinator returns the run handle.
+                    if let Some(run) = self.accept_suite(suite.uuid).await? {
+                        tracing::info!("Accepted suite: {} (run {})", suite.uuid, run);
                         self.assigned_suite_uuid = Some(suite.uuid);
+                        self.current_run = Some(run);
                         self.suite_cancelled = false; // reset for each new suite
                         self.state = AgentState::Provision;
 
@@ -627,7 +632,7 @@ impl AgentClient {
                         self.fake_env_preparation(&suite).await?;
 
                         // Notify coordinator: provision done → Executing
-                        self.start_suite(suite.uuid).await?;
+                        self.start_suite(run).await?;
                         self.state = AgentState::Executing;
 
                         // Fetch and execute all tasks using real coordinator APIs
@@ -635,7 +640,7 @@ impl AgentClient {
                             self.fake_suite_execution(&suite).await?;
 
                         // Notify coordinator: execution done → Cleanup
-                        self.enter_cleanup_api().await?;
+                        self.enter_cleanup_api(run).await?;
                         self.state = AgentState::Cleanup;
 
                         // Run cleanup hook (fake)
@@ -643,9 +648,10 @@ impl AgentClient {
 
                         // Notify coordinator: cleanup done → Idle
                         let next_available = self
-                            .complete_suite(suite.uuid, tasks_completed, tasks_failed)
+                            .complete_suite(run, tasks_completed, tasks_failed)
                             .await?;
                         self.assigned_suite_uuid = None;
+                        self.current_run = None;
                         self.suite_cancelled = false;
                         self.state = AgentState::Idle;
 
@@ -717,8 +723,8 @@ impl AgentClient {
         Ok(fetch_resp.suite)
     }
 
-    /// Accept a suite for execution
-    async fn accept_suite(&self, suite_uuid: Uuid) -> crate::error::Result<bool> {
+    /// Accept a suite for execution. Returns the opaque run handle on success.
+    async fn accept_suite(&self, suite_uuid: Uuid) -> crate::error::Result<Option<i64>> {
         let url = self.api_url("api/agents/suite/accept");
 
         let req = AcceptSuiteReq { suite_uuid };
@@ -753,14 +759,14 @@ impl AgentClient {
             );
         }
 
-        Ok(accept_resp.accepted)
+        Ok(accept_resp.run)
     }
 
     /// Notify coordinator that provision is done and execution is starting (→ Executing)
-    async fn start_suite(&self, suite_uuid: Uuid) -> crate::error::Result<()> {
+    async fn start_suite(&self, run: i64) -> crate::error::Result<()> {
         let url = self.api_url("api/agents/suite/start");
 
-        let req = StartSuiteReq { suite_uuid };
+        let req = StartSuiteReq { run };
 
         let resp = self
             .http_client
@@ -784,13 +790,16 @@ impl AgentClient {
     }
 
     /// Notify coordinator that execution is done and cleanup is starting (→ Cleanup)
-    async fn enter_cleanup_api(&self) -> crate::error::Result<()> {
+    async fn enter_cleanup_api(&self, run: i64) -> crate::error::Result<()> {
         let url = self.api_url("api/agents/suite/cleanup");
+
+        let req = EnterCleanupReq { run };
 
         let resp = self
             .http_client
             .post(url.as_str())
             .bearer_auth(&self.token)
+            .json(&req)
             .send()
             .await
             .map_err(|e| error::Error::Custom(format!("Failed to enter cleanup: {}", e)))?;
@@ -810,14 +819,14 @@ impl AgentClient {
     /// Notify coordinator that cleanup is done and agent is going Idle
     async fn complete_suite(
         &self,
-        suite_uuid: Uuid,
+        run: i64,
         tasks_completed: u64,
         tasks_failed: u64,
     ) -> crate::error::Result<bool> {
         let url = self.api_url("api/agents/suite/complete");
 
         let req = CompleteSuiteReq {
-            suite_uuid,
+            run,
             tasks_completed,
             tasks_failed,
             completion_reason: SuiteCompletionReason::Normal,

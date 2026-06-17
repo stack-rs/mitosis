@@ -24,6 +24,7 @@ use crate::schema::{
     TaskResultSpec, TaskSuiteInfo, TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp,
     WorkerSchedulePlan,
 };
+use crate::service::agent_run;
 use crate::service::suite_task_dispatcher::SuiteDispatcherOp;
 use crate::service::task::parse_operators_with_number;
 use crate::ws::connection::AgentWsRouter;
@@ -947,59 +948,68 @@ pub async fn user_cancel_task_suite(
                         .await?;
                 }
 
-                // ── Force-cancel Running tasks ──
-                // Collect (runner_uuid, task_uuid) for TasksCancelled notifications after commit.
+                // ── Cancel in-flight tasks (Running + Finished) ──
+                // These belong to runs we are about to cancel. A Finished task's
+                // result was never committed (the Commit would be rejected once
+                // the run is terminal), so both Running and Finished are archived
+                // as Cancelled here — teardown owns their fate (A.5), they are not
+                // re-run. We collect (runner_uuid, task_uuid) so a Force cancel can
+                // push TasksCancelled to the executing agents.
                 let mut running_task_infos: Vec<(Option<Uuid>, Uuid)> = Vec::new();
-                if force {
-                    let running_tasks = ActiveTasks::Entity::find()
-                        .filter(ActiveTasks::Column::TaskSuiteId.eq(suite.id))
-                        .filter(ActiveTasks::Column::State.eq(TaskState::Running))
-                        .all(txn)
+                let inflight_tasks = ActiveTasks::Entity::find()
+                    .filter(ActiveTasks::Column::TaskSuiteId.eq(suite.id))
+                    .filter(
+                        ActiveTasks::Column::State.is_in([TaskState::Running, TaskState::Finished]),
+                    )
+                    .all(txn)
+                    .await?;
+
+                if !inflight_tasks.is_empty() {
+                    let task_ids: Vec<i64> = inflight_tasks.iter().map(|t| t.id).collect();
+                    cancelled_count += inflight_tasks.len() as u64;
+
+                    // Collect runner info before consuming the models
+                    for task in &inflight_tasks {
+                        running_task_infos.push((task.runner_uuid, task.uuid));
+                    }
+
+                    let archived_inflight: Vec<ArchivedTasks::ActiveModel> = inflight_tasks
+                        .into_iter()
+                        .map(|task| ArchivedTasks::ActiveModel {
+                            id: Set(task.id),
+                            creator_id: Set(task.creator_id),
+                            group_id: Set(task.group_id),
+                            task_id: Set(task.task_id),
+                            uuid: Set(task.uuid),
+                            tags: Set(task.tags),
+                            labels: Set(task.labels),
+                            created_at: Set(task.created_at),
+                            updated_at: Set(now),
+                            state: Set(TaskState::Cancelled),
+                            runner_uuid: Set(task.runner_uuid),
+                            priority: Set(task.priority),
+                            spec: Set(task.spec),
+                            exec_options: Set(task.exec_options),
+                            result: Set(Some(result.clone())),
+                            upstream_task_uuid: Set(task.upstream_task_uuid),
+                            downstream_task_uuid: Set(task.downstream_task_uuid),
+                            task_suite_id: Set(task.task_suite_id),
+                        })
+                        .collect();
+
+                    ActiveTasks::Entity::delete_many()
+                        .filter(ActiveTasks::Column::Id.is_in(task_ids))
+                        .exec(txn)
                         .await?;
 
-                    if !running_tasks.is_empty() {
-                        let task_ids: Vec<i64> = running_tasks.iter().map(|t| t.id).collect();
-                        cancelled_count += running_tasks.len() as u64;
-
-                        // Collect runner info before consuming the models
-                        for task in &running_tasks {
-                            running_task_infos.push((task.runner_uuid, task.uuid));
-                        }
-
-                        let archived_running: Vec<ArchivedTasks::ActiveModel> = running_tasks
-                            .into_iter()
-                            .map(|task| ArchivedTasks::ActiveModel {
-                                id: Set(task.id),
-                                creator_id: Set(task.creator_id),
-                                group_id: Set(task.group_id),
-                                task_id: Set(task.task_id),
-                                uuid: Set(task.uuid),
-                                tags: Set(task.tags),
-                                labels: Set(task.labels),
-                                created_at: Set(task.created_at),
-                                updated_at: Set(now),
-                                state: Set(TaskState::Cancelled),
-                                runner_uuid: Set(task.runner_uuid),
-                                priority: Set(task.priority),
-                                spec: Set(task.spec),
-                                exec_options: Set(task.exec_options),
-                                result: Set(Some(result.clone())),
-                                upstream_task_uuid: Set(task.upstream_task_uuid),
-                                downstream_task_uuid: Set(task.downstream_task_uuid),
-                                task_suite_id: Set(task.task_suite_id),
-                            })
-                            .collect();
-
-                        ActiveTasks::Entity::delete_many()
-                            .filter(ActiveTasks::Column::Id.is_in(task_ids))
-                            .exec(txn)
-                            .await?;
-
-                        ArchivedTasks::Entity::insert_many(archived_running)
-                            .exec(txn)
-                            .await?;
-                    }
+                    ArchivedTasks::Entity::insert_many(archived_inflight)
+                        .exec(txn)
+                        .await?;
                 }
+
+                // ── Cancel in-flight runs for this suite ──
+                // Any run still Provision/Executing/Cleanup becomes Cancelled.
+                agent_run::mark_suite_runs_cancelled(txn, suite.id, now).await?;
 
                 // Update suite state to Cancelled
                 let updated = TaskSuites::Entity::update_many()
@@ -1025,9 +1035,11 @@ pub async fn user_cancel_task_suite(
         })
         .await?;
 
-    // Notify agents about force-cancelled Running tasks so they know not to commit them.
+    // Notify agents about force-cancelled in-flight tasks so they know not to commit them.
     // Group task UUIDs by agent UUID (runner_uuid) to send one message per agent.
-    if !running_task_infos.is_empty() {
+    // (The runs are cancelled in both modes; this finer-grained per-task push is
+    // Force-only — Graceful relies on the SuiteCancelled notification below.)
+    if force && !running_task_infos.is_empty() {
         let mut by_agent: std::collections::HashMap<Uuid, Vec<Uuid>> =
             std::collections::HashMap::new();
         for (runner_uuid, task_uuid) in running_task_infos {

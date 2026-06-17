@@ -1,16 +1,16 @@
 //! Agent service for managing agent lifecycles
 
 use sea_orm::sea_query::{extension::postgres::PgExpr, Alias, OnConflict, PgFunc, Query};
-use sea_orm::{prelude::*, FromQueryResult, QueryOrder, Set, TransactionTrait};
+use sea_orm::{prelude::*, FromQueryResult, QueryOrder, QuerySelect, Set, TransactionTrait};
 use uuid::Uuid;
 
 use crate::config::InfraPool;
 use crate::entity::{
     agents as Agent, group_agent as GroupAgent, groups as Group, machines as Machines,
     role::{GroupAgentRole, UserGroupRole},
-    state::{AgentState, TaskSuiteState},
-    task_suite_agent as TaskSuiteAgent, task_suites as TaskSuites, user_group as UserGroup,
-    users as User,
+    state::{AgentState, SuiteRunState, TaskSuiteState},
+    suite_agent_runs as SuiteAgentRuns, task_suite_agent as TaskSuiteAgent,
+    task_suites as TaskSuites, user_group as UserGroup, users as User,
 };
 use crate::error::{ApiError, Error, Result};
 use crate::schema::{
@@ -20,6 +20,7 @@ use crate::schema::{
     WorkerSchedulePlan,
 };
 use crate::service::agent_heartbeat::AgentHeartbeatOp;
+use crate::service::agent_run;
 use crate::service::auth::{gen_agent_jwt, AgentJwtPayload};
 use crate::service::suite_task_dispatcher::SuiteDispatcherOp;
 use crate::ws::connection::{AgentWsRouter, RouterOp};
@@ -565,9 +566,15 @@ pub async fn user_query_agents(
     }
 }
 
-/// Mark an agent as offline (for heartbeat timeout handling)
+/// Mark an agent as offline (for heartbeat timeout handling). Any in-flight run
+/// it owned becomes `Lost` and its executed-but-uncommitted tasks are reclaimed.
 pub async fn mark_agent_offline(pool: &InfraPool, agent_id: i64) -> Result<()> {
     let now = TimeDateTimeWithTimeZone::now_utc();
+
+    let agent_uuid = Agent::Entity::find_by_id(agent_id)
+        .one(&pool.db)
+        .await?
+        .map(|a| a.uuid);
 
     Agent::Entity::update_many()
         .col_expr(Agent::Column::State, Expr::value(AgentState::Offline))
@@ -576,6 +583,11 @@ pub async fn mark_agent_offline(pool: &InfraPool, agent_id: i64) -> Result<()> {
         .filter(Agent::Column::Id.eq(agent_id))
         .exec(&pool.db)
         .await?;
+
+    if let Some(agent_uuid) = agent_uuid {
+        agent_run::mark_agent_runs_lost(&pool.db, agent_uuid, "Agent went offline", now).await?;
+        agent_run::reclaim_agent_tasks(pool, agent_uuid, now).await?;
+    }
 
     Ok(())
 }
@@ -729,49 +741,80 @@ pub async fn agent_accept_suite(
 ) -> Result<AcceptSuiteResp> {
     let now = TimeDateTimeWithTimeZone::now_utc();
 
-    // Verify the suite exists and is in a valid state
-    let suite = TaskSuites::Entity::find()
-        .filter(TaskSuites::Column::Uuid.eq(req.suite_uuid))
+    // Read the agent row for the denormalized identity copied onto the run.
+    let agent = Agent::Entity::find_by_id(agent_id)
         .one(&pool.db)
         .await?
-        .ok_or_else(|| Error::ApiError(ApiError::NotFound("Suite not found".to_string())))?;
+        .ok_or_else(|| Error::ApiError(ApiError::NotFound("Agent not found".to_string())))?;
+    let agent_uuid = agent.uuid;
+    let machine_id = agent.machine_id;
 
-    // Verify the agent is assigned to this suite
-    let assignment = TaskSuiteAgent::Entity::find()
-        .filter(TaskSuiteAgent::Column::AgentId.eq(agent_id))
-        .filter(TaskSuiteAgent::Column::TaskSuiteId.eq(suite.id))
-        .one(&pool.db)
+    // Claim the suite and create the run row in one transaction. The suite row
+    // is locked FOR UPDATE so concurrent accepts serialize and `run_id`
+    // allocation (max+1) never races the unique index.
+    //
+    // The inner `Ok(_)` is the accepted run; the inner `Err(String)` carries a
+    // soft rejection reason (assignment missing / bad suite state).
+    let result = pool
+        .db
+        .transaction::<_, std::result::Result<(TaskSuites::Model, i64), String>, Error>(|txn| {
+            Box::pin(async move {
+                let suite = TaskSuites::Entity::find()
+                    .filter(TaskSuites::Column::Uuid.eq(req.suite_uuid))
+                    .lock_exclusive()
+                    .one(txn)
+                    .await?
+                    .ok_or_else(|| {
+                        Error::ApiError(ApiError::NotFound("Suite not found".to_string()))
+                    })?;
+
+                let assignment = TaskSuiteAgent::Entity::find()
+                    .filter(TaskSuiteAgent::Column::AgentId.eq(agent_id))
+                    .filter(TaskSuiteAgent::Column::TaskSuiteId.eq(suite.id))
+                    .one(txn)
+                    .await?;
+                if assignment.is_none() {
+                    return Ok(Err("Agent is not assigned to this suite".to_string()));
+                }
+
+                if !matches!(suite.state, TaskSuiteState::Open | TaskSuiteState::Closed) {
+                    return Ok(Err(format!(
+                        "Suite is in {:?} state, cannot accept",
+                        suite.state
+                    )));
+                }
+
+                // Update agent state to Provision and assign the suite.
+                Agent::Entity::update_many()
+                    .col_expr(Agent::Column::State, Expr::value(AgentState::Provision))
+                    .col_expr(
+                        Agent::Column::AssignedTaskSuiteId,
+                        Expr::value(Some(suite.id)),
+                    )
+                    .col_expr(Agent::Column::UpdatedAt, Expr::value(now))
+                    .filter(Agent::Column::Id.eq(agent_id))
+                    .exec(txn)
+                    .await?;
+
+                let run =
+                    agent_run::create_run(txn, suite.id, agent_id, agent_uuid, machine_id, now)
+                        .await?;
+
+                Ok(Ok((suite, run.id)))
+            })
+        })
         .await?;
 
-    if assignment.is_none() {
-        return Ok(AcceptSuiteResp {
-            accepted: false,
-            reason: Some("Agent is not assigned to this suite".to_string()),
-        });
-    }
-
-    // Check suite state
-    if !matches!(suite.state, TaskSuiteState::Open | TaskSuiteState::Closed) {
-        return Ok(AcceptSuiteResp {
-            accepted: false,
-            reason: Some(format!(
-                "Suite is in {:?} state, cannot accept",
-                suite.state
-            )),
-        });
-    }
-
-    // Update agent state to Preparing and assign the suite
-    Agent::Entity::update_many()
-        .col_expr(Agent::Column::State, Expr::value(AgentState::Provision))
-        .col_expr(
-            Agent::Column::AssignedTaskSuiteId,
-            Expr::value(Some(suite.id)),
-        )
-        .col_expr(Agent::Column::UpdatedAt, Expr::value(now))
-        .filter(Agent::Column::Id.eq(agent_id))
-        .exec(&pool.db)
-        .await?;
+    let (suite, run_id) = match result {
+        Ok(accepted) => accepted,
+        Err(reason) => {
+            return Ok(AcceptSuiteResp {
+                accepted: false,
+                run: None,
+                reason: Some(reason),
+            })
+        }
+    };
 
     // Notify the dispatcher about the agent's batch capacity so it can size the buffer.
     let schedule: WorkerSchedulePlan = serde_json::from_value(suite.worker_schedule.clone().take())
@@ -796,101 +839,188 @@ pub async fn agent_accept_suite(
 
     Ok(AcceptSuiteResp {
         accepted: true,
+        run: Some(run_id),
         reason: None,
     })
 }
 
 /// Report that the agent has started executing the suite
-/// (after env_preparation completed successfully)
-pub async fn agent_start_suite(agent_id: i64, pool: &InfraPool, suite_uuid: Uuid) -> Result<()> {
+/// (after the provision hook completed successfully): `Provision → Executing`.
+pub async fn agent_start_suite(agent_uuid: Uuid, pool: &InfraPool, run: i64) -> Result<()> {
     let now = TimeDateTimeWithTimeZone::now_utc();
 
-    // Verify the suite exists
-    let suite = TaskSuites::Entity::find()
-        .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
-        .one(&pool.db)
-        .await?
-        .ok_or_else(|| Error::ApiError(ApiError::NotFound("Suite not found".to_string())))?;
+    let run_row = agent_run::load_validate_run(&pool.db, run, agent_uuid).await?;
+    // Must come from Provision: terminal → 409, any other state → 400 (mutate
+    // nothing), matching the worker's report-precondition behaviour.
+    agent_run::expect_state(&run_row, SuiteRunState::Provision)?;
 
-    // Update agent state to Executing
-    Agent::Entity::update_many()
-        .col_expr(Agent::Column::State, Expr::value(AgentState::Executing))
-        .col_expr(Agent::Column::UpdatedAt, Expr::value(now))
-        .filter(Agent::Column::Id.eq(agent_id))
-        .filter(Agent::Column::AssignedTaskSuiteId.eq(suite.id))
+    // Run: Provision → Executing. The state filter also guards the tiny
+    // load→update race (a concurrent coordinator terminal); if it no-ops we
+    // skip the agent-state side effect rather than apply it blindly.
+    let res = SuiteAgentRuns::Entity::update_many()
+        .col_expr(
+            SuiteAgentRuns::Column::State,
+            Expr::value(SuiteRunState::Executing),
+        )
+        .col_expr(SuiteAgentRuns::Column::StartedAt, Expr::value(Some(now)))
+        .col_expr(SuiteAgentRuns::Column::UpdatedAt, Expr::value(now))
+        .filter(SuiteAgentRuns::Column::Id.eq(run))
+        .filter(SuiteAgentRuns::Column::State.eq(SuiteRunState::Provision))
         .exec(&pool.db)
         .await?;
+    if res.rows_affected == 0 {
+        return Ok(());
+    }
+
+    // Agent: → Executing.
+    if let Some(agent_id) = run_row.agent_id {
+        Agent::Entity::update_many()
+            .col_expr(Agent::Column::State, Expr::value(AgentState::Executing))
+            .col_expr(Agent::Column::UpdatedAt, Expr::value(now))
+            .filter(Agent::Column::Id.eq(agent_id))
+            .exec(&pool.db)
+            .await?;
+    }
 
     Ok(())
 }
 
-/// Report suite execution completion
+/// Report suite execution completion: writes the run's terminal state and
+/// `finished_at`, then releases the agent back to `Idle`. A terminal run is
+/// rejected with `409 Conflict`.
+///
+/// The run's `tasks_completed`/`tasks_failed` are **coordinator-authoritative**
+/// — they are maintained only on each task `Commit` (see `agent_report_task`),
+/// the durable, result-bearing event. The agent's reported totals here are a
+/// *claim* about those same events; we compare them against the stored counters
+/// and `warn!` on disagreement (a drift/bug signal) but never overwrite the DB.
 pub async fn agent_complete_suite(
-    agent_id: i64,
+    agent_uuid: Uuid,
     pool: &InfraPool,
     req: CompleteSuiteReq,
 ) -> Result<CompleteSuiteResp> {
     let now = TimeDateTimeWithTimeZone::now_utc();
 
-    // Verify the suite exists
-    let _suite = TaskSuites::Entity::find()
-        .filter(TaskSuites::Column::Uuid.eq(req.suite_uuid))
-        .one(&pool.db)
-        .await?
-        .ok_or_else(|| Error::ApiError(ApiError::NotFound("Suite not found".to_string())))?;
+    let run_row = agent_run::load_validate_run(&pool.db, req.run, agent_uuid).await?;
+    agent_run::reject_if_terminal(&run_row)?;
 
-    // Log completion
     tracing::info!(
-        agent_id = agent_id,
-        suite_uuid = %req.suite_uuid,
+        run = req.run,
+        run_id = run_row.run_id,
+        agent_uuid = %agent_uuid,
         tasks_completed = req.tasks_completed,
         tasks_failed = req.tasks_failed,
         reason = ?req.completion_reason,
         "Agent completed suite execution"
     );
 
-    // Update agent state to Idle and clear assigned suite
-    Agent::Entity::update_many()
-        .col_expr(Agent::Column::State, Expr::value(AgentState::Idle))
-        .col_expr(Agent::Column::AssignedTaskSuiteId, Expr::value(None::<i64>))
-        .col_expr(Agent::Column::UpdatedAt, Expr::value(now))
-        .filter(Agent::Column::Id.eq(agent_id))
+    // Cross-check the agent's claimed totals against the coordinator's own
+    // commit-derived counters. Disagreement is logged, not reconciled.
+    if req.tasks_completed != run_row.tasks_completed as u64
+        || req.tasks_failed != run_row.tasks_failed as u64
+    {
+        tracing::warn!(
+            run = req.run,
+            run_id = run_row.run_id,
+            agent_uuid = %agent_uuid,
+            agent_completed = req.tasks_completed,
+            agent_failed = req.tasks_failed,
+            db_completed = run_row.tasks_completed,
+            db_failed = run_row.tasks_failed,
+            "Agent-reported task counts disagree with coordinator counters; keeping coordinator counts"
+        );
+    }
+
+    // Run → terminal Completed, stamp finished_at. Counters are left untouched
+    // (owned by the Commit path). Guarded against a concurrent coordinator
+    // terminal.
+    SuiteAgentRuns::Entity::update_many()
+        .col_expr(
+            SuiteAgentRuns::Column::State,
+            Expr::value(SuiteRunState::Completed),
+        )
+        .col_expr(SuiteAgentRuns::Column::FinishedAt, Expr::value(Some(now)))
+        .col_expr(SuiteAgentRuns::Column::UpdatedAt, Expr::value(now))
+        .filter(SuiteAgentRuns::Column::Id.eq(req.run))
+        .filter(SuiteAgentRuns::Column::State.is_in([
+            SuiteRunState::Provision,
+            SuiteRunState::Executing,
+            SuiteRunState::Cleanup,
+        ]))
         .exec(&pool.db)
         .await?;
 
-    // Check if there's another suite available
-    let next_suite_available = check_suite_available_for_agent(agent_id, pool).await?;
+    // Release the agent back to Idle and check for the next suite.
+    let mut next_suite_available = false;
+    if let Some(agent_id) = run_row.agent_id {
+        Agent::Entity::update_many()
+            .col_expr(Agent::Column::State, Expr::value(AgentState::Idle))
+            .col_expr(Agent::Column::AssignedTaskSuiteId, Expr::value(None::<i64>))
+            .col_expr(Agent::Column::UpdatedAt, Expr::value(now))
+            .filter(Agent::Column::Id.eq(agent_id))
+            .exec(&pool.db)
+            .await?;
+
+        next_suite_available = check_suite_available_for_agent(agent_id, pool).await?;
+    }
 
     Ok(CompleteSuiteResp {
         next_suite_available,
     })
 }
 
-/// Report that agent is entering cleanup phase
-pub async fn agent_enter_cleanup(agent_id: i64, pool: &InfraPool) -> Result<()> {
+/// Report that the agent is entering the cleanup phase: `Executing → Cleanup`.
+pub async fn agent_enter_cleanup(agent_uuid: Uuid, pool: &InfraPool, run: i64) -> Result<()> {
     let now = TimeDateTimeWithTimeZone::now_utc();
 
-    Agent::Entity::update_many()
-        .col_expr(Agent::Column::State, Expr::value(AgentState::Cleanup))
-        .col_expr(Agent::Column::UpdatedAt, Expr::value(now))
-        .filter(Agent::Column::Id.eq(agent_id))
+    let run_row = agent_run::load_validate_run(&pool.db, run, agent_uuid).await?;
+    // Must come from Executing: terminal → 409, any other state → 400.
+    agent_run::expect_state(&run_row, SuiteRunState::Executing)?;
+
+    // Run: Executing → Cleanup. State filter guards the load→update race; skip
+    // the agent-state side effect if it no-ops.
+    let res = SuiteAgentRuns::Entity::update_many()
+        .col_expr(
+            SuiteAgentRuns::Column::State,
+            Expr::value(SuiteRunState::Cleanup),
+        )
+        .col_expr(SuiteAgentRuns::Column::UpdatedAt, Expr::value(now))
+        .filter(SuiteAgentRuns::Column::Id.eq(run))
+        .filter(SuiteAgentRuns::Column::State.eq(SuiteRunState::Executing))
         .exec(&pool.db)
         .await?;
+    if res.rows_affected == 0 {
+        return Ok(());
+    }
+
+    // Agent: → Cleanup.
+    if let Some(agent_id) = run_row.agent_id {
+        Agent::Entity::update_many()
+            .col_expr(Agent::Column::State, Expr::value(AgentState::Cleanup))
+            .col_expr(Agent::Column::UpdatedAt, Expr::value(now))
+            .filter(Agent::Column::Id.eq(agent_id))
+            .exec(&pool.db)
+            .await?;
+    }
 
     Ok(())
 }
 
 /// Helper function to remove an agent from the database
 async fn remove_agent(agent: Agent::Model, pool: &InfraPool) -> Result<()> {
-    // If the agent has an assigned suite, we should handle it
-    // For now, we'll just clear the assignment and let the suite be picked up by another agent
-    if let Some(suite_id) = agent.assigned_task_suite_id {
+    let now = TimeDateTimeWithTimeZone::now_utc();
+
+    // Any in-flight run this agent owned is Lost; its executed-but-uncommitted
+    // tasks are reclaimed so they re-run on another agent (teardown owns the
+    // task fate, A.5). Done before the delete so the run rows still carry the
+    // agent_id (the FK is SetNull on delete).
+    if agent.assigned_task_suite_id.is_some() {
         tracing::warn!(
             agent_id = agent.id,
-            suite_id = suite_id,
-            "Removing agent with assigned suite"
+            "Removing agent with assigned suite — marking runs Lost"
         );
-        // The suite remains in the database and can be picked up by other agents
+        agent_run::mark_agent_runs_lost(&pool.db, agent.uuid, "Agent was removed", now).await?;
+        agent_run::reclaim_agent_tasks(pool, agent.uuid, now).await?;
     }
 
     // Delete the agent (this will cascade delete GroupAgent relationships)

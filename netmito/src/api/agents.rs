@@ -133,7 +133,7 @@ async fn start_suite(
     State(pool): State<InfraPool>,
     Json(req): Json<StartSuiteReq>,
 ) -> Result<(), ApiError> {
-    service::agent::agent_start_suite(m.id, &pool, req.suite_uuid)
+    service::agent::agent_start_suite(m.uuid, &pool, req.run)
         .await
         .map_err(map_service_error)?;
     Ok(())
@@ -145,7 +145,7 @@ async fn complete_suite(
     State(pool): State<InfraPool>,
     Json(req): Json<CompleteSuiteReq>,
 ) -> Result<Json<CompleteSuiteResp>, ApiError> {
-    let resp = service::agent::agent_complete_suite(m.id, &pool, req)
+    let resp = service::agent::agent_complete_suite(m.uuid, &pool, req)
         .await
         .map_err(map_service_error)?;
     Ok(Json(resp))
@@ -155,8 +155,9 @@ async fn complete_suite(
 async fn enter_cleanup(
     Extension(m): Extension<AuthAgent>,
     State(pool): State<InfraPool>,
+    Json(req): Json<EnterCleanupReq>,
 ) -> Result<(), ApiError> {
-    service::agent::agent_enter_cleanup(m.id, &pool)
+    service::agent::agent_enter_cleanup(m.uuid, &pool, req.run)
         .await
         .map_err(map_service_error)?;
     Ok(())

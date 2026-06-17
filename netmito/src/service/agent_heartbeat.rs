@@ -131,10 +131,33 @@ impl AgentHeartbeatQueue {
                 }
             }
 
-            // Reclaim all Running tasks that were assigned to this agent.
-            // runner_uuid holds the agent's UUID for suite tasks.
-            // Use exec_with_returning to get the reclaimed tasks so we can
-            // re-add them to the suite dispatcher buffers.
+            // Any in-flight run this agent owned is now Lost.
+            let lost_result = tokio::time::timeout(
+                db_timeout,
+                crate::service::agent_run::mark_agent_runs_lost(
+                    &self.pool.db,
+                    agent_uuid,
+                    "Agent heartbeat timed out",
+                    now,
+                ),
+            )
+            .await;
+            match lost_result {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(agent_id = agent_id, "Failed to mark runs Lost: {}", e);
+                    return Err(e);
+                }
+                Err(_) => {
+                    tracing::warn!(agent_id = agent_id, "Marking runs Lost timed out");
+                    return Ok(());
+                }
+            }
+
+            // Reclaim this agent's executed-but-uncommitted tasks (Running AND
+            // Finished — a Finished task's result was never committed, so it
+            // must re-run). runner_uuid holds the agent's UUID for suite tasks.
+            // Use exec_with_returning so we can re-add them to the dispatcher.
             let reclaim_result = tokio::time::timeout(db_timeout, async {
                 ActiveTasks::Entity::update_many()
                     .col_expr(ActiveTasks::Column::State, Expr::value(TaskState::Ready))
@@ -144,7 +167,9 @@ impl AgentHeartbeatQueue {
                     )
                     .col_expr(ActiveTasks::Column::UpdatedAt, Expr::value(now))
                     .filter(ActiveTasks::Column::RunnerUuid.eq(agent_uuid))
-                    .filter(ActiveTasks::Column::State.eq(TaskState::Running))
+                    .filter(
+                        ActiveTasks::Column::State.is_in([TaskState::Running, TaskState::Finished]),
+                    )
                     .exec_with_returning(&self.pool.db)
                     .await
             })

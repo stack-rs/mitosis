@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod agent_heartbeat;
+pub mod agent_run;
 pub mod agent_task;
 pub mod auth;
 pub mod group;

@@ -182,7 +182,7 @@ async fn report_task(
     Path(uuid): Path<uuid::Uuid>,
     Json(req): Json<ReportAgentTaskReq>,
 ) -> Result<Json<Option<String>>, ApiError> {
-    let presigned_url = agent_task::agent_report_task(m.uuid, uuid, req.op, &pool)
+    let presigned_url = agent_task::agent_report_task(m.uuid, req.run, uuid, req.op, &pool)
         .await
         .map_err(map_service_error)?;
     Ok(Json(presigned_url))

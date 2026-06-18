@@ -902,12 +902,13 @@ impl AgentClient {
     /// Report the result of a single task execution step
     async fn report_task(
         &self,
+        run: i64,
         task_uuid: Uuid,
         op: ReportTaskOp,
     ) -> crate::error::Result<Option<String>> {
         let url = self.api_url(&format!("api/agents/tasks/{}/report", task_uuid));
 
-        let req = ReportAgentTaskReq { op };
+        let req = ReportAgentTaskReq { run, op };
 
         let resp = self
             .http_client
@@ -972,6 +973,12 @@ impl AgentClient {
         &mut self,
         suite: &TaskSuiteSpec,
     ) -> crate::error::Result<(u64, u64)> {
+        // The run handle is set by `accept_suite` before execution begins; every
+        // task report is scoped to it.
+        let run = self
+            .current_run
+            .expect("current_run must be set during suite execution");
+
         let batch_size = match suite.worker_schedule {
             WorkerSchedulePlan::FixedWorkers {
                 worker_count,
@@ -1030,7 +1037,7 @@ impl AgentClient {
                 tracing::info!("FAKE: executing task {} | spec={:?}", task.uuid, task.spec);
 
                 // Mark task as started (→ Finished, awaiting Commit)
-                if let Err(e) = self.report_task(task.uuid, ReportTaskOp::Finish).await {
+                if let Err(e) = self.report_task(run, task.uuid, ReportTaskOp::Finish).await {
                     tracing::error!("Failed to report Finish for task {}: {}", task.uuid, e);
                     tasks_failed += 1;
                     continue;
@@ -1042,7 +1049,7 @@ impl AgentClient {
                     msg: None,
                 };
                 match self
-                    .report_task(task.uuid, ReportTaskOp::Commit(result))
+                    .report_task(run, task.uuid, ReportTaskOp::Commit(result))
                     .await
                 {
                     Ok(_) => {

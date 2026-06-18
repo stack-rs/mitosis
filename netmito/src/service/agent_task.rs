@@ -34,12 +34,14 @@ use crate::{
     config::InfraPool,
     entity::{
         active_tasks as ActiveTasks, archived_tasks as ArchivedTasks,
-        state::{TaskState, TaskSuiteState},
-        task_suite_agent as TaskSuiteAgent, task_suites as TaskSuites, StoredTaskModel,
+        state::{SuiteRunState, TaskState, TaskSuiteState},
+        suite_agent_runs as SuiteAgentRuns, task_suite_agent as TaskSuiteAgent,
+        task_suites as TaskSuites, StoredTaskModel,
     },
     error::{ApiError, Error, Result},
     schema::{ExecSpec, FetchTasksResp, ReportTaskOp, TaskExecOptions, WorkerTaskResp},
     service::{
+        agent_run,
         s3::group_upload_artifact,
         suite_task_dispatcher::{FetchResult, SuiteDispatcherOp},
     },
@@ -236,11 +238,18 @@ pub async fn agent_fetch_tasks(
 /// `runner_uuid == agent_uuid`.
 pub async fn agent_report_task(
     agent_uuid: Uuid,
+    run: i64,
     task_uuid: Uuid,
     op: ReportTaskOp,
     pool: &InfraPool,
 ) -> Result<Option<String>> {
     let now = TimeDateTimeWithTimeZone::now_utc();
+
+    // Validate the run-scoped report (A.5): the run must exist, belong to this
+    // agent, and be non-terminal. A terminal run → 409 (the agent treats it as
+    // "run closed → I'm free"); teardown already owns any stranded task's fate.
+    let run_row = agent_run::load_validate_run(&pool.db, run, agent_uuid).await?;
+    agent_run::reject_if_terminal(&run_row)?;
 
     // Find the task in active_tasks.
     let task = ActiveTasks::Entity::find()
@@ -311,6 +320,12 @@ pub async fn agent_report_task(
                 )));
             }
 
+            // Capture the outcome before `res` is consumed: a task counts as
+            // completed only if it ran to completion (Finished) with a zero exit
+            // status; a non-zero exit or a Cancelled task (timeout / user cancel)
+            // counts as failed.
+            let task_completed = task.state == TaskState::Finished && res.exit_status == 0;
+
             let result = serde_json::to_value(res)
                 .map_err(|e| Error::ApiError(ApiError::InvalidRequest(e.to_string())))?;
 
@@ -352,6 +367,30 @@ pub async fn agent_report_task(
             if let Some(suite_id) = task.task_suite_id {
                 commit_suite_task(pool, suite_id, now).await?;
             }
+
+            // Bump the run's live counters — coordinator-authoritative, mutated
+            // only here on Commit (the durable, result-bearing event). Guarded on
+            // a non-terminal run so a teardown that flipped the run terminal since
+            // the top-of-handler validation no-ops instead of resurrecting it.
+            let (completed_delta, failed_delta) = if task_completed { (1, 0) } else { (0, 1) };
+            SuiteAgentRuns::Entity::update_many()
+                .col_expr(
+                    SuiteAgentRuns::Column::TasksCompleted,
+                    Expr::col(SuiteAgentRuns::Column::TasksCompleted).add(completed_delta),
+                )
+                .col_expr(
+                    SuiteAgentRuns::Column::TasksFailed,
+                    Expr::col(SuiteAgentRuns::Column::TasksFailed).add(failed_delta),
+                )
+                .col_expr(SuiteAgentRuns::Column::UpdatedAt, Expr::value(now))
+                .filter(SuiteAgentRuns::Column::Id.eq(run))
+                .filter(SuiteAgentRuns::Column::State.is_in([
+                    SuiteRunState::Provision,
+                    SuiteRunState::Executing,
+                    SuiteRunState::Cleanup,
+                ]))
+                .exec(&pool.db)
+                .await?;
         }
 
         // ──────────────────────────────────────────────────────────────────

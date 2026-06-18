@@ -304,6 +304,8 @@ pub struct FetchTasksResp {
 /// The task UUID is provided in the URL path (`/agents/tasks/{uuid}/report`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportAgentTaskReq {
+    /// Opaque run handle from `AcceptSuiteResp` — the run this task belongs to.
+    pub run: i64,
     /// Operation to perform
     pub op: ReportTaskOp,
 }

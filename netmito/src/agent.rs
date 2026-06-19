@@ -829,7 +829,9 @@ impl AgentClient {
             run,
             tasks_completed,
             tasks_failed,
-            completion_reason: SuiteCompletionReason::Normal,
+            // The fake execution path always completes cleanly; emitting
+            // `Failed` on real hook failures comes with real hooks (Task 7).
+            outcome: SuiteRunOutcome::Completed,
         };
 
         let resp = self

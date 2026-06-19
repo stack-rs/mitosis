@@ -16,8 +16,8 @@ use crate::error::{ApiError, Error, Result};
 use crate::schema::{
     AcceptSuiteReq, AcceptSuiteResp, AgentHeartbeatReq, AgentHeartbeatResp, AgentInfo,
     AgentNotification, AgentsQueryReq, AgentsQueryResp, CompleteSuiteReq, CompleteSuiteResp,
-    CountQuery, ExecHooks, FetchSuiteResp, RegisterAgentReq, RegisterAgentResp, TaskSuiteSpec,
-    WorkerSchedulePlan,
+    CountQuery, ExecHooks, FetchSuiteResp, RegisterAgentReq, RegisterAgentResp, SuiteRunOutcome,
+    TaskSuiteSpec, WorkerSchedulePlan,
 };
 use crate::service::agent_heartbeat::AgentHeartbeatOp;
 use crate::service::agent_run;
@@ -904,14 +904,26 @@ pub async fn agent_complete_suite(
     let run_row = agent_run::load_validate_run(&pool.db, req.run, agent_uuid).await?;
     agent_run::reject_if_terminal(&run_row)?;
 
+    // Map the agent's outcome to the run's terminal state. `Failed` carries a
+    // one-line summary stored in `failure_reason`; full hook output lives in the
+    // hook execution rows.
+    let (terminal_state, failure_reason) = match &req.outcome {
+        SuiteRunOutcome::Completed => (SuiteRunState::Completed, None),
+        SuiteRunOutcome::Failed { reason } => {
+            let json = serde_json::to_value(reason)
+                .map_err(|e| Error::ApiError(ApiError::InvalidRequest(e.to_string())))?;
+            (SuiteRunState::Failed, Some(json))
+        }
+    };
+
     tracing::info!(
         run = req.run,
         run_id = run_row.run_id,
         agent_uuid = %agent_uuid,
         tasks_completed = req.tasks_completed,
         tasks_failed = req.tasks_failed,
-        reason = ?req.completion_reason,
-        "Agent completed suite execution"
+        outcome = ?req.outcome,
+        "Agent reported suite run completion"
     );
 
     // Cross-check the agent's claimed totals against the coordinator's own
@@ -931,13 +943,17 @@ pub async fn agent_complete_suite(
         );
     }
 
-    // Run → terminal Completed, stamp finished_at. Counters are left untouched
-    // (owned by the Commit path). Guarded against a concurrent coordinator
-    // terminal.
+    // Run → terminal Completed/Failed, stamp finished_at and (on failure) the
+    // one-line reason. Counters are left untouched (owned by the Commit path).
+    // Guarded against a concurrent coordinator terminal.
     SuiteAgentRuns::Entity::update_many()
         .col_expr(
             SuiteAgentRuns::Column::State,
-            Expr::value(SuiteRunState::Completed),
+            Expr::value(terminal_state),
+        )
+        .col_expr(
+            SuiteAgentRuns::Column::FailureReason,
+            Expr::value(failure_reason),
         )
         .col_expr(SuiteAgentRuns::Column::FinishedAt, Expr::value(Some(now)))
         .col_expr(SuiteAgentRuns::Column::UpdatedAt, Expr::value(now))

@@ -226,27 +226,20 @@ pub struct CompleteSuiteReq {
     pub tasks_completed: u64,
     /// Total tasks failed during this execution
     pub tasks_failed: u64,
-    /// Reason for completion (normal, cancelled, error)
-    #[serde(default)]
-    pub completion_reason: SuiteCompletionReason,
+    /// What the agent did: finished cleanly, or failed with a reason.
+    pub outcome: SuiteRunOutcome,
 }
 
-/// Reason for suite completion
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub enum SuiteCompletionReason {
-    /// All tasks completed normally
-    #[default]
-    Normal,
-    /// Suite was preempted by higher priority suite
-    Preempted,
-    /// Suite was cancelled by user
-    Cancelled,
-    /// Environment preparation failed
-    PrepFailed,
-    /// Environment cleanup failed (but tasks completed)
-    CleanupFailed,
-    /// Other error
-    Error(String),
+/// The agent's report of how its run ended. By design the agent reports only
+/// what *it* did — `Cancelled`/`Lost`/`Preempted` are coordinator decisions and
+/// are never agent outcomes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SuiteRunOutcome {
+    /// Provision, execution, and cleanup all succeeded.
+    Completed,
+    /// The run failed; `reason` summarizes the failing phase and cause. Full
+    /// hook output lives in the corresponding `suite_hook_executions` row.
+    Failed { reason: RunFailureReason },
 }
 
 /// Machine-readable category for why a suite run terminated abnormally

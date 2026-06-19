@@ -6,9 +6,12 @@ use speedy::{Readable, Writable};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::entity::content::ArtifactContentType;
+use crate::entity::state::HookType;
+
 use super::exec::ExecHooks;
 use super::suite::WorkerSchedulePlan;
-use super::task::{ReportTaskOp, WorkerTaskResp};
+use super::task::{ReportTaskOp, TaskResultSpec, WorkerTaskResp};
 
 /// Request to register a new agent
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,6 +280,34 @@ pub struct RunFailureReason {
 pub struct CompleteSuiteResp {
     /// Whether there's another suite available immediately
     pub next_suite_available: bool,
+}
+
+/// Request to report a suite hook execution.
+/// POST /agents/suite/hook — append-only, accepted even on a terminal run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookReportReq {
+    /// Opaque run handle from `AcceptSuiteResp`.
+    pub run: i64,
+    /// Which hook this report is for (provision / cleanup / background).
+    pub hook_type: HookType,
+    /// What to do: record the hook's result, or presign a log upload.
+    pub op: HookReportOp,
+}
+
+/// Operation for a hook report. `Result` writes the `suite_hook_executions`
+/// row and must precede `Upload`, which presigns an S3 PUT for a large log
+/// against that row (see A.3.5 — hook row is created on completion).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HookReportOp {
+    /// Record the hook's final result (writes the `suite_hook_executions` row,
+    /// state derived from `exit_status`).
+    Result(TaskResultSpec),
+    /// Presign an S3 upload for a large hook log; returns the URL. Requires the
+    /// hook's `Result` to have been reported first.
+    Upload {
+        content_type: ArtifactContentType,
+        content_length: u64,
+    },
 }
 
 /// Request to fetch tasks for execution (for managed workers)

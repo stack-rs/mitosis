@@ -38,6 +38,7 @@ pub fn agents_router(st: InfraPool) -> Router<InfraPool> {
         .route("/suite/start", post(start_suite))
         .route("/suite/complete", post(complete_suite))
         .route("/suite/cleanup", post(enter_cleanup))
+        .route("/suite/hook", post(report_hook))
         .route("/tasks/fetch", post(fetch_tasks))
         .route("/tasks/{uuid}/report", post(report_task))
         .route_layer(middleware::from_fn_with_state(
@@ -161,6 +162,18 @@ async fn enter_cleanup(
         .await
         .map_err(map_service_error)?;
     Ok(())
+}
+
+/// POST /agents/suite/hook - Report a suite hook result or presign a log upload
+async fn report_hook(
+    Extension(m): Extension<AuthAgent>,
+    State(pool): State<InfraPool>,
+    Json(req): Json<HookReportReq>,
+) -> Result<Json<Option<String>>, ApiError> {
+    let url = service::agent_hook::agent_report_hook(m.uuid, req.run, req.hook_type, req.op, &pool)
+        .await
+        .map_err(map_service_error)?;
+    Ok(Json(url))
 }
 
 /// POST /agents/tasks/fetch - Batch-fetch tasks from an assigned suite

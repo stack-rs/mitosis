@@ -73,8 +73,30 @@ Hook timing (for A.3): `provision` runs during `Provision` (before `/start`); `b
 
 1. **No "started"/live-status reports.** A hook's start is never reported; on the success path it's redundant (`/start` proves provision succeeded, `/cleanup` proves execution finished).
 2. **One `suite_hook_executions` row per hook, written on completion** (success *or* failure), through a single dedicated endpoint `POST /agents/suite/hook` used uniformly for all three hook types.
-3. **Reuse the result payload, not the task endpoint.** Result shape = `TaskResultSpec` (`exit_status` + `msg`); large logs go through the existing `Upload{content_type, content_length}` → presigned-S3 flow (`group_upload_artifact`). Do **not** route hooks through `/agents/tasks/{uuid}/report`: that handler is welded to the `active_tasks` lifecycle (needs an active_tasks row; `Commit` archives + decrements suite `incomplete_tasks`). A hook must never touch task counters.
+3. **Reuse the result payload, not the task endpoint.** Result shape = `TaskResultSpec` (`exit_status` + `msg`). Do **not** route hooks through `/agents/tasks/{uuid}/report`: that handler is welded to the `active_tasks` lifecycle (needs an active_tasks row; `Commit` archives + decrements suite `incomplete_tasks`). A hook must never touch task counters.
 4. **Accepted tradeoff — no live "background is running" indicator.** The background hook is only visible once it finishes; if it hangs there is no row and the run eventually goes `Lost`. The run being in `Executing` already implies background is up.
+
+### A.3.5 Hook artifacts (large logs) — `suite_hook_artifacts`
+
+Hook logs do **not** reuse the task `artifacts` table. That table keys on a task UUID and has no foreign key (the `task_id` link is logical), so reusing it for hooks would (a) overload `task_id` with non-task ids and (b) make run deletion *harder* — the rows wouldn't cascade and would have to be enumerated by hand. Instead, hook logs get a dedicated, hook-owned table with a real cascading FK:
+
+```
+suite_hook_artifacts {
+  id                       bigserial PK,
+  suite_hook_execution_id  bigint NOT NULL,   -- FK → suite_hook_executions.id, ON DELETE CASCADE
+  content_type             int    NOT NULL,   -- reuses entity::content::ArtifactContentType
+  size                     bigint NOT NULL,   -- bytes; drives the quota refund on delete
+  created_at, updated_at   timestamptz NOT NULL default now(),
+  UNIQUE (suite_hook_execution_id, content_type)   -- ≤1 artifact per type per hook; enables upsert
+}
+```
+
+- **Cascade chain.** `suite_agent_runs → suite_hook_executions → suite_hook_artifacts`, all `ON DELETE CASCADE`. Deleting a run wipes all three levels of *metadata* automatically. S3 blobs never cascade (the DB can't reach S3), so the run-delete path reads these rows' sizes/keys first, batch-`delete_objects` them, refunds quota once (`group.storage_used -= Σ size`), then deletes the run (rows cascade away).
+- **S3 key:** `hooks/{suite_hook_execution_id}/{content_type}` in the artifacts bucket — globally unique, derivable from the row, namespaced under `hooks/` so it never collides with task keys (`{task_uuid}/{content_type}`).
+- **Quota:** charged on the owning suite's group, resolved via hook artifact → hook execution → run (`task_suite_id`) → suite → `group_id` (no denormalized `group_id`, matching the `artifacts` table). `Upload` checks `storage_used + len ≤ storage_quota`, upserts the row (by `hook_exec_id + content_type`), bumps `storage_used`.
+- **No `uuid` column.** A hook execution never moves tables (unlike a task crossing `active → archived`), so its `i64` id is a stable enough key.
+
+**Endpoint ordering (`POST /agents/suite/hook`, op `Result` | `Upload`):** `Result` writes the `suite_hook_executions` row (state `Completed`/`Failed` from `exit_status`), so it must precede `Upload`, which presigns against that row's `id`. The agent flow is therefore: hook process exits → `Result` (record outcome) → `Upload` per log (presign) → PUT bytes to S3. `Upload` on a `(run, hook_type)` with no recorded execution → `404/409`. This inverts the task order (where `Upload` precedes `Commit`) because a hook's row is created *on completion* (A.3.1, no start report), and the agent already holds both the exit status and the logs once the hook exits. Both ops are **append-only** and accepted even on a terminal run (ownership + existence checked).
 
 ## A.4 Outcome & failure model
 

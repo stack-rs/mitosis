@@ -39,11 +39,19 @@ pub enum Relation {
         on_delete = "Cascade"
     )]
     SuiteAgentRuns,
+    #[sea_orm(has_many = "super::suite_hook_artifacts::Entity")]
+    SuiteHookArtifacts,
 }
 
 impl Related<super::suite_agent_runs::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::SuiteAgentRuns.def()
+    }
+}
+
+impl Related<super::suite_hook_artifacts::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::SuiteHookArtifacts.def()
     }
 }
 

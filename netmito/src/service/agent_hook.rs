@@ -140,14 +140,14 @@ pub async fn agent_report_hook(
                 .db
                 .transaction::<_, String, Error>(|txn| {
                     Box::pin(async move {
-                        let group =
-                            Group::Entity::find_by_id(group_id).one(txn).await?.ok_or_else(
-                                || {
-                                    Error::ApiError(ApiError::InvalidRequest(
-                                        "Group for the suite not found".to_string(),
-                                    ))
-                                },
-                            )?;
+                        let group = Group::Entity::find_by_id(group_id)
+                            .one(txn)
+                            .await?
+                            .ok_or_else(|| {
+                                Error::ApiError(ApiError::InvalidRequest(
+                                    "Group for the suite not found".to_string(),
+                                ))
+                            })?;
                         let existing = SuiteHookArtifacts::Entity::find()
                             .filter(
                                 SuiteHookArtifacts::Column::SuiteHookExecutionId.eq(hook_exec_id),

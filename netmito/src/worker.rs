@@ -219,6 +219,92 @@ impl TaskExecutor {
             let _ = pubsub.unsubscribe(format!("task:{uuid}")).await;
         }
     }
+
+    /// POST a task report to the coordinator. Returns the presigned upload URL
+    /// for an `Upload` op, `None` otherwise. Encapsulates the retry / cancel /
+    /// auth-error handling shared by every report op — unifying the former
+    /// `report_task` free function and the inline upload-presign path. The
+    /// per-status nuances of those two paths are preserved (only `Upload`
+    /// treats `403` as a skippable no-op and cancels on a hard error).
+    async fn report(
+        &mut self,
+        id: i64,
+        op: ReportTaskOp,
+    ) -> crate::error::Result<Option<String>> {
+        let is_upload = matches!(op, ReportTaskOp::Upload { .. });
+        let req = ReportTaskReq { id, op };
+        self.task_url.set_path("workers/tasks");
+        loop {
+            let resp = self
+                .task_client
+                .post(self.task_url.as_str())
+                .json(&req)
+                .bearer_auth(&self.task_credential)
+                .send()
+                .await;
+            match resp {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        let resp = resp
+                            .json::<ReportTaskResp>()
+                            .await
+                            .map_err(RequestError::from)?;
+                        return Ok(resp.url);
+                    } else if resp.status() == StatusCode::UNAUTHORIZED {
+                        tracing::info!("Report task failed with coordinator force exit");
+                        self.coordinator_force_exit
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        self.task_cancel_token.cancel();
+                        return Ok(None);
+                    } else if resp.status() == StatusCode::NOT_FOUND {
+                        tracing::debug!("Task not found, ignore and go on for next cycle");
+                        return Ok(None);
+                    } else if is_upload && resp.status() == StatusCode::FORBIDDEN {
+                        let resp: ErrorMsg = resp
+                            .json()
+                            .await
+                            .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
+                        tracing::info!(
+                            "Request upload url failed with permission denied: {}",
+                            resp.msg
+                        );
+                        return Ok(None);
+                    } else {
+                        let resp: ErrorMsg = resp
+                            .json()
+                            .await
+                            .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
+                        // The upload-presign path cancels on a hard error; the
+                        // plain report path does not. Preserve both.
+                        if is_upload {
+                            self.task_cancel_token.cancel();
+                        }
+                        return Err(Error::Custom(format!(
+                            "Report task failed with error: {}",
+                            resp.msg
+                        )));
+                    }
+                }
+                Err(e) => {
+                    if e.is_connect() && e.is_request() {
+                        tracing::error!(
+                            "Report task failed with connection error: {}. Retry after {:?}",
+                            e,
+                            self.polling_interval
+                        );
+                        tokio::select! {
+                            biased;
+                            _ = self.task_cancel_token.cancelled() => return Ok(None),
+                            _ = tokio::time::sleep(self.polling_interval) => {},
+                        }
+                        continue;
+                    } else {
+                        return Err(RequestError::from(e).into());
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl MitoWorker {
@@ -1232,83 +1318,17 @@ async fn process_task_result(
     });
     let upload_artifact_fut = async {
         while let Some((content_type, content_length)) = rx.recv().await {
-            let req = ReportTaskReq {
-                id,
-                op: ReportTaskOp::Upload {
-                    content_type,
-                    content_length,
-                },
-            };
-            task_executor.task_url.set_path("workers/tasks");
-            let resp = loop {
-                let resp = task_executor
-                    .task_client
-                    .post(task_executor.task_url.as_str())
-                    .json(&req)
-                    .bearer_auth(&task_executor.task_credential)
-                    .send()
-                    .await;
-                match resp {
-                    Ok(resp) => {
-                        if resp.status().is_success() {
-                            let resp = resp
-                                .json::<ReportTaskResp>()
-                                .await
-                                .map_err(RequestError::from)?;
-                            break resp;
-                        } else if resp.status() == StatusCode::UNAUTHORIZED {
-                            tracing::info!("Request upload url failed with coordinator force exit");
-                            task_executor
-                                .coordinator_force_exit
-                                .store(true, std::sync::atomic::Ordering::Release);
-                            task_executor.task_cancel_token.cancel();
-                            return Ok(());
-                        } else if resp.status() == StatusCode::NOT_FOUND {
-                            tracing::debug!("Task not found, ignore and go on for next cycle");
-                            return Ok(());
-                        } else if resp.status() == StatusCode::FORBIDDEN {
-                            let resp: ErrorMsg = resp
-                                .json()
-                                .await
-                                .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
-                            tracing::info!(
-                                "Request upload url failed with permission denied: {}",
-                                resp.msg
-                            );
-                            return Ok(());
-                        } else {
-                            let resp: ErrorMsg = resp
-                                .json()
-                                .await
-                                .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
-                            task_executor.task_cancel_token.cancel();
-                            return Err(Error::Custom(format!(
-                                "Request upload url failed with error: {}",
-                                resp.msg
-                            )));
-                        }
-                    }
-                    Err(e) => {
-                        if e.is_connect() && e.is_request() {
-                            tracing::error!(
-                                    "Request upload url failed with connection error: {}. Retry after {:?}",
-                                    e,
-                                    task_executor.polling_interval
-                                );
-                            tokio::select! {
-                                biased;
-                                _ = task_executor.task_cancel_token.cancelled() => return Ok(()),
-                                _ = tokio::time::sleep(task_executor.polling_interval) => {},
-                            }
-                            continue;
-                        } else {
-                            task_executor.task_cancel_token.cancel();
-                            return Err(RequestError::from(e).into());
-                        }
-                    }
-                }
-            };
-            if let Some(url) = resp.url {
+            // Request a presigned upload URL via the unified report path.
+            let resp_url = task_executor
+                .report(
+                    id,
+                    ReportTaskOp::Upload {
+                        content_type,
+                        content_length,
+                    },
+                )
+                .await?;
+            if let Some(url) = resp_url {
                 loop {
                     let file = tokio::fs::File::open(
                         task_executor.task_cache_path.join(content_type.to_string()),
@@ -1446,60 +1466,8 @@ async fn report_task(
     task_executor: &mut TaskExecutor,
     req: ReportTaskReq,
 ) -> crate::error::Result<()> {
-    task_executor.task_url.set_path("workers/tasks");
-    loop {
-        let resp = task_executor
-            .task_client
-            .post(task_executor.task_url.as_str())
-            .json(&req)
-            .bearer_auth(&task_executor.task_credential)
-            .send()
-            .await;
-        match resp {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    break;
-                } else if resp.status() == StatusCode::UNAUTHORIZED {
-                    tracing::info!("Report task failed with coordinator force exit");
-                    task_executor
-                        .coordinator_force_exit
-                        .store(true, std::sync::atomic::Ordering::Release);
-                    task_executor.task_cancel_token.cancel();
-                    return Ok(());
-                } else if resp.status() == StatusCode::NOT_FOUND {
-                    tracing::debug!("Task not found, ignore and go on for next cycle");
-                    return Ok(());
-                } else {
-                    let resp: ErrorMsg = resp
-                        .json()
-                        .await
-                        .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
-                    return Err(Error::Custom(format!(
-                        "Report task failed with error: {}",
-                        resp.msg
-                    )));
-                }
-            }
-            Err(e) => {
-                if e.is_connect() && e.is_request() {
-                    tracing::error!(
-                        "Report task failed with connection error: {}. Retry after {:?}",
-                        e,
-                        task_executor.polling_interval
-                    );
-                    tokio::select! {
-                        biased;
-                        _ = task_executor.task_cancel_token.cancelled() => break,
-                        _ = tokio::time::sleep(task_executor.polling_interval) => {},
-                    }
-                    continue;
-                } else {
-                    return Err(RequestError::from(e).into());
-                }
-            }
-        }
-    }
-    Ok(())
+    // Non-upload reports ignore the (always-None) URL.
+    task_executor.report(req.id, req.op).await.map(|_| ())
 }
 
 async fn submit_new_task_if_present(task_id: i64, task_executor: &mut TaskExecutor) -> bool {

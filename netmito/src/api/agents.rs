@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     config::InfraPool,
+    entity::content::ArtifactContentType,
     error::{map_service_error, ApiError},
     schema::*,
     service::{
@@ -41,6 +42,12 @@ pub fn agents_router(st: InfraPool) -> Router<InfraPool> {
         .route("/suite/hook", post(report_hook))
         .route("/tasks/fetch", post(fetch_tasks))
         .route("/tasks/{uuid}/report", post(report_task))
+        .route("/tasks/{uuid}", get(query_task))
+        .route(
+            "/tasks/{uuid}/artifacts/{content_type}",
+            get(download_artifact),
+        )
+        .route("/tasks/{uuid}/attachments/{*key}", get(download_attachment))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             agent_auth_middleware,
@@ -199,4 +206,45 @@ async fn report_task(
         .await
         .map_err(map_service_error)?;
     Ok(Json(presigned_url))
+}
+
+/// GET /agents/tasks/{uuid}
+/// Query a task's state + result (for agent-side `watch` dependencies). Reuses
+/// the identity-free service; resolves active or archived tasks.
+async fn query_task(
+    Extension(_): Extension<AuthAgent>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<TaskQueryResp>, ApiError> {
+    let task = service::task::get_task_by_uuid(&pool, uuid)
+        .await
+        .map_err(map_service_error)?;
+    Ok(Json(task))
+}
+
+/// GET /agents/tasks/{uuid}/artifacts/{content_type}
+/// Presigned download for a task input artifact (agent-managed execution).
+/// Reuses the identity-free service; agent auth is just the gate.
+async fn download_artifact(
+    Extension(_): Extension<AuthAgent>,
+    State(pool): State<InfraPool>,
+    Path((uuid, content_type)): Path<(Uuid, ArtifactContentType)>,
+) -> Result<Json<RemoteResourceDownloadResp>, ApiError> {
+    let artifact = service::s3::download_artifact_by_uuid(&pool, uuid, content_type)
+        .await
+        .map_err(map_service_error)?;
+    Ok(Json(artifact))
+}
+
+/// GET /agents/tasks/{uuid}/attachments/{*key}
+/// Presigned download for a task input attachment (agent-managed execution).
+async fn download_attachment(
+    Extension(_): Extension<AuthAgent>,
+    State(pool): State<InfraPool>,
+    Path((uuid, key)): Path<(Uuid, String)>,
+) -> Result<Json<RemoteResourceDownloadResp>, ApiError> {
+    let attachment = service::s3::worker_download_attachment(&pool, uuid, key)
+        .await
+        .map_err(map_service_error)?;
+    Ok(Json(attachment))
 }

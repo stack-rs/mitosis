@@ -11,15 +11,18 @@
 //!
 //! ## Report flow
 //!
-//! Agents use the same [`ReportTaskOp`] variants as workers:
+//! Agents use the same [`ReportTaskOp`] variants as workers. Every report is
+//! first validated against the run: the `run` handle must exist, belong to this
+//! agent, and be non-terminal — a terminal run is rejected with `409 Conflict`
+//! (teardown already owns any stranded task's fate).
 //!
 //! | Op      | Behaviour |
 //! |---------|-----------|
-//! | `Finish` | Marks task as `Finished` (not yet archived). |
+//! | `Finish` | Marks task as `Finished` (state transition only; not yet archived). |
 //! | `Cancel` | Marks task as `Cancelled`. Agent follows up with `Commit`. |
-//! | `Upload` | Returns a presigned S3 URL for artifact upload. |
-//! | `Commit` | Archives the task and (for suite tasks) decrements `incomplete_tasks`. |
-//! | `Submit` | **Not supported** — returns `InvalidRequest`. See Phase 7 for task chaining. |
+//! | `Upload` | Returns a presigned S3 URL for an artifact upload (records metadata, charges group quota). |
+//! | `Commit` | Archives the task with its result; decrements suite `incomplete_tasks`; bumps the run's `tasks_completed`/`tasks_failed` counters; triggers the downstream task if one was spawned. |
+//! | `Submit` | Spawns a downstream child (task chaining): created `Pending`, auto-joined to the parent's suite, and triggered to `Ready` when the parent `Commit`s. |
 //!
 //! ## Suite completion
 //!
@@ -391,6 +394,13 @@ pub async fn agent_report_task(
                 ]))
                 .exec(&pool.db)
                 .await?;
+
+            // Task chaining: if this task spawned a downstream child (via an
+            // earlier Submit), flip it Pending → Ready and dispatch it now that
+            // the parent has committed (mirrors the worker path).
+            if let Some(downstream_uuid) = task.downstream_task_uuid {
+                super::task::worker_trigger_pending_task(pool, downstream_uuid).await?;
+            }
         }
 
         // ──────────────────────────────────────────────────────────────────
@@ -411,15 +421,49 @@ pub async fn agent_report_task(
         }
 
         // ──────────────────────────────────────────────────────────────────
-        // Submit: not supported for agent-executed tasks.
-        // Deferred to a future phase; record this decision here.
+        // Submit: spawn a downstream task (task chaining). Routed through the
+        // same suite-aware machinery as the worker path; the child is created
+        // `Pending` and triggered to `Ready` when this task Commits.
         // ──────────────────────────────────────────────────────────────────
-        ReportTaskOp::Submit(_) => {
-            return Err(Error::ApiError(ApiError::InvalidRequest(
-                "Submit (sub-task spawning) is not supported for agent-executed tasks in the current implementation. \
-                 This will be added in a future phase."
-                    .to_string(),
-            )));
+        ReportTaskOp::Submit(req) => {
+            if task.state != TaskState::Finished && task.state != TaskState::Cancelled {
+                return Err(Error::ApiError(ApiError::InvalidRequest(
+                    "Task must be Finished or Cancelled before spawning a new task".to_string(),
+                )));
+            }
+
+            let mut req = *req;
+            // A suite task's child auto-joins the parent's suite/run: inject the
+            // suite uuid so the child is tracked by the same suite (reopening it
+            // if needed) and dispatched via the suite dispatcher.
+            if let Some(suite_id) = task.task_suite_id {
+                let suite = TaskSuites::Entity::find_by_id(suite_id)
+                    .one(&pool.db)
+                    .await?
+                    .ok_or_else(|| {
+                        Error::ApiError(ApiError::NotFound(format!("Suite {suite_id} not found")))
+                    })?;
+                req.suite_uuid = Some(suite.uuid);
+            }
+
+            let resp = crate::service::task::worker_submit_pending_task(
+                pool,
+                task.creator_id,
+                task.uuid,
+                req,
+            )
+            .await?;
+
+            // Link the child as this task's downstream so Commit triggers it.
+            ActiveTasks::Entity::update_many()
+                .col_expr(
+                    ActiveTasks::Column::DownstreamTaskUuid,
+                    Expr::value(Some(resp.uuid)),
+                )
+                .col_expr(ActiveTasks::Column::UpdatedAt, Expr::value(now))
+                .filter(ActiveTasks::Column::Id.eq(task.id))
+                .exec(&pool.db)
+                .await?;
         }
     }
 

@@ -947,10 +947,7 @@ pub async fn agent_complete_suite(
     // one-line reason. Counters are left untouched (owned by the Commit path).
     // Guarded against a concurrent coordinator terminal.
     SuiteAgentRuns::Entity::update_many()
-        .col_expr(
-            SuiteAgentRuns::Column::State,
-            Expr::value(terminal_state),
-        )
+        .col_expr(SuiteAgentRuns::Column::State, Expr::value(terminal_state))
         .col_expr(
             SuiteAgentRuns::Column::FailureReason,
             Expr::value(failure_reason),

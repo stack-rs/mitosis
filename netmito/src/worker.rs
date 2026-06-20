@@ -136,32 +136,16 @@ impl TaskExecutor {
                                 break;
                             }
                         }
-                        self.task_url
-                            .set_path(format!("workers/tasks/{uuid}").as_str());
-                        let resp = self
-                            .task_client
-                            .get(self.task_url.as_str())
-                            .bearer_auth(&self.task_credential)
-                            .send()
-                            .await;
-                        match resp {
-                            Ok(resp) => {
-                                if resp.status().is_success() {
-                                    if let Ok(task) = resp.json::<TaskQueryResp>().await {
-                                        if task.info.state.is_reach(&state, task.info.result) {
-                                            break;
-                                        }
-                                    }
-                                } else {
-                                    let resp: ErrorMsg = resp
-                                        .json()
-                                        .await
-                                        .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
-                                    tracing::error!("Get Task failed with error: {}", resp.msg);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("Get task failed with error: {}", e);
+                        if let Some(task) = query_task(
+                            &self.task_client,
+                            &mut self.task_url,
+                            &self.task_credential,
+                            uuid,
+                        )
+                        .await
+                        {
+                            if task.info.state.is_reach(&state, task.info.result) {
+                                break;
                             }
                         }
                     },
@@ -176,32 +160,16 @@ impl TaskExecutor {
                         break;
                     }
                 }
-                self.task_url
-                    .set_path(format!("workers/tasks/{uuid}").as_str());
-                let resp = self
-                    .task_client
-                    .get(self.task_url.as_str())
-                    .bearer_auth(&self.task_credential)
-                    .send()
-                    .await;
-                match resp {
-                    Ok(resp) => {
-                        if resp.status().is_success() {
-                            if let Ok(task) = resp.json::<TaskQueryResp>().await {
-                                if task.info.state.is_reach(&state, task.info.result) {
-                                    break;
-                                }
-                            }
-                        } else {
-                            let resp: ErrorMsg = resp
-                                .json()
-                                .await
-                                .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
-                            tracing::error!("Get Task failed with error: {}", resp.msg);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Get task failed with error: {}", e);
+                if let Some(task) = query_task(
+                    &self.task_client,
+                    &mut self.task_url,
+                    &self.task_credential,
+                    uuid,
+                )
+                .await
+                {
+                    if task.info.state.is_reach(&state, task.info.result) {
+                        break;
                     }
                 }
             }
@@ -226,11 +194,7 @@ impl TaskExecutor {
     /// `report_task` free function and the inline upload-presign path. The
     /// per-status nuances of those two paths are preserved (only `Upload`
     /// treats `403` as a skippable no-op and cancels on a hard error).
-    async fn report(
-        &mut self,
-        id: i64,
-        op: ReportTaskOp,
-    ) -> crate::error::Result<Option<String>> {
+    async fn report(&mut self, id: i64, op: ReportTaskOp) -> crate::error::Result<Option<String>> {
         let is_upload = matches!(op, ReportTaskOp::Upload { .. });
         let req = ReportTaskReq { id, op };
         self.task_url.set_path("workers/tasks");
@@ -659,6 +623,192 @@ impl TaskResult {
     }
 }
 
+/// GET a task's current state from the coordinator (the `watch` poll fallback).
+/// Returns `None` on any error (logged) so the watch loop simply retries. Takes
+/// the transport fields by reference rather than `&mut self` so it can be called
+/// from the redis watch path while `task_redis_pubsub` is mutably borrowed.
+async fn query_task(
+    client: &Client,
+    base_url: &mut Url,
+    credential: &str,
+    uuid: &Uuid,
+) -> Option<TaskQueryResp> {
+    base_url.set_path(format!("workers/tasks/{uuid}").as_str());
+    match client
+        .get(base_url.as_str())
+        .bearer_auth(credential)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                resp.json::<TaskQueryResp>().await.ok()
+            } else {
+                let resp: ErrorMsg = resp
+                    .json()
+                    .await
+                    .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
+                tracing::error!("Get Task failed with error: {}", resp.msg);
+                None
+            }
+        }
+        Err(e) => {
+            tracing::error!("Get task failed with error: {}", e);
+            None
+        }
+    }
+}
+
+/// Why a resource download did not complete. Pure outcome — the task-lifecycle
+/// policy for each case lives at the call site (`execute_task`), not here.
+enum ResourceError {
+    /// 404: the resource does not exist.
+    NotFound,
+    /// 403 status: the resource is forbidden.
+    ForbiddenStatus,
+    /// The presigned S3 download itself failed.
+    DownloadFailed,
+    /// Exceeded the per-download (120s) or overall (30-min) budget.
+    Timeout,
+    /// Cancelled via the shutdown token.
+    Cancelled,
+    /// Connection error or unexpected status — propagate to the caller.
+    Other(crate::error::Error),
+}
+
+/// The shared "abandon this task" report pair: `Cancel` then `Commit` with the
+/// given result message. The caller handles the state announcements (which vary
+/// per case) around it.
+async fn report_cancel_commit(
+    task_executor: &mut TaskExecutor,
+    task_id: i64,
+    msg: TaskResultMessage,
+) -> crate::error::Result<()> {
+    report_task(
+        task_executor,
+        ReportTaskReq {
+            id: task_id,
+            op: ReportTaskOp::Cancel,
+        },
+    )
+    .await?;
+    report_task(
+        task_executor,
+        ReportTaskReq {
+            id: task_id,
+            op: ReportTaskOp::Commit(TaskResultSpec {
+                exit_status: 0,
+                msg: Some(msg),
+            }),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Fetch one resource to its local path: pure I/O + resilience (connection
+/// retry, per-download 120s + overall `timeout_until`, cancellation). It never
+/// touches the task lifecycle — every failure is returned as a typed
+/// [`ResourceError`] for `execute_task` to translate into a task outcome.
+async fn download_resource(
+    task_executor: &mut TaskExecutor,
+    resource: RemoteResourceDownload,
+    task_uuid: &Uuid,
+    timeout_until: Instant,
+) -> std::result::Result<(), ResourceError> {
+    match resource.remote_file {
+        RemoteResource::Artifact { uuid, content_type } => {
+            let content_serde_val =
+                serde_json::to_value(content_type).map_err(|e| ResourceError::Other(e.into()))?;
+            let content_serde_str = content_serde_val.as_str().unwrap_or("result");
+            task_executor.task_url.set_path(&format!(
+                "workers/tasks/{uuid}/artifacts/{content_serde_str}"
+            ));
+        }
+        RemoteResource::Attachment { key } => {
+            task_executor
+                .task_url
+                .set_path(&format!("workers/tasks/{task_uuid}/attachments/{key}"));
+        }
+    };
+    let resp = loop {
+        match task_executor
+            .task_client
+            .get(task_executor.task_url.as_str())
+            .bearer_auth(&task_executor.task_credential)
+            .send()
+            .await
+        {
+            Ok(resp) => break resp,
+            Err(e) => {
+                if e.is_connect() && e.is_request() {
+                    tracing::error!(
+                        "Fetch resource info failed with connection error: {}. Retry after {:?}",
+                        e,
+                        task_executor.polling_interval
+                    );
+                    tokio::select! {
+                        biased;
+                        _ = task_executor.task_cancel_token.cancelled() => return Err(ResourceError::Cancelled),
+                        _ = tokio::time::sleep(task_executor.polling_interval) => {},
+                        _ = tokio::time::sleep_until(timeout_until) => {
+                            tracing::debug!("Fetching resource timeout, commit this task as cancelled");
+                            return Err(ResourceError::Timeout);
+                        }
+                    }
+                    continue;
+                } else {
+                    return Err(ResourceError::Other(RequestError::from(e).into()));
+                }
+            }
+        }
+    };
+    if resp.status().is_success() {
+        let download_resp = resp
+            .json::<RemoteResourceDownloadResp>()
+            .await
+            .map_err(|e| ResourceError::Other(RequestError::from(e).into()))?;
+        let local_path = task_executor
+            .task_cache_path
+            .join("resource")
+            .join(resource.local_path);
+        tokio::select! {
+            biased;
+            res = download_file(&task_executor.task_client, &download_resp, local_path, false) => {
+                if let Err(e) = res {
+                    tracing::error!("Failed to download resource: {}", e);
+                    return Err(ResourceError::DownloadFailed);
+                }
+                Ok(())
+            }
+            _ = task_executor.task_cancel_token.cancelled() => Err(ResourceError::Cancelled),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(120)) => {
+                tracing::debug!("Fetching resource timeout, commit this task as cancelled");
+                Err(ResourceError::Timeout)
+            }
+            _ = tokio::time::sleep_until(timeout_until) => {
+                tracing::debug!("Fetching resource timeout, commit this task as cancelled");
+                Err(ResourceError::Timeout)
+            }
+        }
+    } else if resp.status() == StatusCode::NOT_FOUND {
+        tracing::debug!("Resource not found, commit this task as cancelled");
+        Err(ResourceError::NotFound)
+    } else if resp.status() == StatusCode::FORBIDDEN {
+        tracing::debug!("Resource is forbidden to be fetched, commit this task as cancelled");
+        Err(ResourceError::ForbiddenStatus)
+    } else {
+        let resp: ErrorMsg = resp
+            .json()
+            .await
+            .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
+        Err(ResourceError::Other(Error::Custom(format!(
+            "Fetch resource info failed with error: {}",
+            resp.msg
+        ))))
+    }
+}
+
 async fn execute_task(
     task: WorkerTaskResp,
     task_executor: &mut TaskExecutor,
@@ -669,246 +819,82 @@ async fn execute_task(
     // Allow downloading resources for at most 30 minutes
     let timeout_until = tokio::time::Instant::now() + std::time::Duration::from_secs(1800);
     for resource in task.spec.resources {
-        match resource.remote_file {
-            RemoteResource::Artifact { uuid, content_type } => {
-                let content_serde_val = serde_json::to_value(content_type)?;
-                let content_serde_str = content_serde_val.as_str().unwrap_or("result");
-                task_executor.task_url.set_path(&format!(
-                    "workers/tasks/{uuid}/artifacts/{content_serde_str}"
-                ));
-            }
-            RemoteResource::Attachment { key } => {
-                let uuid = task.uuid;
+        match download_resource(task_executor, resource, &task.uuid, timeout_until).await {
+            Ok(()) => {}
+            // Shutdown while fetching — just stop; teardown reclaims the task.
+            Err(ResourceError::Cancelled) => return Ok(()),
+            // Connection error / unexpected status — surface as a hard error.
+            Err(ResourceError::Other(e)) => {
                 task_executor
-                    .task_url
-                    .set_path(&format!("workers/tasks/{uuid}/attachments/{key}"));
+                    .announce_task_state_ex(
+                        &task.uuid,
+                        TaskExecState::FetchResourceError as i32,
+                        60,
+                    )
+                    .await;
+                return Err(e);
             }
-        };
-        let resp = loop {
-            match task_executor
-                .task_client
-                .get(task_executor.task_url.as_str())
-                .bearer_auth(&task_executor.task_credential)
-                .send()
-                .await
-            {
-                Ok(resp) => break resp,
-                Err(e) => {
-                    if e.is_connect() && e.is_request() {
-                        tracing::error!(
-                            "Fetch resource info failed with connection error: {}. Retry after {:?}",
-                            e,
-                            task_executor.polling_interval
-                        );
-                        tokio::select! {
-                            biased;
-                            _ = task_executor.task_cancel_token.cancelled() => return Ok(()),
-                            _ = tokio::time::sleep(task_executor.polling_interval) => {},
-                            _ = tokio::time::sleep_until(timeout_until) => {
-                                tracing::debug!("Fetching resource timeout, commit this task as cancelled");
-                                let req = ReportTaskReq {
-                                    id: task.id,
-                                    op: ReportTaskOp::Cancel,
-                                };
-                                report_task(task_executor, req).await?;
-                                let req = ReportTaskReq {
-                                    id: task.id,
-                                    op: ReportTaskOp::Commit(TaskResultSpec {
-                                        exit_status: 0,
-                                        msg: Some(TaskResultMessage::FetchResourceTimeout),
-                                    }),
-                                };
-                                report_task(task_executor, req).await?;
-                                task_executor
-                                    .announce_task_state_ex(
-                                        &task.uuid,
-                                        TaskExecState::FetchResourceTimeout as i32,
-                                        60,
-                                    )
-                                    .await;
-                                task_executor
-                                    .announce_task_state_ex(
-                                        &task.uuid,
-                                        TaskExecState::TaskCommitted as i32,
-                                        60,
-                                    )
-                                    .await;
-                                return Ok(());
-                            }
-                        }
-                        continue;
-                    } else {
-                        task_executor
-                            .announce_task_state_ex(
-                                &task.uuid,
-                                TaskExecState::FetchResourceError as i32,
-                                60,
-                            )
-                            .await;
-                        return Err(RequestError::from(e).into());
-                    }
-                }
+            Err(ResourceError::NotFound) => {
+                report_cancel_commit(task_executor, task.id, TaskResultMessage::ResourceNotFound)
+                    .await?;
+                task_executor
+                    .announce_task_state_ex(
+                        &task.uuid,
+                        TaskExecState::FetchResourceNotFound as i32,
+                        60,
+                    )
+                    .await;
+                task_executor
+                    .announce_task_state_ex(&task.uuid, TaskExecState::TaskCommitted as i32, 60)
+                    .await;
+                return Ok(());
             }
-        };
-        if resp.status().is_success() {
-            let download_resp = resp
-                .json::<RemoteResourceDownloadResp>()
-                .await
-                .map_err(RequestError::from)?;
-            let local_path = task_executor
-                .task_cache_path
-                .join("resource")
-                .join(resource.local_path);
-            tokio::select! {
-                biased;
-                res = download_file(&task_executor.task_client, &download_resp, local_path, false) => {
-                    if let Err(e) = res {
-                        tracing::error!("Failed to download resource: {}", e);
-                        let req = ReportTaskReq {
-                            id: task.id,
-                            op: ReportTaskOp::Cancel,
-                        };
-                        report_task(task_executor, req).await?;
-                        let req = ReportTaskReq {
-                            id: task.id,
-                            op: ReportTaskOp::Commit(TaskResultSpec {
-                                exit_status: 0,
-                                msg: Some(TaskResultMessage::ResourceForbidden),
-                            }),
-                        };
-                        report_task(task_executor, req).await?;
-                        task_executor
-                            .announce_task_state(
-                                &task.uuid,
-                                TaskExecState::FetchResourceForbidden as i32,
-                            )
-                            .await;
-                        task_executor
-                            .announce_task_state_ex(
-                                &task.uuid,
-                                TaskExecState::TaskCommitted as i32,
-                                60,
-                            )
-                            .await;
-                        return Ok(());
-                    }
-                }
-                _ = task_executor.task_cancel_token.cancelled() => return Ok(()),
-                _ = tokio::time::sleep(std::time::Duration::from_secs(120)) => {
-                    tracing::debug!("Fetching resource timeout, commit this task as cancelled");
-                    let req = ReportTaskReq {
-                        id: task.id,
-                        op: ReportTaskOp::Cancel,
-                    };
-                    report_task(task_executor, req).await?;
-                    let req = ReportTaskReq {
-                        id: task.id,
-                        op: ReportTaskOp::Commit(TaskResultSpec {
-                            exit_status: 0,
-                            msg: Some(TaskResultMessage::FetchResourceTimeout),
-                        }),
-                    };
-                    report_task(task_executor, req).await?;
-                    task_executor
-                        .announce_task_state_ex(
-                            &task.uuid,
-                            TaskExecState::FetchResourceTimeout as i32,
-                            60,
-                        )
-                        .await;
-                    task_executor
-                        .announce_task_state_ex(&task.uuid, TaskExecState::TaskCommitted as i32, 60)
-                        .await;
-                    return Ok(());
-                }
-                _ = tokio::time::sleep_until(timeout_until) => {
-                    tracing::debug!("Fetching resource timeout, commit this task as cancelled");
-                    let req = ReportTaskReq {
-                        id: task.id,
-                        op: ReportTaskOp::Cancel,
-                    };
-                    report_task(task_executor, req).await?;
-                    let req = ReportTaskReq {
-                        id: task.id,
-                        op: ReportTaskOp::Commit(TaskResultSpec {
-                            exit_status: 0,
-                            msg: Some(TaskResultMessage::FetchResourceTimeout),
-                        }),
-                    };
-                    report_task(task_executor, req).await?;
-                    task_executor
-                        .announce_task_state_ex(
-                            &task.uuid,
-                            TaskExecState::FetchResourceTimeout as i32,
-                            60,
-                        )
-                        .await;
-                    task_executor
-                        .announce_task_state_ex(&task.uuid, TaskExecState::TaskCommitted as i32, 60)
-                        .await;
-                    return Ok(());
-                }
+            Err(ResourceError::ForbiddenStatus) => {
+                report_cancel_commit(task_executor, task.id, TaskResultMessage::ResourceForbidden)
+                    .await?;
+                task_executor
+                    .announce_task_state_ex(
+                        &task.uuid,
+                        TaskExecState::FetchResourceForbidden as i32,
+                        60,
+                    )
+                    .await;
+                task_executor
+                    .announce_task_state_ex(&task.uuid, TaskExecState::TaskCommitted as i32, 60)
+                    .await;
+                return Ok(());
             }
-        } else if resp.status() == StatusCode::NOT_FOUND {
-            tracing::debug!("Resource not found, commit this task as cancelled");
-            let req = ReportTaskReq {
-                id: task.id,
-                op: ReportTaskOp::Cancel,
-            };
-            report_task(task_executor, req).await?;
-            let req = ReportTaskReq {
-                id: task.id,
-                op: ReportTaskOp::Commit(TaskResultSpec {
-                    exit_status: 0,
-                    msg: Some(TaskResultMessage::ResourceNotFound),
-                }),
-            };
-            report_task(task_executor, req).await?;
-            task_executor
-                .announce_task_state_ex(&task.uuid, TaskExecState::FetchResourceNotFound as i32, 60)
-                .await;
-            task_executor
-                .announce_task_state_ex(&task.uuid, TaskExecState::TaskCommitted as i32, 60)
-                .await;
-            return Ok(());
-        } else if resp.status() == StatusCode::FORBIDDEN {
-            tracing::debug!("Resource is forbidden to be fetched, commit this task as cancelled");
-            let req = ReportTaskReq {
-                id: task.id,
-                op: ReportTaskOp::Cancel,
-            };
-            report_task(task_executor, req).await?;
-            let req = ReportTaskReq {
-                id: task.id,
-                op: ReportTaskOp::Commit(TaskResultSpec {
-                    exit_status: 0,
-                    msg: Some(TaskResultMessage::ResourceForbidden),
-                }),
-            };
-            report_task(task_executor, req).await?;
-            task_executor
-                .announce_task_state_ex(
-                    &task.uuid,
-                    TaskExecState::FetchResourceForbidden as i32,
-                    60,
+            Err(ResourceError::DownloadFailed) => {
+                report_cancel_commit(task_executor, task.id, TaskResultMessage::ResourceForbidden)
+                    .await?;
+                // Preserve the original no-expiry announce for this case.
+                task_executor
+                    .announce_task_state(&task.uuid, TaskExecState::FetchResourceForbidden as i32)
+                    .await;
+                task_executor
+                    .announce_task_state_ex(&task.uuid, TaskExecState::TaskCommitted as i32, 60)
+                    .await;
+                return Ok(());
+            }
+            Err(ResourceError::Timeout) => {
+                report_cancel_commit(
+                    task_executor,
+                    task.id,
+                    TaskResultMessage::FetchResourceTimeout,
                 )
-                .await;
-            task_executor
-                .announce_task_state_ex(&task.uuid, TaskExecState::TaskCommitted as i32, 60)
-                .await;
-            return Ok(());
-        } else {
-            let resp: ErrorMsg = resp
-                .json()
-                .await
-                .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
-            task_executor
-                .announce_task_state_ex(&task.uuid, TaskExecState::FetchResourceError as i32, 60)
-                .await;
-            return Err(Error::Custom(format!(
-                "Fetch resource info failed with error: {}",
-                resp.msg
-            )));
+                .await?;
+                task_executor
+                    .announce_task_state_ex(
+                        &task.uuid,
+                        TaskExecState::FetchResourceTimeout as i32,
+                        60,
+                    )
+                    .await;
+                task_executor
+                    .announce_task_state_ex(&task.uuid, TaskExecState::TaskCommitted as i32, 60)
+                    .await;
+                return Ok(());
+            }
         }
     }
 

@@ -1,7 +1,7 @@
 //! Suite hook reporting (`POST /agents/suite/hook`).
 //!
 //! Append-only: a hook report is accepted even on a terminal run (run existence
-//! + agent ownership are checked, but not the non-terminal guard — a hook may
+//! and agent ownership are checked, but not the non-terminal guard — a hook may
 //! legitimately finish after a coordinator terminal, e.g. cleanup during a
 //! cancel). `Result` records the hook outcome in `suite_hook_executions`;
 //! `Upload` presigns an S3 PUT for a large log and tracks it in

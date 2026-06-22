@@ -258,9 +258,7 @@ pub async fn agent_report_task(
     let task = ActiveTasks::Entity::find_by_id(task_id)
         .one(&pool.db)
         .await?
-        .ok_or_else(|| {
-            Error::ApiError(ApiError::NotFound(format!("Task {task_id} not found")))
-        })?;
+        .ok_or_else(|| Error::ApiError(ApiError::NotFound(format!("Task {task_id} not found"))))?;
 
     // Verify the agent owns this task.
     match task.runner_uuid {

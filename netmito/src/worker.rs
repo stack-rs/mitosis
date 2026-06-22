@@ -46,19 +46,79 @@ pub struct MitoWorker {
     redis_client: Option<redis::Client>,
 }
 
-pub struct TaskExecutor {
+/// The seam between the task-execution core and the coordinator. The worker and
+/// the (future) agent each provide an impl; everything in `execute_task` /
+/// `process_task_result` / `download_resource` drives coordinator I/O through it.
+#[async_trait::async_trait]
+pub(crate) trait CoordinatorClient: Send {
+    /// POST a task report; returns the presigned upload URL for `Upload`, else None.
+    async fn report(&mut self, id: i64, op: ReportTaskOp) -> crate::error::Result<Option<String>>;
+    /// Authed GET for a task input artifact's presigned download info.
+    fn artifact_download_req(
+        &self,
+        uuid: Uuid,
+        content_type: ArtifactContentType,
+    ) -> reqwest::RequestBuilder;
+    /// Authed GET for a task input attachment's presigned download info.
+    fn attachment_download_req(&self, task_uuid: &Uuid, key: &str) -> reqwest::RequestBuilder;
+    /// Wait until `uuid` reaches `target` (worker: redis-or-poll; agent: poll).
+    async fn watch(&mut self, uuid: &Uuid, target: TaskExecState);
+    /// Whether a watch should be attempted at all (worker: has redis; agent: yes).
+    fn can_watch(&self) -> bool;
+    /// Clean up a watch subscription on abort (worker: redis unsubscribe; agent: no-op).
+    async fn unsubscribe(&mut self, uuid: &Uuid);
+    /// Announce a task exec-state (worker: redis set+publish; agent: no-op).
+    async fn announce_state(&mut self, uuid: &Uuid, state: i32, ex: Option<u64>);
+}
+
+/// Worker impl of [`CoordinatorClient`]: talks to the `workers/*` endpoints with
+/// the worker credential, and optionally to redis for live state.
+pub(crate) struct WorkerCoordinatorClient {
     pub(crate) task_client: Client,
     pub(crate) task_credential: String,
     pub(crate) task_url: Url,
     pub(crate) task_cancel_token: CancellationToken,
     pub(crate) coordinator_force_exit: Arc<AtomicBool>,
     pub(crate) polling_interval: std::time::Duration,
-    pub(crate) task_cache_path: PathBuf,
     pub(crate) task_redis_conn: Option<MultiplexedConnection>,
     pub(crate) task_redis_pubsub: Option<PubSub>,
 }
 
+/// Transport-agnostic execution context. Holds the shared bits the execution
+/// core needs plus the coordinator seam ([`CoordinatorClient`]).
+pub struct TaskExecutor {
+    pub(crate) task_cancel_token: CancellationToken,
+    pub(crate) coordinator_force_exit: Arc<AtomicBool>,
+    pub(crate) polling_interval: std::time::Duration,
+    pub(crate) task_cache_path: PathBuf,
+    /// Plain HTTP client for presigned S3 transfers (resource download / artifact upload).
+    pub(crate) http_client: Client,
+    pub(crate) client: Box<dyn CoordinatorClient>,
+}
+
 impl TaskExecutor {
+    async fn report(&mut self, id: i64, op: ReportTaskOp) -> crate::error::Result<Option<String>> {
+        self.client.report(id, op).await
+    }
+
+    async fn announce_task_state(&mut self, uuid: &Uuid, state: i32) {
+        self.client.announce_state(uuid, state, None).await
+    }
+
+    async fn announce_task_state_ex(&mut self, uuid: &Uuid, state: i32, ex: u64) {
+        self.client.announce_state(uuid, state, Some(ex)).await
+    }
+
+    async fn watch_task(&mut self, uuid: &Uuid, target: TaskExecState) {
+        self.client.watch(uuid, target).await
+    }
+
+    async fn unsubscribe_task_exec_state(&mut self, uuid: &Uuid) {
+        self.client.unsubscribe(uuid).await
+    }
+}
+
+impl WorkerCoordinatorClient {
     async fn set_task_state_ex(&mut self, uuid: &Uuid, state: i32, ex: u64) {
         if let Some(ref mut conn) = self.task_redis_conn {
             tracing::trace!("Set task state: {} -> {}", uuid, state);
@@ -176,12 +236,6 @@ impl TaskExecutor {
         }
     }
 
-    pub async fn subscribe_task_exec_state(&mut self, uuid: &Uuid) {
-        if let Some(pubsub) = self.task_redis_pubsub.as_mut() {
-            let _ = pubsub.subscribe(format!("task:{uuid}")).await;
-        }
-    }
-
     pub async fn unsubscribe_task_exec_state(&mut self, uuid: &Uuid) {
         if let Some(pubsub) = self.task_redis_pubsub.as_mut() {
             let _ = pubsub.unsubscribe(format!("task:{uuid}")).await;
@@ -267,6 +321,53 @@ impl TaskExecutor {
                     }
                 }
             }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CoordinatorClient for WorkerCoordinatorClient {
+    async fn report(&mut self, id: i64, op: ReportTaskOp) -> crate::error::Result<Option<String>> {
+        // Explicit path: disambiguate from this trait method (same name).
+        WorkerCoordinatorClient::report(self, id, op).await
+    }
+
+    fn artifact_download_req(
+        &self,
+        uuid: Uuid,
+        content_type: ArtifactContentType,
+    ) -> reqwest::RequestBuilder {
+        let ct = serde_json::to_value(content_type)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "result".to_owned());
+        let mut url = self.task_url.clone();
+        url.set_path(&format!("workers/tasks/{uuid}/artifacts/{ct}"));
+        self.task_client.get(url).bearer_auth(&self.task_credential)
+    }
+
+    fn attachment_download_req(&self, task_uuid: &Uuid, key: &str) -> reqwest::RequestBuilder {
+        let mut url = self.task_url.clone();
+        url.set_path(&format!("workers/tasks/{task_uuid}/attachments/{key}"));
+        self.task_client.get(url).bearer_auth(&self.task_credential)
+    }
+
+    async fn watch(&mut self, uuid: &Uuid, target: TaskExecState) {
+        self.watch_task(uuid, target).await
+    }
+
+    fn can_watch(&self) -> bool {
+        self.task_redis_conn.is_some() && self.task_redis_pubsub.is_some()
+    }
+
+    async fn unsubscribe(&mut self, uuid: &Uuid) {
+        self.unsubscribe_task_exec_state(uuid).await
+    }
+
+    async fn announce_state(&mut self, uuid: &Uuid, state: i32, ex: Option<u64>) {
+        match ex {
+            Some(ex) => self.announce_task_state_ex(uuid, state, ex).await,
+            None => self.announce_task_state(uuid, state).await,
         }
     }
 }
@@ -393,16 +494,23 @@ impl MitoWorker {
         } else {
             None
         };
-        TaskExecutor {
+        let client = WorkerCoordinatorClient {
             task_client: self.http_client.clone(),
             task_credential: self.credential.clone(),
             task_url: self.config.coordinator_addr.clone(),
             task_cancel_token: self.cancel_token.clone(),
             coordinator_force_exit: self.coordinator_force_exit.clone(),
             polling_interval: self.config.polling_interval,
-            task_cache_path: self.cache_path.clone(),
             task_redis_conn,
             task_redis_pubsub,
+        };
+        TaskExecutor {
+            task_cancel_token: self.cancel_token.clone(),
+            coordinator_force_exit: self.coordinator_force_exit.clone(),
+            polling_interval: self.config.polling_interval,
+            task_cache_path: self.cache_path.clone(),
+            http_client: self.http_client.clone(),
+            client: Box::new(client),
         }
     }
 
@@ -463,16 +571,20 @@ impl MitoWorker {
             }
         });
         let mut task_executor = self.get_task_executor().await;
+        // The fetch loop is worker-specific (the agent batch-fetches from a suite
+        // instead), so it keeps its own transport rather than going through the seam.
+        let fetch_client = self.http_client.clone();
+        let fetch_credential = self.credential.clone();
+        let mut fetch_url = self.config.coordinator_addr.clone();
         let task_hd = tokio::spawn(async move {
             loop {
                 if task_executor.task_cancel_token.is_cancelled() {
                     break;
                 }
-                task_executor.task_url.set_path("workers/tasks");
-                let resp = task_executor
-                    .task_client
-                    .get(task_executor.task_url.as_str())
-                    .bearer_auth(&task_executor.task_credential)
+                fetch_url.set_path("workers/tasks");
+                let resp = fetch_client
+                    .get(fetch_url.as_str())
+                    .bearer_auth(&fetch_credential)
                     .send()
                     .await;
                 match resp {
@@ -716,29 +828,18 @@ async fn download_resource(
     task_uuid: &Uuid,
     timeout_until: Instant,
 ) -> std::result::Result<(), ResourceError> {
-    match resource.remote_file {
-        RemoteResource::Artifact { uuid, content_type } => {
-            let content_serde_val =
-                serde_json::to_value(content_type).map_err(|e| ResourceError::Other(e.into()))?;
-            let content_serde_str = content_serde_val.as_str().unwrap_or("result");
-            task_executor.task_url.set_path(&format!(
-                "workers/tasks/{uuid}/artifacts/{content_serde_str}"
-            ));
-        }
-        RemoteResource::Attachment { key } => {
-            task_executor
-                .task_url
-                .set_path(&format!("workers/tasks/{task_uuid}/attachments/{key}"));
-        }
-    };
     let resp = loop {
-        match task_executor
-            .task_client
-            .get(task_executor.task_url.as_str())
-            .bearer_auth(&task_executor.task_credential)
-            .send()
-            .await
-        {
+        // The request (URL + credential) is the only worker/agent-specific part;
+        // the retry / timeout / status orchestration below is shared.
+        let req = match &resource.remote_file {
+            RemoteResource::Artifact { uuid, content_type } => task_executor
+                .client
+                .artifact_download_req(*uuid, *content_type),
+            RemoteResource::Attachment { key } => task_executor
+                .client
+                .attachment_download_req(task_uuid, key.as_str()),
+        };
+        match req.send().await {
             Ok(resp) => break resp,
             Err(e) => {
                 if e.is_connect() && e.is_request() {
@@ -774,7 +875,7 @@ async fn download_resource(
             .join(resource.local_path);
         tokio::select! {
             biased;
-            res = download_file(&task_executor.task_client, &download_resp, local_path, false) => {
+            res = download_file(&task_executor.http_client, &download_resp, local_path, false) => {
                 if let Err(e) = res {
                     tracing::error!("Failed to download resource: {}", e);
                     return Err(ResourceError::DownloadFailed);
@@ -902,7 +1003,7 @@ async fn execute_task(
         task.exec_options.as_ref().and_then(|opts| opts.watch)
     {
         // Watch other tasks to specified state to trigger this task
-        if task_executor.task_redis_conn.is_some() && task_executor.task_redis_pubsub.is_some() {
+        if task_executor.client.can_watch() {
             task_executor
                 .announce_task_state(&task.uuid, TaskExecState::Watch as i32)
                 .await;
@@ -1321,7 +1422,7 @@ async fn process_task_result(
                     )
                     .await?;
                     let upload_file = task_executor
-                        .task_client
+                        .http_client
                         .put(url.as_str())
                         .header(CONTENT_LENGTH, content_length)
                         .body(file)

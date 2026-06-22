@@ -905,12 +905,16 @@ impl AgentClient {
     async fn report_task(
         &self,
         run: i64,
-        task_uuid: Uuid,
+        task_id: i64,
         op: ReportTaskOp,
     ) -> crate::error::Result<Option<String>> {
-        let url = self.api_url(&format!("api/agents/tasks/{}/report", task_uuid));
+        let url = self.api_url("api/agents/tasks/report");
 
-        let req = ReportAgentTaskReq { run, op };
+        let req = ReportAgentTaskReq {
+            run,
+            id: task_id,
+            op,
+        };
 
         let resp = self
             .http_client
@@ -930,11 +934,11 @@ impl AgentClient {
             )));
         }
 
-        let presigned_url: Option<String> = resp.json().await.map_err(|e| {
+        let report_resp: ReportTaskResp = resp.json().await.map_err(|e| {
             error::Error::Custom(format!("Failed to parse report task response: {}", e))
         })?;
 
-        Ok(presigned_url)
+        Ok(report_resp.url)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1039,7 +1043,7 @@ impl AgentClient {
                 tracing::info!("FAKE: executing task {} | spec={:?}", task.uuid, task.spec);
 
                 // Mark task as started (→ Finished, awaiting Commit)
-                if let Err(e) = self.report_task(run, task.uuid, ReportTaskOp::Finish).await {
+                if let Err(e) = self.report_task(run, task.id, ReportTaskOp::Finish).await {
                     tracing::error!("Failed to report Finish for task {}: {}", task.uuid, e);
                     tasks_failed += 1;
                     continue;
@@ -1051,7 +1055,7 @@ impl AgentClient {
                     msg: None,
                 };
                 match self
-                    .report_task(run, task.uuid, ReportTaskOp::Commit(result))
+                    .report_task(run, task.id, ReportTaskOp::Commit(result))
                     .await
                 {
                     Ok(_) => {

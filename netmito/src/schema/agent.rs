@@ -324,12 +324,15 @@ pub struct FetchTasksResp {
     pub tasks: Vec<WorkerTaskResp>,
 }
 
-/// Request to report task execution result
-/// The task UUID is provided in the URL path (`/agents/tasks/{uuid}/report`).
+/// Request to report task execution result.
+/// POST /agents/tasks/report — mirrors the worker's `ReportTaskReq{id, op}`,
+/// with the suite `run` handle as the only agent-specific addition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportAgentTaskReq {
     /// Opaque run handle from `AcceptSuiteResp` — the run this task belongs to.
     pub run: i64,
+    /// Internal id of the task being reported (from the fetched `WorkerTaskResp`).
+    pub id: i64,
     /// Operation to perform
     pub op: ReportTaskOp,
 }

@@ -41,7 +41,7 @@ pub fn agents_router(st: InfraPool) -> Router<InfraPool> {
         .route("/suite/cleanup", post(enter_cleanup))
         .route("/suite/hook", post(report_hook))
         .route("/tasks/fetch", post(fetch_tasks))
-        .route("/tasks/{uuid}/report", post(report_task))
+        .route("/tasks/report", post(report_task))
         .route("/tasks/{uuid}", get(query_task))
         .route(
             "/tasks/{uuid}/artifacts/{content_type}",
@@ -195,17 +195,17 @@ async fn fetch_tasks(
     Ok(Json(resp))
 }
 
-/// POST /agents/tasks/{uuid}/report - Report the result of an agent-executed task
+/// POST /agents/tasks/report - Report the result of an agent-executed task.
+/// Mirrors the worker `POST workers/tasks` (id in body), plus the `run` handle.
 async fn report_task(
     Extension(m): Extension<AuthAgent>,
     State(pool): State<InfraPool>,
-    Path(uuid): Path<uuid::Uuid>,
     Json(req): Json<ReportAgentTaskReq>,
-) -> Result<Json<Option<String>>, ApiError> {
-    let presigned_url = agent_task::agent_report_task(m.uuid, req.run, uuid, req.op, &pool)
+) -> Result<Json<ReportTaskResp>, ApiError> {
+    let url = agent_task::agent_report_task(m.uuid, req.run, req.id, req.op, &pool)
         .await
         .map_err(map_service_error)?;
-    Ok(Json(presigned_url))
+    Ok(Json(ReportTaskResp { url }))
 }
 
 /// GET /agents/tasks/{uuid}

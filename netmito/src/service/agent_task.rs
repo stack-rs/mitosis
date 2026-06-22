@@ -237,12 +237,12 @@ pub async fn agent_fetch_tasks(
 
 /// Report the result of a task executed by an agent.
 ///
-/// The task is looked up by its UUID; ownership is verified by checking that
-/// `runner_uuid == agent_uuid`.
+/// The task is looked up by its internal `id` (mirroring the worker report path);
+/// ownership is verified by checking that `runner_uuid == agent_uuid`.
 pub async fn agent_report_task(
     agent_uuid: Uuid,
     run: i64,
-    task_uuid: Uuid,
+    task_id: i64,
     op: ReportTaskOp,
     pool: &InfraPool,
 ) -> Result<Option<String>> {
@@ -255,12 +255,11 @@ pub async fn agent_report_task(
     agent_run::reject_if_terminal(&run_row)?;
 
     // Find the task in active_tasks.
-    let task = ActiveTasks::Entity::find()
-        .filter(ActiveTasks::Column::Uuid.eq(task_uuid))
+    let task = ActiveTasks::Entity::find_by_id(task_id)
         .one(&pool.db)
         .await?
         .ok_or_else(|| {
-            Error::ApiError(ApiError::NotFound(format!("Task {task_uuid} not found")))
+            Error::ApiError(ApiError::NotFound(format!("Task {task_id} not found")))
         })?;
 
     // Verify the agent owns this task.
@@ -268,7 +267,7 @@ pub async fn agent_report_task(
         Some(rid) if rid == agent_uuid => {}
         _ => {
             return Err(Error::ApiError(ApiError::NotFound(format!(
-                "Task {task_uuid} not found"
+                "Task {task_id} not found"
             ))))
         }
     }
@@ -278,7 +277,7 @@ pub async fn agent_report_task(
         // Finish: mark as Finished, to be archived later via Commit.
         // ──────────────────────────────────────────────────────────────────
         ReportTaskOp::Finish => {
-            tracing::debug!(agent_uuid = %agent_uuid, task_uuid = %task_uuid, "Agent finish task");
+            tracing::debug!(agent_uuid = %agent_uuid, task_uuid = %task.uuid, "Agent finish task");
             ActiveTasks::Entity::update_many()
                 .col_expr(ActiveTasks::Column::State, Expr::value(TaskState::Finished))
                 .col_expr(ActiveTasks::Column::UpdatedAt, Expr::value(now))
@@ -293,7 +292,7 @@ pub async fn agent_report_task(
         // If the task is already Cancelled (user-cancelled), this is a no-op.
         // ──────────────────────────────────────────────────────────────────
         ReportTaskOp::Cancel => {
-            tracing::debug!(agent_uuid = %agent_uuid, task_uuid = %task_uuid, "Agent cancel task");
+            tracing::debug!(agent_uuid = %agent_uuid, task_uuid = %task.uuid, "Agent cancel task");
             if task.state == TaskState::Cancelled {
                 // Already cancelled (e.g., user cancelled while agent was working).
                 // Acknowledge gracefully.
@@ -315,7 +314,7 @@ pub async fn agent_report_task(
         // and, for suite tasks, update suite counters + state.
         // ──────────────────────────────────────────────────────────────────
         ReportTaskOp::Commit(res) => {
-            tracing::debug!(agent_uuid = %agent_uuid, task_uuid = %task_uuid, "Agent commit task");
+            tracing::debug!(agent_uuid = %agent_uuid, task_uuid = %task.uuid, "Agent commit task");
 
             if task.state != TaskState::Finished && task.state != TaskState::Cancelled {
                 return Err(Error::ApiError(ApiError::InvalidRequest(

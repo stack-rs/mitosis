@@ -27,7 +27,7 @@ use crate::entity::state::{AgentState, TaskExecState};
 use crate::error;
 use crate::schema::*;
 use crate::service::auth::cred::get_user_credential;
-use crate::worker::CoordinatorClient;
+use crate::executor::CoordinatorClient;
 
 pub struct MitoAgent;
 

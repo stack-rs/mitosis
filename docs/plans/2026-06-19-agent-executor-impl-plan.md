@@ -1,8 +1,13 @@
 # Agent-Controlled Worker Execution — Implementation Plan (working note)
 
-**Date:** 2026-06-19
-**Status:** Plan agreed; ready to implement.
+**Date:** 2026-06-19 (last updated 2026-06-23)
 **Goal:** Replace the agent's `fake_suite_execution` with real execution. The agent manages an **in-process pool of executors** that run the suite's tasks (and hooks) by **reusing the worker's execution core**, reporting to the coordinator via the **agent endpoints** with the **run handle**. The agent stays the only coordinator-facing party, so the run/suite accounting built in Part A is preserved.
+
+> ### ⏩ RESUME HERE (2026-06-23)
+> **Done & cargo-clean:** Phase 0 (agent coordinator endpoints) · Phase 1 (the `CoordinatorClient` seam: steps A1–A3 + B, consolidated) · the `executor` module extraction · Phase 2 (`AgentCoordinatorClient`). Compiles with only expected dead-code warnings on `AgentCoordinatorClient` (unwired until Phase 3).
+> **Not yet committed:** the `executor`-module extraction may be uncommitted — check `git status` first.
+> **Next: Phase 3** (the agent executor pool — see that section below; prereqs all done). Then Phase 4 (real hooks + `SuiteRunOutcome::Failed` + 409→Idle), then Phase 5 (deferred redis/cpu_binding).
+> **Regression gate:** worker behavior is preserved by construction (the refactor was a pure relocation + behavior-preserving sub-steps) but has **not been run** — a worker smoke-test is the gate before relying on the seam.
 
 > This is a working checklist so we don't drop pieces mid-way. Delete once the work lands.
 
@@ -81,19 +86,31 @@ Done as compiling, behavior-preserving sub-steps (regression gate = worker smoke
 - `WorkerCoordinatorClient` owns the transport (+redis) and holds the real impl. `TaskExecutor` = shared context (`cancel_token`, `force_exit`, `polling_interval`, `cache_path`, `http_client`) + `Box<dyn CoordinatorClient>`, with thin delegating wrappers so `execute_task` is unchanged. The run-loop fetch is worker-specific and keeps its own transport.
 - **Endpoint symmetry fix (prereq):** the agent `report` endpoint was aligned to the worker's — `POST /agents/tasks/report` with body `ReportAgentTaskReq{run, id, op}` → `Json<ReportTaskResp>`, lookup by `find_by_id`. So `report(id, op)` is uniform across both impls (no uuid threading / `set_current_task`).
 
-### Phase 2 — `AgentCoordinatorClient` impl — **NEXT**
-- `AgentCoordinatorClient { http_client, agent_token, coordinator_url, run: i64 }` (the `run` is fixed for the executor's lifetime).
-- `report(id, op)` → `POST /agents/tasks/report { run, id, op }`; surface a `409` ("run closed") so the executor loop can stop (Phase 3/4).
-- `artifact_download_req`/`attachment_download_req` → the Phase-0 `GET /agents/tasks/{uuid}/artifacts|attachments`.
-- `watch(uuid, target)` → **poll-only** (`GET /agents/tasks/{uuid}` + `is_reach`, no redis); `can_watch` → `true`; `unsubscribe`/`announce_state` → no-op.
+### Extracting the shared core — `executor` module — **DONE (2026-06-23)**
+The seam now lives in its own module rather than in `worker.rs`. Code layout:
+- **`netmito/src/executor.rs`** (`pub(crate) mod executor;`) — the **transport-agnostic core**: the `CoordinatorClient` trait, `TaskExecutor` (`{ task_cancel_token, coordinator_force_exit, polling_interval, task_cache_path, http_client, client: Box<dyn CoordinatorClient> }` + delegating wrappers), `pub(crate) execute_task`, `process_task_result`, `download_resource` + `ResourceError`/`report_cancel_commit`/`report_task`/`submit_new_task_if_present`, `ProcessOutput`/`TaskResult`.
+- **`worker.rs`** — `MitoWorker`, `WorkerCoordinatorClient` (`impl CoordinatorClient`, owns transport + redis), the run loop (worker-specific fetch keeps its own transport), and the worker-specific `query_task` (hardcodes `workers/tasks/{uuid}`, used by `WorkerCoordinatorClient::watch`).
+- **`agent.rs`** — `AgentCoordinatorClient` (`impl CoordinatorClient`) + (Phase 3) the pool.
+- Move was a pure relocation (sed line-slice + `cargo fix` imports) → byte-identical logic; worker smoke-test still the gate.
 
-### Phase 3 — Agent executor pool (replace `fake_suite_execution`)
-- Spawn `worker_count` executors (async tasks).
-- A shared bounded channel of `WorkerTaskResp` fed by batch `agent_fetch_tasks` (prefetch sized by `task_prefetch_count`); **overlap fetch and execution** (no collect-then-process — per project concurrency guidance).
-- Each executor loop: pull task → `execute_task(reporter, ...)` → repeat until channel drained + no more tasks.
-- Per-slot cache dirs (`resource/`, `exec/`, `result/`) keyed by executor index.
-- Cancellation: `suite_cancelled` / preempt → cancel the pool token; drain in-flight gracefully (in-flight uncommitted tasks are reclaimed coordinator-side if needed).
-- Aggregate `(tasks_completed, tasks_failed)` for the `/complete` cross-check (coordinator counters remain authoritative).
+### Phase 2 — `AgentCoordinatorClient` impl — **DONE (2026-06-23)**
+`netmito/src/agent.rs`, `pub(crate) struct AgentCoordinatorClient { http_client, token, coordinator_addr, run: i64, polling_interval, cancel_token }`:
+- `report(id, op)` → `POST api/agents/tasks/report { run, id, op }`, parses `ReportTaskResp`; **`409` → `cancel_token.cancel()` + Ok(None)** (run closed → stop the pool); `404` → Ok(None); `Upload`+`403` → skip; connection-retry like the worker.
+- `artifact_download_req`/`attachment_download_req` → `GET api/agents/tasks/{uuid}/artifacts|attachments`.
+- `watch` → **poll-only** (`query_task` against `api/agents/tasks/{uuid}` + `is_reach`, 30s). `can_watch` → `true`; `unsubscribe`/`announce_state` → no-op.
+- **Watch design agreed:** redis-first, poll fallback, manually-disable-capable — agent is poll-only until the Phase-5 redis work; `can_watch` gates whether the watch-wait runs (worker: has-redis; agent: always). Caveat: agent poll resolves only *coarse* milestones; fine intra-exec watch targets time out until redis lands.
+- Currently **unwired** → dead-code warnings on `AgentCoordinatorClient`/`api_url`/`query_task`; they clear when Phase 3 constructs it.
+
+### Phase 3 — Agent executor pool (replace `fake_suite_execution`) — **NEXT (start here)**
+Prereqs already done: `execute_task` is `pub(crate)`; `executor` module exists; `AgentCoordinatorClient` exists.
+- In `agent.rs`, replace `fake_suite_execution` with a pool:
+  - Spawn `worker_count` executor tasks (from `suite.worker_schedule` `FixedWorkers`).
+  - A bounded `tokio::sync::mpsc` channel of `WorkerTaskResp`, fed by a producer that loops `agent_fetch_tasks(suite_uuid, batch=task_prefetch_count)` and sends; **overlap fetch & execution** (no collect-then-run).
+  - Each consumer builds `crate::executor::TaskExecutor { task_cancel_token: pool_token.clone(), coordinator_force_exit: <a dummy Arc<AtomicBool>>, polling_interval, task_cache_path: <per-slot dir>, http_client: self.http_client.clone(), client: Box::new(AgentCoordinatorClient{ run, cancel_token: pool_token.clone(), … }) }` and loops `recv → execute_task(task, &mut te)`.
+  - One pool `CancellationToken` shared into every `AgentCoordinatorClient` (so a `409` stops the whole pool) and cancelled on `self.suite_cancelled`/preempt.
+  - Per-slot cache dirs (`resource/`/`exec/`/`result/`) keyed by executor index — **note `TaskExecutor`/`execute_task` assume these dirs exist** (worker creates them in `setup`); the pool must `create_dir_all` per slot.
+  - Aggregate `(tasks_completed, tasks_failed)` for the `/complete` cross-check.
+- The agent must still call accept→`/start`→(execute)→`/cleanup`→`/complete` around the pool (currently `fake_suite_execution` is sandwiched between `start_suite` and `enter_cleanup_api` in `process_state`).
 
 ### Phase 4 — Real hooks + outcome (closes forward-looking Task 4 + Task 7)
 - Run provision / cleanup / background as **real processes** via the same exec core.

@@ -150,98 +150,10 @@ impl WorkerCoordinatorClient {
         }
     }
 
-    async fn announce_task_state(&mut self, uuid: &Uuid, state: i32) {
-        self.set_task_state(uuid, state).await;
-        self.publish_state(uuid, state).await;
-    }
+}
 
-    async fn announce_task_state_ex(&mut self, uuid: &Uuid, state: i32, ex: u64) {
-        self.set_task_state_ex(uuid, state, ex).await;
-        self.publish_state(uuid, state).await;
-    }
-
-    async fn watch_task(&mut self, uuid: &Uuid, state: TaskExecState) {
-        tracing::debug!("Watch task: {} -> {:?}", uuid, state);
-        let mut wait_until = Instant::now();
-        if let Some(pubsub) = self.task_redis_pubsub.as_mut() {
-            let channel_name = format!("task:{uuid}");
-            let _ = pubsub.subscribe(&channel_name).await;
-            let mut stream = pubsub.on_message();
-            loop {
-                tokio::select! {
-                    biased;
-                    msg = stream.next() => {
-                        if let Some(msg) = msg {
-                            if msg.get_channel_name() == channel_name {
-                                if let Ok(task_state) = msg.get_payload::<i32>() {
-                                    let cur_state = TaskExecState::from(task_state);
-                                    if cur_state.is_reach(&state) {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    _ = tokio::time::sleep_until(wait_until) => {
-                        wait_until = Instant::now() + std::time::Duration::from_secs(30);
-                        let cur_state = if let Some(ref mut conn) = self.task_redis_conn {
-                            tracing::trace!("Get task state: {}", uuid);
-                            let state: Result<i32, _> = conn.get(format!("task:{uuid}")).await;
-                            state.ok().map(TaskExecState::from)
-                        } else {
-                            None
-                        };
-                        if let Some(cur_state) = cur_state {
-                            if cur_state.is_reach(&state) {
-                                break;
-                            }
-                        }
-                        if let Some(task) = query_task(
-                            &self.task_client,
-                            &mut self.task_url,
-                            &self.task_credential,
-                            uuid,
-                        )
-                        .await
-                        {
-                            if task.info.state.is_reach(&state, task.info.result) {
-                                break;
-                            }
-                        }
-                    },
-                }
-            }
-        } else {
-            loop {
-                tokio::time::sleep_until(wait_until).await;
-                wait_until = Instant::now() + std::time::Duration::from_secs(30);
-                if let Some(cur_state) = self.get_task_state(uuid).await {
-                    if cur_state.is_reach(&state) {
-                        break;
-                    }
-                }
-                if let Some(task) = query_task(
-                    &self.task_client,
-                    &mut self.task_url,
-                    &self.task_credential,
-                    uuid,
-                )
-                .await
-                {
-                    if task.info.state.is_reach(&state, task.info.result) {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    pub async fn unsubscribe_task_exec_state(&mut self, uuid: &Uuid) {
-        if let Some(pubsub) = self.task_redis_pubsub.as_mut() {
-            let _ = pubsub.unsubscribe(format!("task:{uuid}")).await;
-        }
-    }
-
+#[async_trait::async_trait]
+impl CoordinatorClient for WorkerCoordinatorClient {
     /// POST a task report to the coordinator. Returns the presigned upload URL
     /// for an `Upload` op, `None` otherwise. Encapsulates the retry / cancel /
     /// auth-error handling shared by every report op — unifying the former
@@ -323,14 +235,6 @@ impl WorkerCoordinatorClient {
             }
         }
     }
-}
-
-#[async_trait::async_trait]
-impl CoordinatorClient for WorkerCoordinatorClient {
-    async fn report(&mut self, id: i64, op: ReportTaskOp) -> crate::error::Result<Option<String>> {
-        // Explicit path: disambiguate from this trait method (same name).
-        WorkerCoordinatorClient::report(self, id, op).await
-    }
 
     fn artifact_download_req(
         &self,
@@ -353,7 +257,79 @@ impl CoordinatorClient for WorkerCoordinatorClient {
     }
 
     async fn watch(&mut self, uuid: &Uuid, target: TaskExecState) {
-        self.watch_task(uuid, target).await
+        tracing::debug!("Watch task: {} -> {:?}", uuid, target);
+        let mut wait_until = Instant::now();
+        if let Some(pubsub) = self.task_redis_pubsub.as_mut() {
+            let channel_name = format!("task:{uuid}");
+            let _ = pubsub.subscribe(&channel_name).await;
+            let mut stream = pubsub.on_message();
+            loop {
+                tokio::select! {
+                    biased;
+                    msg = stream.next() => {
+                        if let Some(msg) = msg {
+                            if msg.get_channel_name() == channel_name {
+                                if let Ok(task_state) = msg.get_payload::<i32>() {
+                                    let cur_state = TaskExecState::from(task_state);
+                                    if cur_state.is_reach(&target) {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    _ = tokio::time::sleep_until(wait_until) => {
+                        wait_until = Instant::now() + std::time::Duration::from_secs(30);
+                        let cur_state = if let Some(ref mut conn) = self.task_redis_conn {
+                            tracing::trace!("Get task state: {}", uuid);
+                            let state: Result<i32, _> = conn.get(format!("task:{uuid}")).await;
+                            state.ok().map(TaskExecState::from)
+                        } else {
+                            None
+                        };
+                        if let Some(cur_state) = cur_state {
+                            if cur_state.is_reach(&target) {
+                                break;
+                            }
+                        }
+                        if let Some(task) = query_task(
+                            &self.task_client,
+                            &mut self.task_url,
+                            &self.task_credential,
+                            uuid,
+                        )
+                        .await
+                        {
+                            if task.info.state.is_reach(&target, task.info.result) {
+                                break;
+                            }
+                        }
+                    },
+                }
+            }
+        } else {
+            loop {
+                tokio::time::sleep_until(wait_until).await;
+                wait_until = Instant::now() + std::time::Duration::from_secs(30);
+                if let Some(cur_state) = self.get_task_state(uuid).await {
+                    if cur_state.is_reach(&target) {
+                        break;
+                    }
+                }
+                if let Some(task) = query_task(
+                    &self.task_client,
+                    &mut self.task_url,
+                    &self.task_credential,
+                    uuid,
+                )
+                .await
+                {
+                    if task.info.state.is_reach(&target, task.info.result) {
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     fn can_watch(&self) -> bool {
@@ -361,14 +337,17 @@ impl CoordinatorClient for WorkerCoordinatorClient {
     }
 
     async fn unsubscribe(&mut self, uuid: &Uuid) {
-        self.unsubscribe_task_exec_state(uuid).await
+        if let Some(pubsub) = self.task_redis_pubsub.as_mut() {
+            let _ = pubsub.unsubscribe(format!("task:{uuid}")).await;
+        }
     }
 
     async fn announce_state(&mut self, uuid: &Uuid, state: i32, ex: Option<u64>) {
         match ex {
-            Some(ex) => self.announce_task_state_ex(uuid, state, ex).await,
-            None => self.announce_task_state(uuid, state).await,
+            Some(ex) => self.set_task_state_ex(uuid, state, ex).await,
+            None => self.set_task_state(uuid, state).await,
         }
+        self.publish_state(uuid, state).await;
     }
 }
 

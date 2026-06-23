@@ -59,23 +59,33 @@ Phase 0 work — **ALL DONE (2026-06-20):**
 
 **Phase 0 complete — the agent has a coordinator endpoint for every execution-time interaction.**
 
-### Phase 1 — Carve the `TaskReporter` seam in `worker.rs` (NO behavior change)
-- Define a trait (object-safe or generic) capturing **all** of `execute_task`'s coordinator I/O, e.g.:
-  - `report(task, op: ReportTaskOp) -> Result<Option<String>>` (Finish/Cancel/Commit/Upload→presigned URL/Submit).
-  - `download_artifact(uuid, content_type) -> Result<RemoteResourceDownloadResp>`.
-  - `download_attachment(task_uuid, key) -> Result<RemoteResourceDownloadResp>`.
-  - `query_task_state(uuid) -> Result<(TaskState, Option<TaskResultSpec>)>` — for the redis-optional watch poll.
-  - `announce_state(uuid, state)` — default no-op (redis).
-  - (redis subscribe/watch stays available when the impl has redis; the worker impl keeps it.)
-- Refactor `execute_task` / `process_task_result` to drive I/O through the reporter instead of `task_url` directly, **including making the `watch` block redis-optional** (redis subscribe if present, else poll `query_task_state` + `is_reach`). Keep `TaskExecutor` for shared, transport-agnostic bits (cache paths, cancel token, polling interval, http client) — or fold them into the reporter; decide during impl, prefer the smaller diff.
-- The **worker's** reporter impl reproduces current behavior exactly (`workers/*`). 
-- **Regression gate:** standalone worker must build + behave unchanged (`cargo build`; ideally a quick real run).
+### Phase 1 — `CoordinatorClient` seam in `worker.rs` — **DONE (2026-06-23)**
 
-### Phase 2 — Agent reporter impl
-- `AgentTaskReporter { http_client, agent_token, coordinator_url, run: i64 }`.
-- `report` → `POST /agents/tasks/{uuid}/report { run, op }` (handles the 409 "run closed" case → surface so the loop can stop, see Phase 4).
-- `download_*` → the Phase-0 agent endpoints.
-- `announce_state` → no-op.
+Done as compiling, behavior-preserving sub-steps (regression gate = worker smoke-test, since it can't be run here):
+- **A1** — unified `report` (the `report_task` free fn + the inline upload-presign into one method returning `Option<String>`; preserves the `403`/cancel nuances).
+- **A2** — extracted `download_resource` (pure I/O + resilience) returning a typed `ResourceError`; the per-status task-commit policy moved to `execute_task`'s match; the `Cancel`+`Commit` ritual became `report_cancel_commit`.
+- **A3** — deduped the watch poll into the `query_task` free fn (disjoint-field args to dodge the redis-pubsub borrow).
+- **B** — the trait split, on **`Box<dyn CoordinatorClient>`** + `async-trait`:
+
+```rust
+#[async_trait] pub(crate) trait CoordinatorClient: Send {
+    async fn report(&mut self, id: i64, op: ReportTaskOp) -> Result<Option<String>>;   // id-based (worker & agent symmetric)
+    fn artifact_download_req(&self, uuid, ct) -> reqwest::RequestBuilder;               // shared download_resource uses these
+    fn attachment_download_req(&self, task_uuid, key) -> reqwest::RequestBuilder;
+    async fn watch(&mut self, uuid, target);                                           // worker: redis-or-poll; agent: poll-only
+    fn can_watch(&self) -> bool;                                                        // worker: has redis; agent: true
+    async fn unsubscribe(&mut self, uuid);                                             // worker: redis; agent: no-op
+    async fn announce_state(&mut self, uuid, state, ex: Option<u64>);                  // worker: redis; agent: no-op
+}
+```
+- `WorkerCoordinatorClient` owns the transport (+redis) and holds the real impl. `TaskExecutor` = shared context (`cancel_token`, `force_exit`, `polling_interval`, `cache_path`, `http_client`) + `Box<dyn CoordinatorClient>`, with thin delegating wrappers so `execute_task` is unchanged. The run-loop fetch is worker-specific and keeps its own transport.
+- **Endpoint symmetry fix (prereq):** the agent `report` endpoint was aligned to the worker's — `POST /agents/tasks/report` with body `ReportAgentTaskReq{run, id, op}` → `Json<ReportTaskResp>`, lookup by `find_by_id`. So `report(id, op)` is uniform across both impls (no uuid threading / `set_current_task`).
+
+### Phase 2 — `AgentCoordinatorClient` impl — **NEXT**
+- `AgentCoordinatorClient { http_client, agent_token, coordinator_url, run: i64 }` (the `run` is fixed for the executor's lifetime).
+- `report(id, op)` → `POST /agents/tasks/report { run, id, op }`; surface a `409` ("run closed") so the executor loop can stop (Phase 3/4).
+- `artifact_download_req`/`attachment_download_req` → the Phase-0 `GET /agents/tasks/{uuid}/artifacts|attachments`.
+- `watch(uuid, target)` → **poll-only** (`GET /agents/tasks/{uuid}` + `is_reach`, no redis); `can_watch` → `true`; `unsubscribe`/`announce_state` → no-op.
 
 ### Phase 3 — Agent executor pool (replace `fake_suite_execution`)
 - Spawn `worker_count` executors (async tasks).

@@ -10,18 +10,24 @@
 
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
+use reqwest::StatusCode;
 use speedy::{Readable, Writable};
+use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use url::Url;
 use uuid::Uuid;
 
 use crate::config::{AgentConfig, AgentConfigCli};
-use crate::entity::state::AgentState;
+use crate::entity::content::ArtifactContentType;
+use crate::entity::state::{AgentState, TaskExecState};
 use crate::error;
 use crate::schema::*;
 use crate::service::auth::cred::get_user_credential;
+use crate::worker::CoordinatorClient;
 
 pub struct MitoAgent;
 
@@ -1095,4 +1101,176 @@ impl AgentClient {
         tracing::info!("=== FAKE: Environment cleanup completed ===");
         Ok(())
     }
+}
+
+/// Agent impl of [`CoordinatorClient`]: talks to the `agents/*` endpoints with
+/// the agent token and the fixed suite `run` handle. It has no redis, so
+/// `announce_state`/`unsubscribe` are no-ops and `watch` polls. Used by the
+/// agent's executor pool to drive the shared `execute_task` core.
+pub(crate) struct AgentCoordinatorClient {
+    http_client: reqwest::Client,
+    token: String,
+    coordinator_addr: Url,
+    /// Suite run handle, fixed for this executor's lifetime; sent with every report.
+    run: i64,
+    polling_interval: Duration,
+    /// Cancelled when the run is observed closed (a report returns 409), so the
+    /// agent's executor pool can stop.
+    cancel_token: CancellationToken,
+}
+
+impl AgentCoordinatorClient {
+    fn api_url(&self, path: &str) -> Url {
+        let mut url = self.coordinator_addr.clone();
+        url.set_path(path);
+        url
+    }
+
+    /// GET a task's current state (the watch poll). `None` on any error (logged).
+    async fn query_task(&self, uuid: &Uuid) -> Option<TaskQueryResp> {
+        let url = self.api_url(&format!("api/agents/tasks/{uuid}"));
+        match self
+            .http_client
+            .get(url.as_str())
+            .bearer_auth(&self.token)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    resp.json::<TaskQueryResp>().await.ok()
+                } else {
+                    let resp: error::ErrorMsg = resp
+                        .json()
+                        .await
+                        .unwrap_or_else(|e| error::ErrorMsg { msg: e.to_string() });
+                    tracing::error!("Get task failed with error: {}", resp.msg);
+                    None
+                }
+            }
+            Err(e) => {
+                tracing::error!("Get task failed with error: {}", e);
+                None
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl CoordinatorClient for AgentCoordinatorClient {
+    async fn report(&mut self, id: i64, op: ReportTaskOp) -> crate::error::Result<Option<String>> {
+        let is_upload = matches!(op, ReportTaskOp::Upload { .. });
+        let req = ReportAgentTaskReq {
+            run: self.run,
+            id,
+            op,
+        };
+        let url = self.api_url("api/agents/tasks/report");
+        loop {
+            let resp = self
+                .http_client
+                .post(url.as_str())
+                .bearer_auth(&self.token)
+                .json(&req)
+                .send()
+                .await;
+            match resp {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        let resp = resp
+                            .json::<ReportTaskResp>()
+                            .await
+                            .map_err(error::RequestError::from)?;
+                        return Ok(resp.url);
+                    } else if resp.status() == StatusCode::CONFLICT {
+                        // The run is terminal/closed — further reports are pointless.
+                        // Signal the pool to stop, and treat this as "task gone".
+                        tracing::info!("Report rejected: run {} is closed", self.run);
+                        self.cancel_token.cancel();
+                        return Ok(None);
+                    } else if resp.status() == StatusCode::NOT_FOUND {
+                        tracing::debug!("Task not found, ignore and go on for next cycle");
+                        return Ok(None);
+                    } else if is_upload && resp.status() == StatusCode::FORBIDDEN {
+                        let resp: error::ErrorMsg = resp
+                            .json()
+                            .await
+                            .unwrap_or_else(|e| error::ErrorMsg { msg: e.to_string() });
+                        tracing::info!("Request upload url failed with permission denied: {}", resp.msg);
+                        return Ok(None);
+                    } else {
+                        let resp: error::ErrorMsg = resp
+                            .json()
+                            .await
+                            .unwrap_or_else(|e| error::ErrorMsg { msg: e.to_string() });
+                        if is_upload {
+                            self.cancel_token.cancel();
+                        }
+                        return Err(error::Error::Custom(format!(
+                            "Report task failed with error: {}",
+                            resp.msg
+                        )));
+                    }
+                }
+                Err(e) => {
+                    if e.is_connect() && e.is_request() {
+                        tracing::error!(
+                            "Report task failed with connection error: {}. Retry after {:?}",
+                            e,
+                            self.polling_interval
+                        );
+                        tokio::select! {
+                            biased;
+                            _ = self.cancel_token.cancelled() => return Ok(None),
+                            _ = tokio::time::sleep(self.polling_interval) => {},
+                        }
+                        continue;
+                    } else {
+                        return Err(error::RequestError::from(e).into());
+                    }
+                }
+            }
+        }
+    }
+
+    fn artifact_download_req(
+        &self,
+        uuid: Uuid,
+        content_type: ArtifactContentType,
+    ) -> reqwest::RequestBuilder {
+        let ct = serde_json::to_value(content_type)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "result".to_owned());
+        let url = self.api_url(&format!("api/agents/tasks/{uuid}/artifacts/{ct}"));
+        self.http_client.get(url).bearer_auth(&self.token)
+    }
+
+    fn attachment_download_req(&self, task_uuid: &Uuid, key: &str) -> reqwest::RequestBuilder {
+        let url = self.api_url(&format!("api/agents/tasks/{task_uuid}/attachments/{key}"));
+        self.http_client.get(url).bearer_auth(&self.token)
+    }
+
+    async fn watch(&mut self, uuid: &Uuid, target: TaskExecState) {
+        // Poll-only (no redis): the wrapping select in `execute_task` provides the
+        // cancel + overall timeout, so this just loops until the target is reached.
+        let mut wait_until = Instant::now();
+        loop {
+            tokio::time::sleep_until(wait_until).await;
+            wait_until = Instant::now() + Duration::from_secs(30);
+            if let Some(task) = self.query_task(uuid).await {
+                if task.info.state.is_reach(&target, task.info.result) {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn can_watch(&self) -> bool {
+        true
+    }
+
+    async fn unsubscribe(&mut self, _uuid: &Uuid) {}
+
+    async fn announce_state(&mut self, _uuid: &Uuid, _state: i32, _ex: Option<u64>) {}
 }

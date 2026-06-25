@@ -8,12 +8,17 @@
 //! - Heartbeat mechanism for health reporting
 //! - State machine for suite execution with real task fetch/report
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use speedy::{Readable, Writable};
+use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_util::sync::CancellationToken;
@@ -25,11 +30,25 @@ use crate::config::{AgentConfig, AgentConfigCli};
 use crate::entity::content::ArtifactContentType;
 use crate::entity::state::{AgentState, TaskExecState};
 use crate::error;
+use crate::executor::{execute_task, CoordinatorClient, TaskExecutor};
 use crate::schema::*;
 use crate::service::auth::cred::get_user_credential;
-use crate::executor::CoordinatorClient;
 
 pub struct MitoAgent;
+
+/// What to fetch next, recorded by a `SuiteAvailable`/`PreemptSuite`
+/// notification and consumed (taken) by `process_state` in the Idle branch.
+/// Distinct from "nothing pending" so an idle agent never polls `fetch_suite`
+/// unless the coordinator actually signaled available work.
+#[derive(Debug, Clone, Copy)]
+enum PendingSuite {
+    /// `SuiteAvailable { suite_uuid: None }` — work is available but unspecified;
+    /// fetch whatever the coordinator hands back (`fetch_suite(None)`).
+    Any,
+    /// A specific suite was named (`SuiteAvailable { Some }` or a preemption);
+    /// target it directly (`fetch_suite(Some(uuid))`).
+    Specific(Uuid),
+}
 
 /// Agent client that connects to coordinator
 struct AgentClient {
@@ -40,17 +59,28 @@ struct AgentClient {
     coordinator_boot_id: Option<Uuid>,
     state: AgentState,
     assigned_suite_uuid: Option<Uuid>,
-    /// Opaque run handle (`suite_agent_runs.id`) for the current suite, returned
-    /// by `accept_suite` and echoed on every later run-scoped call.
-    current_run: Option<i64>,
+    /// Next suite to fetch, set by a `SuiteAvailable`/`PreemptSuite` notification
+    /// and consumed in the Idle branch of `process_state`. `None` means nothing
+    /// to fetch — the agent stays idle instead of polling the coordinator.
+    pending_suite: Option<PendingSuite>,
     heartbeat_interval: Duration,
+    /// Retry/poll cadence handed to executor slots (from `AgentConfig`).
+    polling_interval: Duration,
     http_client: reqwest::Client,
-    /// Set to true when a SuiteCancelled or PreemptSuite notification arrives for the
-    /// current suite. Checked at the start of each task-fetch iteration to abort the loop.
-    suite_cancelled: bool,
+    /// Base cache directory (`<cache>/mitosis/<agent_uuid>`); a suite run's
+    /// executor slots get per-slot subdirs under `<cache_path>/<run>/<slot>`.
+    cache_path: PathBuf,
+    /// Cancellation token for the in-flight suite run's executor pool. Cancelled
+    /// on SuiteCancelled / PreemptSuite / shutdown to stop the whole pool; `None`
+    /// while Idle.
+    pool_token: Option<CancellationToken>,
+    /// Handle to the spawned suite-lifecycle task (accept→…→complete) while a
+    /// suite is executing, so the main loop stays free for heartbeats and
+    /// notifications. Reaped (non-blocking) once it finishes.
+    current_execution: Option<JoinHandle<()>>,
     /// Token used to signal shutdown from coordinator Shutdown notifications.
     /// Cancelling this token exits the main run loop.
-    shutdown_token: tokio_util::sync::CancellationToken,
+    shutdown_token: CancellationToken,
 }
 
 impl MitoAgent {
@@ -151,6 +181,13 @@ impl MitoAgent {
         let mut coordinator_url = config.coordinator_addr;
         coordinator_url.set_path("");
 
+        // Per-agent cache root for executor slot directories.
+        let mut cache_path = dirs::cache_dir()
+            .ok_or_else(|| error::Error::Custom("Cache dir not found".to_string()))?;
+        cache_path.push("mitosis");
+        cache_path.push(register_resp.agent_uuid.to_string());
+        tokio::fs::create_dir_all(&cache_path).await?;
+
         // Create client instance
         let mut client = AgentClient {
             coordinator_addr: coordinator_url,
@@ -160,10 +197,13 @@ impl MitoAgent {
             coordinator_boot_id: None,
             state: AgentState::Idle,
             assigned_suite_uuid: None,
-            current_run: None,
+            pending_suite: None,
             heartbeat_interval: config.heartbeat_interval,
+            polling_interval: config.polling_interval,
             http_client,
-            suite_cancelled: false,
+            cache_path,
+            pool_token: None,
+            current_execution: None,
             shutdown_token: tokio_util::sync::CancellationToken::new(),
         };
 
@@ -286,6 +326,11 @@ impl AgentClient {
                 biased;
                 _ = cancel_token.cancelled() => {
                     tracing::info!("Shutdown signal received, exiting main loop");
+                    // Stop any in-flight suite pool so its executors wind down
+                    // (reports cease; teardown reclaims uncommitted tasks).
+                    if let Some(token) = &self.pool_token {
+                        token.cancel();
+                    }
                     break;
                 }
 
@@ -307,6 +352,12 @@ impl AgentClient {
             if let Err(e) = self.process_state().await {
                 tracing::error!("Error processing state: {}", e);
             }
+        }
+
+        // Drain the in-flight suite lifecycle task (pool already cancelled above)
+        // so its final reports flush before the process exits.
+        if let Some(handle) = self.current_execution.take() {
+            let _ = handle.await;
         }
 
         // Cleanup: wait for websocket task to finish
@@ -499,6 +550,20 @@ impl AgentClient {
         Ok(())
     }
 
+    /// Record that a suite is available to fetch. A named suite (`Some`) always
+    /// wins, since a specific target is more useful than the generic signal; the
+    /// generic `Any` only fills an empty slot so it never clobbers a pending hint.
+    fn note_pending_suite(&mut self, suite_uuid: Option<Uuid>) {
+        match suite_uuid {
+            Some(uuid) => self.pending_suite = Some(PendingSuite::Specific(uuid)),
+            None => {
+                if self.pending_suite.is_none() {
+                    self.pending_suite = Some(PendingSuite::Any);
+                }
+            }
+        }
+    }
+
     /// Handle incoming notification from WebSocket or heartbeat catch-up
     async fn handle_notification(&mut self, notification: AgentNotification) {
         match notification {
@@ -511,7 +576,11 @@ impl AgentClient {
                     suite_uuid,
                     priority
                 );
-                // In Idle state, we'll fetch the suite in process_state
+                // Record the work; the Idle branch of `process_state` consumes it.
+                // Setting the slot while Executing is fine — it is only acted on
+                // once we return to Idle, giving back-to-back pickup without
+                // waiting for the next heartbeat.
+                self.note_pending_suite(suite_uuid);
             }
             AgentNotification::PreemptSuite {
                 new_suite_uuid,
@@ -532,9 +601,14 @@ impl AgentClient {
                         current_suite_uuid,
                         new_suite_uuid
                     );
-                    // Mark suite as cancelled to stop the task loop; after cleanup the
-                    // agent will return to Idle and pick up the new suite naturally.
-                    self.suite_cancelled = true;
+                    // Cancel the executor pool to stop task execution; the
+                    // lifecycle task then runs cleanup, reports completion, and the
+                    // agent returns to Idle. Record the new suite so the Idle
+                    // branch fetches it directly instead of waiting for a re-notify.
+                    if let Some(token) = &self.pool_token {
+                        token.cancel();
+                    }
+                    self.note_pending_suite(Some(new_suite_uuid));
                 } else {
                     tracing::debug!(
                         "Ignoring PreemptSuite - not executing expected suite \
@@ -553,8 +627,10 @@ impl AgentClient {
 
                 // Idempotency guard: only react if we're assigned to this suite
                 if self.assigned_suite_uuid == Some(suite_uuid) {
-                    tracing::info!("Marking suite {} as cancelled", suite_uuid);
-                    self.suite_cancelled = true;
+                    tracing::info!("Cancelling executor pool for suite {}", suite_uuid);
+                    if let Some(token) = &self.pool_token {
+                        token.cancel();
+                    }
                 } else {
                     tracing::debug!(
                         "Ignoring SuiteCancelled - not executing expected suite \
@@ -618,8 +694,19 @@ impl AgentClient {
     async fn process_state(&mut self) -> crate::error::Result<()> {
         match self.state {
             AgentState::Idle => {
-                // Try to fetch a suite
-                if let Some(suite) = self.fetch_suite(None).await? {
+                // Only fetch when a notification signaled work; otherwise stay
+                // idle (no redundant polling — the coordinator already runs the
+                // availability check on every heartbeat and re-notifies us).
+                let target = match self.pending_suite.take() {
+                    None => return Ok(()),
+                    Some(PendingSuite::Any) => None,
+                    Some(PendingSuite::Specific(uuid)) => Some(uuid),
+                };
+
+                // Each notification yields at most one fetch attempt: the slot is
+                // already taken above, so a stale hint or failed accept just
+                // returns to Idle and waits for the next re-notify (no spin).
+                if let Some(suite) = self.fetch_suite(target).await? {
                     tracing::info!(
                         "Fetched suite: {} ({})",
                         suite.uuid,
@@ -630,54 +717,51 @@ impl AgentClient {
                     if let Some(run) = self.accept_suite(suite.uuid).await? {
                         tracing::info!("Accepted suite: {} (run {})", suite.uuid, run);
                         self.assigned_suite_uuid = Some(suite.uuid);
-                        self.current_run = Some(run);
-                        self.suite_cancelled = false; // reset for each new suite
-                        self.state = AgentState::Provision;
 
-                        // Run provision hook (fake)
-                        self.fake_env_preparation(&suite).await?;
-
-                        // Notify coordinator: provision done → Executing
-                        self.start_suite(run).await?;
+                        // Spawn the suite lifecycle (provision → start → execute
+                        // pool → cleanup → complete) as a background task so the
+                        // main loop keeps servicing heartbeats and notifications
+                        // while the suite runs. SuiteCancelled / PreemptSuite /
+                        // shutdown cancel `pool_token` to stop it.
+                        let pool_token = CancellationToken::new();
+                        self.pool_token = Some(pool_token.clone());
+                        let runner = SuiteRunner {
+                            http_client: self.http_client.clone(),
+                            token: self.token.clone(),
+                            coordinator_addr: self.coordinator_addr.clone(),
+                            polling_interval: self.polling_interval,
+                            cache_path: self.cache_path.clone(),
+                            pool_token,
+                        };
+                        self.current_execution = Some(tokio::spawn(runner.run(suite, run)));
                         self.state = AgentState::Executing;
-
-                        // Fetch and execute all tasks using real coordinator APIs
-                        let (tasks_completed, tasks_failed) =
-                            self.fake_suite_execution(&suite).await?;
-
-                        // Notify coordinator: execution done → Cleanup
-                        self.enter_cleanup_api(run).await?;
-                        self.state = AgentState::Cleanup;
-
-                        // Run cleanup hook (fake)
-                        self.fake_env_cleanup(&suite).await?;
-
-                        // Notify coordinator: cleanup done → Idle
-                        let next_available = self
-                            .complete_suite(run, tasks_completed, tasks_failed)
-                            .await?;
-                        self.assigned_suite_uuid = None;
-                        self.current_run = None;
-                        self.suite_cancelled = false;
-                        self.state = AgentState::Idle;
-
-                        tracing::info!(
-                            "Suite {} completed ({} done, {} failed). Next available: {}",
-                            suite.uuid,
-                            tasks_completed,
-                            tasks_failed,
-                            next_available
-                        );
                     } else {
                         tracing::warn!("Failed to accept suite: {}", suite.uuid);
                     }
                 }
             }
+            AgentState::Executing => {
+                // Reap the lifecycle task without blocking the loop; once it
+                // finishes, release the run and return to Idle.
+                let finished = self
+                    .current_execution
+                    .as_ref()
+                    .map(JoinHandle::is_finished)
+                    .unwrap_or(true);
+                if finished {
+                    if let Some(handle) = self.current_execution.take() {
+                        if let Err(e) = handle.await {
+                            tracing::error!("Suite lifecycle task failed: {}", e);
+                        }
+                    }
+                    self.assigned_suite_uuid = None;
+                    self.pool_token = None;
+                    self.state = AgentState::Idle;
+                    tracing::info!("Agent returned to Idle");
+                }
+            }
             AgentState::Provision => {
                 tracing::trace!("In Provision state");
-            }
-            AgentState::Executing => {
-                tracing::trace!("In Executing state");
             }
             AgentState::Cleanup => {
                 tracing::trace!("In Cleanup state");
@@ -767,9 +851,274 @@ impl AgentClient {
 
         Ok(accept_resp.run)
     }
+}
+
+/// Connection context for one spawned suite run. The agent's main loop spawns
+/// `SuiteRunner::run` so it stays free to service heartbeats and notifications
+/// while the suite executes; `pool_token` (shared with every executor slot) is
+/// cancelled to stop the whole pool on cancel / preempt / shutdown.
+struct SuiteRunner {
+    http_client: reqwest::Client,
+    token: String,
+    coordinator_addr: Url,
+    polling_interval: Duration,
+    /// Per-agent cache root; this run's slots use `<cache_path>/<run>/<slot>`.
+    cache_path: PathBuf,
+    pool_token: CancellationToken,
+}
+
+impl SuiteRunner {
+    /// Build a URL for the given API path.
+    fn api_url(&self, path: &str) -> Url {
+        let mut url = self.coordinator_addr.clone();
+        url.set_path(path);
+        url
+    }
+
+    /// Drive the full suite lifecycle: provision → start → execute pool →
+    /// cleanup → complete. Each step logs and proceeds on error so a half-run
+    /// still transitions the coordinator run row toward a terminal state (real
+    /// hook failure → `Failed` outcome comes with Phase 4). Provision/cleanup are
+    /// still the fake stubs for now.
+    async fn run(self, suite: TaskSuiteSpec, run: i64) {
+        let suite_uuid = suite.uuid;
+
+        // Provision hook (fake) → already in Provision from accept.
+        if let Err(e) = self.fake_env_preparation(&suite).await {
+            tracing::error!(
+                "Provision failed for suite {} (run {}): {}",
+                suite_uuid,
+                run,
+                e
+            );
+        }
+
+        // Provision done → Executing. Report to the coordinator
+        if let Err(e) = self.report_run_start(run).await {
+            tracing::error!("Failed to start suite {} (run {}): {}", suite_uuid, run, e);
+        }
+
+        // Fetch and execute the suite's tasks via the shared executor core.
+        self.execute_pool(&suite, run).await;
+
+        // Execution done → Cleanup.
+        if let Err(e) = self.report_run_cleanup(run).await {
+            tracing::error!(
+                "Failed to enter cleanup for suite {} (run {}): {}",
+                suite_uuid,
+                run,
+                e
+            );
+        }
+
+        // Cleanup hook (fake).
+        if let Err(e) = self.fake_env_cleanup(&suite).await {
+            tracing::error!(
+                "Cleanup failed for suite {} (run {}): {}",
+                suite_uuid,
+                run,
+                e
+            );
+        }
+
+        // Cleanup done → terminal Completed (Phase 4 adds Failed on hook/exec failure).
+        match self.report_run_complete(run).await {
+            Ok(next_available) => tracing::info!(
+                "Suite {} completed (run {}). Next available: {}",
+                suite_uuid,
+                run,
+                next_available
+            ),
+            Err(e) => {
+                tracing::error!(
+                    "Failed to complete suite {} (run {}): {}",
+                    suite_uuid,
+                    run,
+                    e
+                )
+            }
+        }
+
+        // Best-effort cleanup of this run's per-slot cache dirs.
+        let run_dir = self.cache_path.join(run.to_string());
+        if let Err(e) = tokio::fs::remove_dir_all(&run_dir).await {
+            tracing::debug!("Failed to remove run cache dir {:?}: {}", run_dir, e);
+        }
+    }
+
+    /// Run the suite's tasks through an in-process executor pool that reuses the
+    /// worker's `execute_task` core. A producer batch-fetches tasks and feeds a
+    /// bounded channel; `worker_count` consumers pull from it and execute,
+    /// overlapping fetch with execution. The pool stops when the producer
+    /// exhausts the suite or `pool_token` is cancelled.
+    async fn execute_pool(&self, suite: &TaskSuiteSpec, run: i64) {
+        let (worker_count, prefetch) = match suite.worker_schedule {
+            WorkerSchedulePlan::FixedWorkers {
+                worker_count,
+                task_prefetch_count,
+                ..
+            } => (worker_count.max(1), task_prefetch_count.max(1)),
+        };
+        // Matches the dispatcher `UpdateCapacity` formula sent on accept.
+        let capacity = worker_count.saturating_mul(prefetch).max(1);
+
+        tracing::info!(
+            "Starting executor pool for suite {} (run {}): {} workers, capacity {}",
+            suite.uuid,
+            run,
+            worker_count,
+            capacity
+        );
+
+        let (tx, rx) = mpsc::channel::<WorkerTaskResp>(capacity as usize);
+        let rx = Arc::new(Mutex::new(rx));
+
+        // Producer: batch-fetch and feed the channel until empty or cancelled.
+        let producer = {
+            let http_client = self.http_client.clone();
+            let token = self.token.clone();
+            let base_url = self.coordinator_addr.clone();
+            let pool_token = self.pool_token.clone();
+            let suite_uuid = suite.uuid;
+            tokio::spawn(async move {
+                const MAX_EMPTY_RETRIES: u32 = 3;
+                let mut empty_retries: u32 = 0;
+                loop {
+                    if pool_token.is_cancelled() {
+                        break;
+                    }
+                    let tasks = match agent_fetch_tasks(
+                        &http_client,
+                        &token,
+                        &base_url,
+                        suite_uuid,
+                        capacity,
+                    )
+                    .await
+                    {
+                        Ok(tasks) => tasks,
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to fetch tasks from suite {}: {}",
+                                suite_uuid,
+                                e
+                            );
+                            break;
+                        }
+                    };
+
+                    if tasks.is_empty() {
+                        empty_retries += 1;
+                        if empty_retries >= MAX_EMPTY_RETRIES {
+                            tracing::info!(
+                                "No more tasks for suite {} after {} retries, producer stopping",
+                                suite_uuid,
+                                MAX_EMPTY_RETRIES
+                            );
+                            break;
+                        }
+                        tokio::select! {
+                            biased;
+                            _ = pool_token.cancelled() => break,
+                            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                        }
+                        continue;
+                    }
+
+                    empty_retries = 0;
+                    for task in tasks {
+                        tokio::select! {
+                            biased;
+                            _ = pool_token.cancelled() => return,
+                            res = tx.send(task) => {
+                                if res.is_err() {
+                                    // All consumers gone — nothing left to feed.
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                // `tx` dropped here → consumers see the channel close and exit.
+            })
+        };
+
+        // Consumers: each owns a cache slot and an agent coordinator client.
+        let mut consumers = tokio::task::JoinSet::new();
+        for slot in 0..worker_count {
+            let rx = rx.clone();
+            let http_client = self.http_client.clone();
+            let token = self.token.clone();
+            let coordinator_addr = self.coordinator_addr.clone();
+            let pool_token = self.pool_token.clone();
+            let polling_interval = self.polling_interval;
+            let slot_dir = self.cache_path.join(run.to_string()).join(slot.to_string());
+            consumers.spawn(async move {
+                // `execute_task` assumes the result/exec/resource dirs exist
+                // (the worker creates them at setup); make them per slot.
+                if let Err(e) = ensure_slot_dirs(&slot_dir).await {
+                    tracing::error!("Failed to create cache dirs for slot {}: {}", slot, e);
+                    return;
+                }
+                let client = AgentCoordinatorClient {
+                    http_client: http_client.clone(),
+                    token,
+                    coordinator_addr,
+                    run,
+                    polling_interval,
+                    cancel_token: pool_token.clone(),
+                };
+                let mut executor = TaskExecutor {
+                    task_cancel_token: pool_token,
+                    // The agent has no force-exit concept; give each slot its own.
+                    coordinator_force_exit: Arc::new(AtomicBool::new(false)),
+                    polling_interval,
+                    task_cache_path: slot_dir,
+                    http_client,
+                    client: Box::new(client),
+                };
+                loop {
+                    let task = {
+                        let mut guard = rx.lock().await;
+                        guard.recv().await
+                    };
+                    match task {
+                        Some(task) => {
+                            let task_uuid = task.uuid;
+                            if let Err(e) = execute_task(task, &mut executor).await {
+                                tracing::error!(
+                                    "Failed to execute task {} on slot {}: {}",
+                                    task_uuid,
+                                    slot,
+                                    e
+                                );
+                            }
+                        }
+                        None => break,
+                    }
+                }
+            });
+        }
+
+        let _ = producer.await;
+        // Drain to completion. Cancellation stays cooperative via `pool_token`;
+        // we never drop the set early, so `JoinSet`'s abort-on-drop (a hard
+        // cancel at an await point) never fires and teardown stays graceful.
+        // Don't use `join_all()` as a failing task will panic the call entire call.
+        while let Some(consumer_result) = consumers.join_next().await {
+            if let Err(e) = consumer_result {
+                tracing::warn!("Task execution failed: {}", e);
+            }
+        }
+        tracing::info!(
+            "Executor pool for suite {} (run {}) finished",
+            suite.uuid,
+            run
+        );
+    }
 
     /// Notify coordinator that provision is done and execution is starting (→ Executing)
-    async fn start_suite(&self, run: i64) -> crate::error::Result<()> {
+    async fn report_run_start(&self, run: i64) -> crate::error::Result<()> {
         let url = self.api_url("api/agents/suite/start");
 
         let req = StartSuiteReq { run };
@@ -796,7 +1145,7 @@ impl AgentClient {
     }
 
     /// Notify coordinator that execution is done and cleanup is starting (→ Cleanup)
-    async fn enter_cleanup_api(&self, run: i64) -> crate::error::Result<()> {
+    async fn report_run_cleanup(&self, run: i64) -> crate::error::Result<()> {
         let url = self.api_url("api/agents/suite/cleanup");
 
         let req = EnterCleanupReq { run };
@@ -823,20 +1172,18 @@ impl AgentClient {
     }
 
     /// Notify coordinator that cleanup is done and agent is going Idle
-    async fn complete_suite(
-        &self,
-        run: i64,
-        tasks_completed: u64,
-        tasks_failed: u64,
-    ) -> crate::error::Result<bool> {
+    async fn report_run_complete(&self, run: i64) -> crate::error::Result<bool> {
         let url = self.api_url("api/agents/suite/complete");
 
         let req = CompleteSuiteReq {
             run,
-            tasks_completed,
-            tasks_failed,
-            // The fake execution path always completes cleanly; emitting
-            // `Failed` on real hook failures comes with real hooks (Task 7).
+            // The agent does not tally tasks; the coordinator's commit-derived
+            // run counters are authoritative. Fields kept on the wire so a
+            // cross-check can be reinstated later without a protocol change.
+            tasks_completed: 0,
+            tasks_failed: 0,
+            // The fake hooks always complete cleanly; emitting `Failed` on real
+            // hook/exec failure comes with real hooks (Phase 4).
             outcome: SuiteRunOutcome::Completed,
         };
 
@@ -866,89 +1213,7 @@ impl AgentClient {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Task API calls
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// Batch-fetch up to `max_count` tasks from the assigned suite
-    async fn fetch_tasks(
-        &self,
-        suite_uuid: Uuid,
-        max_count: u32,
-    ) -> crate::error::Result<Vec<WorkerTaskResp>> {
-        let url = self.api_url("api/agents/tasks/fetch");
-
-        let req = FetchTasksReq {
-            suite_uuid,
-            max_count,
-        };
-
-        let resp = self
-            .http_client
-            .post(url.as_str())
-            .bearer_auth(&self.token)
-            .json(&req)
-            .send()
-            .await
-            .map_err(|e| error::Error::Custom(format!("Failed to fetch tasks: {}", e)))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(error::Error::Custom(format!(
-                "Fetch tasks failed: {} - {}",
-                status, body
-            )));
-        }
-
-        let fetch_resp: FetchTasksResp = resp.json().await.map_err(|e| {
-            error::Error::Custom(format!("Failed to parse fetch tasks response: {}", e))
-        })?;
-
-        Ok(fetch_resp.tasks)
-    }
-
-    /// Report the result of a single task execution step
-    async fn report_task(
-        &self,
-        run: i64,
-        task_id: i64,
-        op: ReportTaskOp,
-    ) -> crate::error::Result<Option<String>> {
-        let url = self.api_url("api/agents/tasks/report");
-
-        let req = ReportAgentTaskReq {
-            run,
-            id: task_id,
-            op,
-        };
-
-        let resp = self
-            .http_client
-            .post(url.as_str())
-            .bearer_auth(&self.token)
-            .json(&req)
-            .send()
-            .await
-            .map_err(|e| error::Error::Custom(format!("Failed to report task: {}", e)))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(error::Error::Custom(format!(
-                "Report task failed: {} - {}",
-                status, body
-            )));
-        }
-
-        let report_resp: ReportTaskResp = resp.json().await.map_err(|e| {
-            error::Error::Custom(format!("Failed to parse report task response: {}", e))
-        })?;
-
-        Ok(report_resp.url)
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Fake execution stubs
+    // Fake execution stubs (provision / cleanup hooks — real hooks in Phase 4)
     // ─────────────────────────────────────────────────────────────────────────
 
     async fn fake_env_preparation(&self, suite: &TaskSuiteSpec) -> crate::error::Result<()> {
@@ -970,119 +1235,6 @@ impl AgentClient {
         Ok(())
     }
 
-    /// Fetch and execute all tasks for the suite using real coordinator APIs.
-    ///
-    /// The batch size is derived from the suite's `WorkerSchedulePlan`
-    /// (`worker_count * task_prefetch_count`), matching the `UpdateCapacity` formula
-    /// sent to the `SuiteTaskDispatcher` on `accept_suite`.
-    ///
-    /// Loops until:
-    /// - No tasks remain (empty response after `MAX_EMPTY_RETRIES` retries), or
-    /// - The suite is cancelled (`self.suite_cancelled`).
-    ///
-    /// Returns `(tasks_completed, tasks_failed)`.
-    async fn fake_suite_execution(
-        &mut self,
-        suite: &TaskSuiteSpec,
-    ) -> crate::error::Result<(u64, u64)> {
-        // The run handle is set by `accept_suite` before execution begins; every
-        // task report is scoped to it.
-        let run = self
-            .current_run
-            .expect("current_run must be set during suite execution");
-
-        let batch_size = match suite.worker_schedule {
-            WorkerSchedulePlan::FixedWorkers {
-                worker_count,
-                task_prefetch_count,
-                ..
-            } => worker_count.saturating_mul(task_prefetch_count).max(1),
-        };
-
-        tracing::info!(
-            "=== Starting task execution for suite {} (batch_size={}) ===",
-            suite.uuid,
-            batch_size
-        );
-
-        let mut tasks_completed: u64 = 0;
-        let mut tasks_failed: u64 = 0;
-        let mut empty_retries: u32 = 0;
-        const MAX_EMPTY_RETRIES: u32 = 3;
-
-        loop {
-            if self.suite_cancelled {
-                tracing::info!("Suite {} cancelled, stopping task execution", suite.uuid);
-                break;
-            }
-
-            let tasks = match self.fetch_tasks(suite.uuid, batch_size).await {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::error!("Failed to fetch tasks from suite {}: {}", suite.uuid, e);
-                    break;
-                }
-            };
-
-            if tasks.is_empty() {
-                empty_retries += 1;
-                if empty_retries >= MAX_EMPTY_RETRIES {
-                    tracing::info!(
-                        "No more tasks available after {} retries, finishing execution",
-                        MAX_EMPTY_RETRIES
-                    );
-                    break;
-                }
-                tracing::debug!(
-                    "No tasks in batch ({}/{}), waiting before retry...",
-                    empty_retries,
-                    MAX_EMPTY_RETRIES
-                );
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                continue;
-            }
-
-            empty_retries = 0;
-            tracing::info!("Fetched {} task(s) from suite {}", tasks.len(), suite.uuid);
-
-            for task in tasks {
-                tracing::info!("FAKE: executing task {} | spec={:?}", task.uuid, task.spec);
-
-                // Mark task as started (→ Finished, awaiting Commit)
-                if let Err(e) = self.report_task(run, task.id, ReportTaskOp::Finish).await {
-                    tracing::error!("Failed to report Finish for task {}: {}", task.uuid, e);
-                    tasks_failed += 1;
-                    continue;
-                }
-
-                // Fake work: nothing to execute — immediately commit with success
-                let result = TaskResultSpec {
-                    exit_status: 0,
-                    msg: None,
-                };
-                match self
-                    .report_task(run, task.id, ReportTaskOp::Commit(result))
-                    .await
-                {
-                    Ok(_) => {
-                        tasks_completed += 1;
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to report Commit for task {}: {}", task.uuid, e);
-                        tasks_failed += 1;
-                    }
-                }
-            }
-        }
-
-        tracing::info!(
-            "=== Task execution finished: {} completed, {} failed ===",
-            tasks_completed,
-            tasks_failed
-        );
-        Ok((tasks_completed, tasks_failed))
-    }
-
     async fn fake_env_cleanup(&self, suite: &TaskSuiteSpec) -> crate::error::Result<()> {
         tracing::info!(
             "=== FAKE: Running environment cleanup for suite {} ===",
@@ -1101,6 +1253,57 @@ impl AgentClient {
         tracing::info!("=== FAKE: Environment cleanup completed ===");
         Ok(())
     }
+}
+
+/// Batch-fetch up to `max_count` tasks from `suite_uuid` via the agent endpoint.
+/// A free function (not a method) so the pool's producer task can call it after
+/// the lifecycle context's connection fields are cloned into it.
+async fn agent_fetch_tasks(
+    http_client: &reqwest::Client,
+    token: &str,
+    base_url: &Url,
+    suite_uuid: Uuid,
+    max_count: u32,
+) -> crate::error::Result<Vec<WorkerTaskResp>> {
+    let mut url = base_url.clone();
+    url.set_path("api/agents/tasks/fetch");
+
+    let req = FetchTasksReq {
+        suite_uuid,
+        max_count,
+    };
+
+    let resp = http_client
+        .post(url.as_str())
+        .bearer_auth(token)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| error::Error::Custom(format!("Failed to fetch tasks: {}", e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(error::Error::Custom(format!(
+            "Fetch tasks failed: {} - {}",
+            status, body
+        )));
+    }
+
+    let fetch_resp: FetchTasksResp = resp.json().await.map_err(|e| {
+        error::Error::Custom(format!("Failed to parse fetch tasks response: {}", e))
+    })?;
+
+    Ok(fetch_resp.tasks)
+}
+
+/// Create the per-slot cache subdirectories `execute_task` expects to exist
+/// (the worker creates these in `setup`).
+async fn ensure_slot_dirs(slot_dir: &Path) -> std::io::Result<()> {
+    tokio::fs::create_dir_all(slot_dir.join("result")).await?;
+    tokio::fs::create_dir_all(slot_dir.join("exec")).await?;
+    tokio::fs::create_dir_all(slot_dir.join("resource")).await?;
+    Ok(())
 }
 
 /// Agent impl of [`CoordinatorClient`]: talks to the `agents/*` endpoints with
@@ -1196,7 +1399,10 @@ impl CoordinatorClient for AgentCoordinatorClient {
                             .json()
                             .await
                             .unwrap_or_else(|e| error::ErrorMsg { msg: e.to_string() });
-                        tracing::info!("Request upload url failed with permission denied: {}", resp.msg);
+                        tracing::info!(
+                            "Request upload url failed with permission denied: {}",
+                            resp.msg
+                        );
                         return Ok(None);
                     } else {
                         let resp: error::ErrorMsg = resp

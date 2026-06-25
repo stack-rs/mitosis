@@ -1,13 +1,18 @@
 # Agent-Controlled Worker Execution — Implementation Plan (working note)
 
-**Date:** 2026-06-19 (last updated 2026-06-23)
+**Date:** 2026-06-19 (last updated 2026-06-25)
 **Goal:** Replace the agent's `fake_suite_execution` with real execution. The agent manages an **in-process pool of executors** that run the suite's tasks (and hooks) by **reusing the worker's execution core**, reporting to the coordinator via the **agent endpoints** with the **run handle**. The agent stays the only coordinator-facing party, so the run/suite accounting built in Part A is preserved.
 
-> ### ⏩ RESUME HERE (2026-06-23)
-> **Done & cargo-clean:** Phase 0 (agent coordinator endpoints) · Phase 1 (the `CoordinatorClient` seam: steps A1–A3 + B, consolidated) · the `executor` module extraction · Phase 2 (`AgentCoordinatorClient`). Compiles with only expected dead-code warnings on `AgentCoordinatorClient` (unwired until Phase 3).
-> **Not yet committed:** the `executor`-module extraction may be uncommitted — check `git status` first.
-> **Next: Phase 3** (the agent executor pool — see that section below; prereqs all done). Then Phase 4 (real hooks + `SuiteRunOutcome::Failed` + 409→Idle), then Phase 5 (deferred redis/cpu_binding).
-> **Regression gate:** worker behavior is preserved by construction (the refactor was a pure relocation + behavior-preserving sub-steps) but has **not been run** — a worker smoke-test is the gate before relying on the seam.
+> ### ⏩ RESUME HERE (2026-06-25)
+> **Done & cargo-clean (compiles + clippy, no warnings):** Phase 0 (agent coordinator endpoints) · Phase 1 (the `CoordinatorClient` seam: steps A1–A3 + B, consolidated) · the `executor` module extraction (committed `0ca8011`) · Phase 2 (`AgentCoordinatorClient`) · **Phase 3 (agent executor pool — replaces `fake_suite_execution`)** + the **2026-06-25 agent-loop refinements** below.
+> **Phase 3 reviewed and ready to commit** (still unstaged); **not yet smoke-tested** — the regression gate below is deferred, not waived.
+> **2026-06-25 agent-loop refinements (reviewed):**
+> - **Notification-driven suite pickup.** `process_state` Idle no longer polls `fetch_suite(None)` every loop tick (that duplicated the coordinator's own per-heartbeat availability check → redundant DB load). Pickup is now driven by a `pending_suite: Option<PendingSuite>` slot on `AgentClient`. `SuiteAvailable`/`PreemptSuite` notifications record into it (`note_pending_suite`); the Idle branch `take`s it and does **one** fetch attempt — `None` ⇒ stay idle (no spin), `Any` ⇒ `fetch_suite(None)`, `Specific(uuid)` ⇒ `fetch_suite(Some(uuid))` (uses the notification's suite hint, which the old code discarded). A named suite always wins over `Any`. Set-while-Executing is intentional: a notification arriving mid-run is remembered and acted on the instant we reap to Idle (back-to-back pickup without waiting a heartbeat). `PreemptSuite` also records the new suite so the reap goes straight for it. Coordinator heartbeat reconcile (`service/agent.rs:224-358`) guarantees an idle agent with work is re-notified, so notifications are a sufficient (not just advisory) trigger.
+> - **`JoinSet` for the executor pool consumers** (was `Vec<JoinHandle>` + for-await). Cancellation stays cooperative via `pool_token`; the set is always fully drained, so `JoinSet`'s abort-on-drop (hard cancel) never fires and teardown stays graceful.
+> **Counter decision changed during Phase 3:** the agent no longer tallies completed/failed tasks. `complete_suite` always reports `0/0`; the coordinator's commit-derived run counters remain authoritative; the `CompleteSuiteReq` fields are kept on the wire (so a cross-check can return later) but the server-side reconcile `warn!` was removed. So `execute_task` stays untouched (no outcome return value).
+> **Known deferred bug (not blocking commit):** the WS notification heartbeat-fallback drains the per-agent buffer **unconditionally** (`get_remaining_notifications` → `drain(..)`), not ACK-gated like the WS path — lossy if a heartbeat response is dropped. Tolerable today because state-critical notifications self-heal via the heartbeat reconcile; do **not** add informational, non-DB-reconstructible notification types until this is fixed (make the heartbeat path ack-by-`last_notification_id`).
+> **Next: Phase 4** (real hooks + `SuiteRunOutcome::Failed` + 409→Idle), then Phase 5 (deferred redis/cpu_binding). `cpu_binding` confirmed not plumbed: schema carries it but `execute_pool` discards it (`..`) and `execute_task` sets no affinity env — intended (Phase 5, "passed as env var, not in-Rust binding").
+> **Regression gate:** worker behavior is preserved by construction (the refactor was a pure relocation + behavior-preserving sub-steps) but has **not been run** — a worker smoke-test, plus an agent end-to-end run (live coordinator + DB + S3), is the gate before relying on the seam/pool.
 
 > This is a working checklist so we don't drop pieces mid-way. Delete once the work lands.
 
@@ -22,7 +27,7 @@
 - **A suite task's spawned child auto-joins that suite/run** — the agent injects the parent's `suite_uuid` so the child is part of the same suite accounting (reopens the suite if needed).
 - **Redis `announce_state` = no-op** for the agent reporter for now. Live *streaming* of suite tasks is deferred (would need an agent `redis_url` + ACL later); this only affects fine-grained intra-exec watch (see below), not coarse-milestone watch.
 - **`cpu_binding` = not implemented in code**; passed to executors as an **env var** (like the cache/dir env vars).
-- Counters still flow as already built: per-task `Commit` bumps the run counters; `/complete` cross-checks the agent's totals and `warn!`s (no overwrite).
+- Counters: per-task `Commit` bumps the coordinator-authoritative run counters (unchanged). **The agent no longer tallies its own totals** (Phase-3 decision) — `/complete` sends `0/0` and the server-side cross-check `warn!` was removed; the `CompleteSuiteReq` count fields stay on the wire so a cross-check can return without a protocol change.
 
 ## Dependency features (both supported for agent tasks)
 
@@ -101,16 +106,21 @@ The seam now lives in its own module rather than in `worker.rs`. Code layout:
 - **Watch design agreed:** redis-first, poll fallback, manually-disable-capable — agent is poll-only until the Phase-5 redis work; `can_watch` gates whether the watch-wait runs (worker: has-redis; agent: always). Caveat: agent poll resolves only *coarse* milestones; fine intra-exec watch targets time out until redis lands.
 - Currently **unwired** → dead-code warnings on `AgentCoordinatorClient`/`api_url`/`query_task`; they clear when Phase 3 constructs it.
 
-### Phase 3 — Agent executor pool (replace `fake_suite_execution`) — **NEXT (start here)**
-Prereqs already done: `execute_task` is `pub(crate)`; `executor` module exists; `AgentCoordinatorClient` exists.
-- In `agent.rs`, replace `fake_suite_execution` with a pool:
-  - Spawn `worker_count` executor tasks (from `suite.worker_schedule` `FixedWorkers`).
-  - A bounded `tokio::sync::mpsc` channel of `WorkerTaskResp`, fed by a producer that loops `agent_fetch_tasks(suite_uuid, batch=task_prefetch_count)` and sends; **overlap fetch & execution** (no collect-then-run).
-  - Each consumer builds `crate::executor::TaskExecutor { task_cancel_token: pool_token.clone(), coordinator_force_exit: <a dummy Arc<AtomicBool>>, polling_interval, task_cache_path: <per-slot dir>, http_client: self.http_client.clone(), client: Box::new(AgentCoordinatorClient{ run, cancel_token: pool_token.clone(), … }) }` and loops `recv → execute_task(task, &mut te)`.
-  - One pool `CancellationToken` shared into every `AgentCoordinatorClient` (so a `409` stops the whole pool) and cancelled on `self.suite_cancelled`/preempt.
-  - Per-slot cache dirs (`resource/`/`exec/`/`result/`) keyed by executor index — **note `TaskExecutor`/`execute_task` assume these dirs exist** (worker creates them in `setup`); the pool must `create_dir_all` per slot.
-  - Aggregate `(tasks_completed, tasks_failed)` for the `/complete` cross-check.
-- The agent must still call accept→`/start`→(execute)→`/cleanup`→`/complete` around the pool (currently `fake_suite_execution` is sandwiched between `start_suite` and `enter_cleanup_api` in `process_state`).
+### Phase 3 — Agent executor pool (replace `fake_suite_execution`) — **DONE (2026-06-23)**
+Prereqs done: `execute_task` is `pub(crate)`; `executor` module exists; `AgentCoordinatorClient` exists.
+
+**Concurrency restructure (the key design point, not in the original sketch):** running the suite inline in `process_state` would block the single `select!` loop, starving **both** heartbeats and notification handling for the whole run (→ coordinator marks the run `Lost`; cancel/preempt never delivered). So the suite lifecycle is now **spawned**:
+- `AgentClient` gained `pool_token: Option<CancellationToken>` + `current_execution: Option<JoinHandle<()>>` (and `polling_interval`, `cache_path`); dropped `suite_cancelled`/`current_run`.
+- `process_state` **Idle** = consume the `pending_suite` slot (`take`; `None` ⇒ stay idle) → `fetch_suite(target)` → `accept_suite` (quick, on the main task; sets `assigned_suite_uuid` + run handle) → make a fresh `pool_token` → **spawn** `SuiteRunner::run(suite, run)` → `state = Executing`, return. **Executing** = non-blocking `JoinHandle::is_finished()` reap → clear `assigned_suite_uuid`/`pool_token` → `Idle`. Heartbeat stays in the main loop (no separate task needed — spawning the lifecycle already keeps it alive). *(2026-06-25: Idle no longer polls unconditionally — pickup is notification-driven via `pending_suite`; see RESUME HERE.)*
+- `SuiteCancelled`/`PreemptSuite`/shutdown now **cancel `pool_token`** (replacing the old `suite_cancelled` bool that nothing read in time). `PreemptSuite` additionally records the new suite into `pending_suite` so the post-reap Idle goes straight for it.
+
+**`SuiteRunner`** (owns cloned connection context: `http_client`, `token`, `coordinator_addr`, `polling_interval`, `cache_path`, `pool_token`) holds the relocated run-scoped methods (`start_suite`/`enter_cleanup_api`/`complete_suite`/`fake_env_*`) and drives provision→`/start`→`execute_pool`→`/cleanup`→`/complete`, logging+proceeding on each error, then best-effort removes `<cache_path>/<run>`.
+
+**`execute_pool`:** bounded `tokio::sync::mpsc` (cap = `worker_count*prefetch`) fed by one **producer** task looping `agent_fetch_tasks(suite_uuid, capacity)` (free fn; empty-batch backoff w/ `MAX_EMPTY_RETRIES` then drop sender; honors `pool_token`); **`worker_count` consumers** in a `tokio::task::JoinSet` (2026-06-25; was a `Vec<JoinHandle>` + for-await — drained to completion so abort-on-drop never fires, cancellation stays cooperative via `pool_token`) sharing `Arc<Mutex<Receiver>>`, each `create_dir_all`-ing its per-slot dir (`<cache_path>/<run>/<slot>/{result,exec,resource}`) and building a `TaskExecutor { task_cancel_token: pool_token, coordinator_force_exit: Arc::new(AtomicBool::new(false)) /* vestigial — unread by execute_task */, …, client: AgentCoordinatorClient{ run, cancel_token: pool_token, … } }`, looping `recv → execute_task`. Overlaps fetch & execution; a `409` (or any cancel) stops the whole pool. `worker_schedule.cpu_binding` is discarded here (Phase 5).
+
+**Counters:** no agent-side tally (see RESUME HERE) — `complete_suite` sends `0/0`; `execute_task` returns `Result<()>` unchanged. `fake_suite_execution`/`fetch_tasks`/`report_task` deleted; `polling_interval` added to `AgentConfig`.
+
+**Not done:** smoke/e2e test (regression gate, deferred). **Still fake:** provision/cleanup hooks (Phase 4).
 
 ### Phase 4 — Real hooks + outcome (closes forward-looking Task 4 + Task 7)
 - Run provision / cleanup / background as **real processes** via the same exec core.

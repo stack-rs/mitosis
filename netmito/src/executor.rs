@@ -124,11 +124,6 @@ impl TaskResult {
     }
 }
 
-/// GET a task's current state from the coordinator (the `watch` poll fallback).
-/// Returns `None` on any error (logged) so the watch loop simply retries. Takes
-/// the transport fields by reference rather than `&mut self` so it can be called
-/// from the redis watch path while `task_redis_pubsub` is mutably borrowed.
-
 enum ResourceError {
     /// 404: the resource does not exist.
     NotFound,

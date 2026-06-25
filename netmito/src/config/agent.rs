@@ -24,6 +24,10 @@ pub struct AgentConfig {
     pub(crate) labels: HashSet<String>,
     #[serde(with = "humantime_serde")]
     pub(crate) heartbeat_interval: Duration,
+    /// How long executor slots wait between coordinator-call retries (mirrors the
+    /// worker's `polling_interval`); also the watch-poll fallback cadence.
+    #[serde(with = "humantime_serde")]
+    pub(crate) polling_interval: Duration,
     #[serde(with = "humantime_serde")]
     pub(crate) lifetime: Option<Duration>,
     #[serde(default)]
@@ -72,6 +76,10 @@ pub struct AgentConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub heartbeat_interval: Option<String>,
+    /// The interval to retry coordinator calls / poll task state (e.g., "180s", "3m")
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub polling_interval: Option<String>,
     /// The lifetime of the agent token (e.g., "7d", "24h")
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -97,6 +105,7 @@ impl Default for AgentConfig {
             tags: HashSet::new(),
             labels: HashSet::new(),
             heartbeat_interval: Duration::from_secs(60),
+            polling_interval: Duration::from_secs(180),
             lifetime: None,
             retain: false,
             machine_code: None,

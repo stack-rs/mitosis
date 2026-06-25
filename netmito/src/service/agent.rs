@@ -891,9 +891,9 @@ pub async fn agent_start_suite(agent_uuid: Uuid, pool: &InfraPool, run: i64) -> 
 ///
 /// The run's `tasks_completed`/`tasks_failed` are **coordinator-authoritative**
 /// — they are maintained only on each task `Commit` (see `agent_report_task`),
-/// the durable, result-bearing event. The agent's reported totals here are a
-/// *claim* about those same events; we compare them against the stored counters
-/// and `warn!` on disagreement (a drift/bug signal) but never overwrite the DB.
+/// the durable, result-bearing event. The agent does not tally tasks itself
+/// (it reports `0`/`0`); `CompleteSuiteReq` keeps the fields so an agent-side
+/// claim / cross-check can be reinstated later without a wire change.
 pub async fn agent_complete_suite(
     agent_uuid: Uuid,
     pool: &InfraPool,
@@ -920,28 +920,28 @@ pub async fn agent_complete_suite(
         run = req.run,
         run_id = run_row.run_id,
         agent_uuid = %agent_uuid,
-        tasks_completed = req.tasks_completed,
-        tasks_failed = req.tasks_failed,
+        tasks_completed = run_row.tasks_completed,
+        tasks_failed = run_row.tasks_failed,
         outcome = ?req.outcome,
         "Agent reported suite run completion"
     );
 
     // Cross-check the agent's claimed totals against the coordinator's own
     // commit-derived counters. Disagreement is logged, not reconciled.
-    if req.tasks_completed != run_row.tasks_completed as u64
-        || req.tasks_failed != run_row.tasks_failed as u64
-    {
-        tracing::warn!(
-            run = req.run,
-            run_id = run_row.run_id,
-            agent_uuid = %agent_uuid,
-            agent_completed = req.tasks_completed,
-            agent_failed = req.tasks_failed,
-            db_completed = run_row.tasks_completed,
-            db_failed = run_row.tasks_failed,
-            "Agent-reported task counts disagree with coordinator counters; keeping coordinator counts"
-        );
-    }
+    // if req.tasks_completed != run_row.tasks_completed as u64
+    //     || req.tasks_failed != run_row.tasks_failed as u64
+    // {
+    //     tracing::warn!(
+    //         run = req.run,
+    //         run_id = run_row.run_id,
+    //         agent_uuid = %agent_uuid,
+    //         agent_completed = req.tasks_completed,
+    //         agent_failed = req.tasks_failed,
+    //         db_completed = run_row.tasks_completed,
+    //         db_failed = run_row.tasks_failed,
+    //         "Agent-reported task counts disagree with coordinator counters; keeping coordinator counts"
+    //     );
+    // }
 
     // Run → terminal Completed/Failed, stamp finished_at and (on failure) the
     // one-line reason. Counters are left untouched (owned by the Commit path).

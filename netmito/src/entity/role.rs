@@ -100,3 +100,61 @@ impl Display for GroupWorkerRole {
         write!(f, "{self:?}")
     }
 }
+
+/// The role of a group to an agent.
+#[derive(
+    EnumIter,
+    DeriveActiveEnum,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    ValueEnum,
+    Copy,
+)]
+#[sea_orm(rs_type = "i32", db_type = "Integer")]
+pub enum GroupAgentRole {
+    /// Reserved for future use (view agent status).
+    #[serde(alias = "read", alias = "READ")]
+    Read = 0,
+    /// The group can submit task suites to the agent.
+    #[serde(alias = "write", alias = "WRITE")]
+    Write = 1,
+    /// The group can manage the agent's ACL and settings.
+    #[serde(alias = "admin", alias = "ADMIN")]
+    Admin = 2,
+}
+
+impl FromStr for GroupAgentRole {
+    type Err = crate::error::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "read" | "Read" | "READ" => Ok(Self::Read),
+            "write" | "Write" | "WRITE" => Ok(Self::Write),
+            "admin" | "Admin" | "ADMIN" => Ok(Self::Admin),
+            _ => Err(crate::error::Error::Custom(format!(
+                "Invalid GroupAgentRole: {s}"
+            ))),
+        }
+    }
+}
+
+impl Display for GroupAgentRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl GroupAgentRole {
+    pub fn has_write_access(&self) -> bool {
+        matches!(self, Self::Write | Self::Admin)
+    }
+
+    pub fn has_admin_access(&self) -> bool {
+        matches!(self, Self::Admin)
+    }
+}

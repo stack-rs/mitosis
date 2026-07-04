@@ -480,6 +480,7 @@ pub async fn user_cancel_task(
                     upstream_task_uuid: Set(task.upstream_task_uuid),
                     downstream_task_uuid: Set(task.downstream_task_uuid),
                     reporter_uuid: Set(None),
+                    task_suite_id: Set(task.task_suite_id),
                 };
                 archived_task.insert(txn).await?;
                 ActiveTasks::Entity::delete_by_id(task.id).exec(txn).await?;

@@ -1,7 +1,7 @@
 # The default configurations for the mitosis coordinator
 [coordinator]
 bind = "127.0.0.1:5000"
-db_url = "postgres://mitosis:mitosis@localhost/mitosis"
+db_url = "postgres://db_user:db_pass@localhost/db_name"
 s3_url = "http://127.0.0.1:9000"
 s3_access_key = "mitosis_access"
 s3_secret_key = "mitosis_secret"

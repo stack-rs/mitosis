@@ -24,7 +24,6 @@ pub struct Model {
     pub state: AgentState,
     pub last_heartbeat: TimeDateTimeWithTimeZone,
     pub assigned_task_suite_id: Option<i64>,
-    pub metadata: Option<Json>,
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
 }
@@ -44,11 +43,11 @@ pub enum Relation {
         from = "Column::AssignedTaskSuiteId",
         to = "super::task_suites::Column::Id",
         on_update = "Cascade",
-        on_delete = "SetNull"
+        on_delete = "Restrict"
     )]
     TaskSuites,
     /// The subordinate machine row (1:1); it holds the FK back to this agent.
-    #[sea_orm(has_many = "super::machines::Entity")]
+    #[sea_orm(has_one = "super::machines::Entity")]
     Machines,
 }
 

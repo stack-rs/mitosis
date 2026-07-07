@@ -313,7 +313,8 @@ impl Display for WorkerState {
 pub enum TaskSuiteState {
     /// Suite is accepting new tasks
     Open = 0,
-    /// Suite is closed to new tasks but tasks can still be executed
+    /// No new tasks has been added to the suite in a recent time but tasks can still be executed;
+    /// Adding a new task will transit the suite back to `open` state
     Closed = 1,
     /// All tasks in the suite have completed
     Complete = 2,
@@ -378,11 +379,11 @@ pub enum AgentState {
     /// Agent is idle and available for assignment
     Idle = 0,
     /// Agent is provisioning environment for task suite
-    Provision = 1,
+    Provisioning = 1,
     /// Agent is executing tasks from a suite
     Executing = 2,
-    /// Agent is cleaning up after task suite completion
-    Cleanup = 3,
+    /// Agent is cleaning up after task suite completion or asked to gracefully shut down/handover
+    Cleaning = 3,
     /// Agent is offline
     Offline = 4,
 }
@@ -391,9 +392,9 @@ impl Display for AgentState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AgentState::Idle => write!(f, "Idle"),
-            AgentState::Provision => write!(f, "Provision"),
+            AgentState::Provisioning => write!(f, "Provisioning"),
             AgentState::Executing => write!(f, "Executing"),
-            AgentState::Cleanup => write!(f, "Cleanup"),
+            AgentState::Cleaning => write!(f, "Cleaning"),
             AgentState::Offline => write!(f, "Offline"),
         }
     }
@@ -405,48 +406,7 @@ impl AgentState {
     }
 
     pub fn is_busy(&self) -> bool {
-        matches!(self, Self::Provision | Self::Executing | Self::Cleanup)
-    }
-}
-
-/// How an agent came to be associated with a task suite.
-#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
-#[sea_orm(rs_type = "i32", db_type = "Integer")]
-pub enum SelectionType {
-    /// Agent was manually selected by user
-    UserSpecified = 0,
-    /// Agent was selected by tag matching
-    TagMatched = 1,
-}
-
-impl Display for SelectionType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SelectionType::UserSpecified => write!(f, "UserSpecified"),
-            SelectionType::TagMatched => write!(f, "TagMatched"),
-        }
-    }
-}
-
-/// Types of suite hooks that can be executed by agents
-#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
-#[sea_orm(rs_type = "i32", db_type = "Integer")]
-pub enum HookType {
-    /// Environment provision hook (setup before task execution)
-    Provision = 0,
-    /// Environment cleanup hook (teardown after suite completion)
-    Cleanup = 1,
-    /// Background/sidecar process
-    Background = 2,
-}
-
-impl Display for HookType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            HookType::Provision => write!(f, "Provision"),
-            HookType::Cleanup => write!(f, "Cleanup"),
-            HookType::Background => write!(f, "Background"),
-        }
+        matches!(self, Self::Provisioning | Self::Executing | Self::Cleaning)
     }
 }
 
@@ -504,15 +464,14 @@ impl HookExecState {
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum SuiteJobState {
     /// Job accepted, provision hook running
-    Provision = 0,
+    Provisioning = 0,
     /// Tasks being executed
     Executing = 1,
     /// Cleanup hook running
     Cleanup = 2,
     /// Terminal: job finished successfully
     Completed = 3,
-    /// Terminal: job failed (failure_reason has phase and cause, including
-    /// agent-lost)
+    /// Terminal: job failed (failure_reason has phase and cause)
     Failed = 4,
     /// Terminal: suite was cancelled while the job was in flight
     Cancelled = 5,
@@ -521,7 +480,7 @@ pub enum SuiteJobState {
 impl Display for SuiteJobState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SuiteJobState::Provision => write!(f, "Provision"),
+            SuiteJobState::Provisioning => write!(f, "Provision"),
             SuiteJobState::Executing => write!(f, "Executing"),
             SuiteJobState::Cleanup => write!(f, "Cleanup"),
             SuiteJobState::Completed => write!(f, "Completed"),

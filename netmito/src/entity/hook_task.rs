@@ -7,9 +7,12 @@
 //! table. Rows cascade-delete with their job, so retention is handled at the
 //! job level. See docs/plans/2026-07-03-suite-entity-design.md.
 
-use sea_orm::entity::prelude::*;
+use std::fmt::Display;
 
-use super::state::{HookExecState, HookType};
+use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
+
+use super::state::HookExecState;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
 #[sea_orm(table_name = "hook_tasks")]
@@ -50,3 +53,25 @@ impl Related<super::suite_agent_jobs::Entity> for Entity {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
+
+/// Types of suite hooks that can be executed by agents
+#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
+#[sea_orm(rs_type = "i32", db_type = "Integer")]
+pub enum HookType {
+    /// Environment provision hook (setup before task execution)
+    Provision = 0,
+    /// Environment cleanup hook (teardown after suite completion)
+    Cleanup = 1,
+    /// Background/sidecar process
+    Background = 2,
+}
+
+impl Display for HookType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HookType::Provision => write!(f, "Provision"),
+            HookType::Cleanup => write!(f, "Cleanup"),
+            HookType::Background => write!(f, "Background"),
+        }
+    }
+}

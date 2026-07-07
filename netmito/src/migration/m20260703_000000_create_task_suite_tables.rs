@@ -1,4 +1,4 @@
-//! Consolidated migration for the task-suite entity system (main → new design).
+//! Consolidated migration for the task-suite entity system.
 //!
 //! Creates, in FK-dependency order: `task_suites`, `agents`, `machines`
 //! (owned by its agent via `agent_id`, RESTRICT), the `group_agent` /
@@ -527,7 +527,7 @@ impl MigrationTrait for Migration {
                             .not_null(),
                     )
                     .col(
-                        ColumnDef::new(SuiteAgentJobs::JobNumber)
+                        ColumnDef::new(SuiteAgentJobs::JobId)
                             .integer()
                             .not_null(),
                     )
@@ -588,8 +588,8 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-        // User-facing key: job_number is ascending per suite (across agents).
-        // The unique index is the safety net for max(job_number)+1 allocation.
+        // User-facing key: job_id is ascending per suite (across agents).
+        // The unique index is the safety net for max(job_id)+1 allocation.
         manager
             .create_index(
                 Index::create()
@@ -597,7 +597,7 @@ impl MigrationTrait for Migration {
                     .name("idx_suite_agent_jobs-suite_job")
                     .table(SuiteAgentJobs::Table)
                     .col(SuiteAgentJobs::TaskSuiteId)
-                    .col(SuiteAgentJobs::JobNumber)
+                    .col(SuiteAgentJobs::JobId)
                     .to_owned(),
             )
             .await?;
@@ -882,7 +882,7 @@ enum SuiteAgentJobs {
     Table,
     Id,
     TaskSuiteId,
-    JobNumber,
+    JobId,
     AgentId,
     State,
     TasksCompleted,

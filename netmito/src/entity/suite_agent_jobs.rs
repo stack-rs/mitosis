@@ -22,24 +22,15 @@ pub struct Model {
     pub id: i64,
     pub task_suite_id: i64,
     /// User-facing job number, ascending per suite (across agents).
-    /// Allocated as max(job_number)+1 inside the accept transaction.
-    pub job_number: i32,
+    /// Allocated as max(job_id)+1 inside the accept transaction.
+    pub job_id: i32,
     /// Owning agent; the machine and registration uuid are reached by join.
     /// Agent rows are not reaped by the system, but an admin may manually
     /// delete one via SQL; the FK is `SetNull`, so this becomes NULL rather
     /// than blocking the delete, keeping the job's history intact.
     pub agent_id: Option<i64>,
     pub state: SuiteJobState,
-    /// Incremented live as tasks commit; reconciled on job completion
-    pub tasks_completed: i32,
-    /// Incremented live as tasks commit; reconciled on job completion
-    pub tasks_failed: i32,
-    /// `{ kind, message }` summary of abnormal termination (including
-    /// agent-lost); full hook output lives in the related hook task.
-    pub failure_reason: Option<Json>,
     pub created_at: TimeDateTimeWithTimeZone,
-    pub started_at: Option<TimeDateTimeWithTimeZone>,
-    pub finished_at: Option<TimeDateTimeWithTimeZone>,
     pub updated_at: TimeDateTimeWithTimeZone,
 }
 
@@ -58,7 +49,7 @@ pub enum Relation {
         from = "Column::AgentId",
         to = "super::agents::Column::Id",
         on_update = "Cascade",
-        on_delete = "SetNull"
+        on_delete = "Restrict"
     )]
     Agents,
     #[sea_orm(has_many = "super::hook_task::Entity")]

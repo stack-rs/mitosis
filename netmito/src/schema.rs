@@ -21,11 +21,15 @@ pub struct CreateUserReq {
     pub admin: bool,
 }
 
+fn default_retain() -> bool {
+    true
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UserLoginReq {
     pub username: String,
     pub md5_password: [u8; 16],
-    #[serde(default)]
+    #[serde(default = "default_retain")]
     pub retain: bool,
 }
 

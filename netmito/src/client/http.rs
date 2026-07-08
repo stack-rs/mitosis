@@ -9,7 +9,7 @@ use crate::{
     entity::content::ArtifactContentType,
     error::{get_error_from_resp, map_reqwest_err, RequestError},
     schema::*,
-    service::auth::cred::{get_user_credential, modify_or_append_credential},
+    service::auth::cred::{get_user_credential, modify_or_append_credential, remove_credential},
 };
 
 pub struct MitoHttpClient {
@@ -133,13 +133,65 @@ impl MitoHttpClient {
                 .await
                 .map_err(RequestError::from)?;
             self.credential = resp.token;
-            if self.credential_path.exists() {
-                if let Some(parent) = self.credential_path.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
-                }
+            if !self.credential_path.as_os_str().is_empty() {
                 modify_or_append_credential(&self.credential_path, &req.username, &self.credential)
                     .await?;
             }
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn refresh_token(&mut self, username: &str) -> crate::error::Result<()> {
+        self.url.set_path("refresh");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<UserLoginResp>()
+                .await
+                .map_err(RequestError::from)?;
+
+            self.credential = resp.token;
+
+            if !self.credential_path.as_os_str().is_empty() {
+                let username = username.to_string();
+                modify_or_append_credential(&self.credential_path, &username, &self.credential)
+                    .await?;
+            }
+
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn logout_all(&mut self, username: &str) -> crate::error::Result<()> {
+        self.url.set_path("logout-all");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+
+        if resp.status().is_success() {
+            self.credential.clear();
+
+            if self.credential_path.exists() {
+                if let Err(e) = remove_credential(&self.credential_path, username).await {
+                    tracing::warn!("Failed to remove local credential for {username}: {e}");
+                }
+            }
+
             Ok(())
         } else {
             Err(get_error_from_resp(resp).await.into())
@@ -188,10 +240,7 @@ impl MitoHttpClient {
                 .await
                 .map_err(RequestError::from)?;
             self.credential = resp.token;
-            if self.credential_path.exists() {
-                if let Some(parent) = self.credential_path.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
-                }
+            if !self.credential_path.as_os_str().is_empty() {
                 modify_or_append_credential(&self.credential_path, &username, &self.credential)
                     .await?;
             }

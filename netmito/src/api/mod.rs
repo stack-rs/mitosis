@@ -51,6 +51,20 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
             )
             .route("/login", post(users::user_login))
             .route(
+                "/refresh",
+                post(users::refresh_token).layer(middleware::from_fn_with_state(
+                    st.clone(),
+                    user_auth_middleware,
+                )),
+            )
+            .route(
+                "/logout-all",
+                post(users::logout_all).layer(middleware::from_fn_with_state(
+                    st.clone(),
+                    user_auth_middleware,
+                )),
+            )
+            .route(
                 "/redis",
                 get(query_redis_connection_info).layer(middleware::from_fn_with_state(
                     st.clone(),
@@ -81,6 +95,20 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
                 get(|| async { (StatusCode::OK, Json(json!({"status": "ok"}))) }),
             )
             .route("/login", post(users::user_login))
+            .route(
+                "/refresh",
+                post(users::refresh_token).layer(middleware::from_fn_with_state(
+                    st.clone(),
+                    user_auth_middleware,
+                )),
+            )
+            .route(
+                "/logout-all",
+                post(users::logout_all).layer(middleware::from_fn_with_state(
+                    st.clone(),
+                    user_auth_middleware,
+                )),
+            )
             .route(
                 "/redis",
                 get(query_redis_connection_info).layer(middleware::from_fn_with_state(

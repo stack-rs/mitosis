@@ -197,7 +197,7 @@ pub struct WorkerConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub lifetime: Option<String>,
-    /// Whether to retain the previous login state without refetching the credential
+    /// Whether to keep previously issued login tokens valid when the worker logs in
     #[arg(long)]
     #[serde(skip_serializing_if = "<&bool>::not")]
     pub retain: bool,
@@ -223,7 +223,7 @@ impl Default for WorkerConfig {
             file_log: false,
             shared_log: false,
             lifetime: None,
-            retain: false,
+            retain: true,
             skip_redis: false,
         }
     }

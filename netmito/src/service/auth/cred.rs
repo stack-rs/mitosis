@@ -117,6 +117,9 @@ pub(crate) async fn modify_or_append_credential(
     username: &String,
     token: &String,
 ) -> std::io::Result<()> {
+    if let Some(parent) = cred_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        tokio::fs::create_dir_all(parent).await?;
+    }
     if cred_path.exists() {
         let mut lines = read_lines(cred_path).await?;
         let mut new_lines = Vec::new();
@@ -137,6 +140,33 @@ pub(crate) async fn modify_or_append_credential(
     } else {
         tokio::fs::write(cred_path, format!("{username}:{token}")).await?;
     }
+    Ok(())
+}
+
+pub(crate) async fn remove_credential(
+    cred_path: &std::path::PathBuf,
+    username: &str,
+) -> std::io::Result<()> {
+    if !cred_path.exists() {
+        return Ok(());
+    }
+
+    let mut lines = read_lines(cred_path).await?;
+    let prefix = format!("{username}:");
+    let mut new_lines = Vec::new();
+
+    while let Some(line) = lines.next_line().await? {
+        if !line.starts_with(&prefix) {
+            new_lines.push(line);
+        }
+    }
+
+    if new_lines.is_empty() {
+        tokio::fs::remove_file(cred_path).await?;
+    } else {
+        tokio::fs::write(cred_path, new_lines.join("\n")).await?;
+    }
+
     Ok(())
 }
 
@@ -214,9 +244,6 @@ pub async fn get_user_credential(
             .await
             .map_err(RequestError::from)?;
         let token = resp.token;
-        if let Some(parent) = cred_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
         modify_or_append_credential(&cred_path, &req.username, &token).await?;
         Ok((req.username, token))
     } else {
@@ -257,12 +284,7 @@ where
         let token = resp.token;
         if let Some(cred_path) = cred_path {
             let cred_path = cred_path.get_path_buf();
-            if cred_path.exists() {
-                if let Some(parent) = cred_path.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
-                }
-                modify_or_append_credential(&cred_path, &user_login.username, &token).await?;
-            }
+            modify_or_append_credential(&cred_path, &user_login.username, &token).await?;
         }
         Ok(token)
     } else {

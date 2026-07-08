@@ -12,6 +12,8 @@ info:
     ## API Structure
     - `/auth` - User authentication status
     - `/login` - User login
+    - `/refresh` - Refresh current login token
+    - `/logout-all` - Invalidate all login tokens for current user
     - `/users` - User management
     - `/groups` - Group management and file attachments
     - `/workers` - Worker registration and management
@@ -77,6 +79,40 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "400":
           $ref: "#/components/responses/BadRequest"
+
+  /refresh:
+    post:
+      summary: Refresh current login token
+      description: Refresh the current user's login token using a valid bearer token. This invalidates previously issued tokens for the same user.
+      operationId: refreshToken
+      tags:
+        - Authentication
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Token refreshed successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserLoginResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /logout-all:
+    post:
+      summary: Logout all login tokens
+      description: Invalidate all issued login tokens for the current authenticated user.
+      operationId: logoutAll
+      tags:
+        - Authentication
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Successfully logged out all login tokens
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /auth:
     get:
@@ -2002,8 +2038,8 @@ components:
           description: MD5 hash of password as byte array
         retain:
           type: boolean
-          default: false
-          description: Whether to retain existing login state
+          default: true
+          description: Whether to retain existing login state. When true, logging in does not invalidate previously issued tokens.
 
     UserLoginResp:
       type: object

@@ -8,6 +8,7 @@ mod m20250911_025409_add_gin_indices_on_tags;
 mod m20250915_111689_add_tasks_trigger;
 mod m20251031_000001_add_reporter_uuid_to_archived_tasks;
 mod m20260703_000000_create_task_suite_tables;
+mod m20260703_000001_alter_tasks_link_suites;
 
 pub struct Migrator;
 
@@ -23,6 +24,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20250915_111689_add_tasks_trigger::Migration),
             Box::new(m20251031_000001_add_reporter_uuid_to_archived_tasks::Migration),
             Box::new(m20260703_000000_create_task_suite_tables::Migration),
+            Box::new(m20260703_000001_alter_tasks_link_suites::Migration),
         ]
     }
 }

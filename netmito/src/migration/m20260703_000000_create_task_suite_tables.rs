@@ -1,16 +1,5 @@
-//! Consolidated migration for the task-suite entity system.
-//!
-//! Creates, in FK-dependency order: `task_suites`, `agents`, `machines`
-//! (owned by its agent via `agent_id`, RESTRICT), the `group_agent` /
-//! `task_suite_agent` join tables, `suite_agent_jobs`, and `hook_tasks`; then
-//! links tasks to suites by adding `task_suite_id` to `active_tasks` /
-//! `archived_tasks`.
-//!
-//! This intentionally does NOT include the separate exec-spec refactor
-//! (timeout→spec, assigned_worker→runner_uuid, exec_options); tasks keep their
-//! current shape aside from the new `task_suite_id` column.
-//!
-//! See docs/plans/2026-07-03-suite-entity-design.md.
+//! Creates, in FK-dependency order: `task_suites`, `agents`, `machines`,
+//! `group_agent` / `task_suite_agent` join tables, `suite_agent_jobs`, and `hook_tasks`.
 
 use sea_orm_migration::prelude::*;
 
@@ -20,7 +9,7 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // ── task_suites ─────────────────────────────────────────────────
+        // ── task_suites ──
         manager
             .create_table(
                 Table::create()
@@ -170,7 +159,7 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // ── agents (durable; no machine_id column — see machines) ────────
+        // -- Agents --
         manager
             .create_table(
                 Table::create()
@@ -208,7 +197,6 @@ impl MigrationTrait for Migration {
                             .default(Expr::current_timestamp()),
                     )
                     .col(ColumnDef::new(Agents::AssignedTaskSuiteId).big_integer())
-                    .col(ColumnDef::new(Agents::Metadata).json_binary())
                     .col(
                         ColumnDef::new(Agents::CreatedAt)
                             .timestamp_with_time_zone()
@@ -234,7 +222,7 @@ impl MigrationTrait for Migration {
                             .name("fk-agents-assigned_task_suite_id")
                             .from(Agents::Table, Agents::AssignedTaskSuiteId)
                             .to(TaskSuites::Table, TaskSuites::Id)
-                            .on_delete(ForeignKeyAction::SetNull)
+                            .on_delete(ForeignKeyAction::Restrict)
                             .on_update(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
@@ -291,6 +279,8 @@ impl MigrationTrait for Migration {
             .await?;
 
         // ── machines (appendix of an agent; owns the FK back to agents) ──
+        // If the admin ever wants to remove an agent, they must manually remove all traces related
+        // to that agent.
         manager
             .create_table(
                 Table::create()
@@ -303,8 +293,6 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    // 1:1 owning agent; RESTRICT blocks deleting the agent while
-                    // this machine row exists (machine must be deleted first).
                     .col(
                         ColumnDef::new(Machines::AgentId)
                             .big_integer()
@@ -351,7 +339,7 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // ── group_agent ─────────────────────────────────────────────────
+        // ─- group_agent ──
         manager
             .create_table(
                 Table::create()
@@ -380,12 +368,14 @@ impl MigrationTrait for Migration {
                             .name("fk-group_agent-agent_id")
                             .from(GroupAgent::Table, GroupAgent::AgentId)
                             .to(Agents::Table, Agents::Id)
-                            .on_delete(ForeignKeyAction::Cascade)
+                            .on_delete(ForeignKeyAction::Restrict)
                             .on_update(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
             )
             .await?;
+
+        // Unique constraint on (group_id, agent_id)
         manager
             .create_index(
                 Index::create()
@@ -412,7 +402,7 @@ impl MigrationTrait for Migration {
                 .await?;
         }
 
-        // ── task_suite_agent ────────────────────────────────────────────
+        // ── task_suite_agent ──
         manager
             .create_table(
                 Table::create()
@@ -440,20 +430,29 @@ impl MigrationTrait for Migration {
                             .integer()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(TaskSuiteAgent::MatchedTags).array(ColumnType::Text))
+                    .col(
+                        ColumnDef::new(TaskSuiteAgent::CreatorId)
+                            .big_integer()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(TaskSuiteAgent::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
-                    .col(ColumnDef::new(TaskSuiteAgent::CreatorId).big_integer())
+                    .col(
+                        ColumnDef::new(TaskSuiteAgent::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk-task_suite_agent-task_suite_id")
                             .from(TaskSuiteAgent::Table, TaskSuiteAgent::TaskSuiteId)
                             .to(TaskSuites::Table, TaskSuites::Id)
-                            .on_delete(ForeignKeyAction::Cascade)
+                            .on_delete(ForeignKeyAction::Restrict)
                             .on_update(ForeignKeyAction::Cascade),
                     )
                     .foreign_key(
@@ -461,7 +460,7 @@ impl MigrationTrait for Migration {
                             .name("fk-task_suite_agent-agent_id")
                             .from(TaskSuiteAgent::Table, TaskSuiteAgent::AgentId)
                             .to(Agents::Table, Agents::Id)
-                            .on_delete(ForeignKeyAction::Cascade)
+                            .on_delete(ForeignKeyAction::Restrict)
                             .on_update(ForeignKeyAction::Cascade),
                     )
                     .foreign_key(
@@ -475,6 +474,7 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
+        // Unique  constraint on (task_suite_id, agent_id)
         manager
             .create_index(
                 Index::create()
@@ -508,7 +508,7 @@ impl MigrationTrait for Migration {
                 .await?;
         }
 
-        // ── suite_agent_jobs ────────────────────────────────────────────
+        // ── suite_agent_jobs ──
         manager
             .create_table(
                 Table::create()
@@ -526,43 +526,20 @@ impl MigrationTrait for Migration {
                             .big_integer()
                             .not_null(),
                     )
-                    .col(
-                        ColumnDef::new(SuiteAgentJobs::JobId)
-                            .integer()
-                            .not_null(),
-                    )
-                    // Nullable + SetNull FK: agent rows aren't reaped by the
-                    // system, but an admin may manually delete one via SQL;
-                    // that nulls this rather than being blocked, keeping the
-                    // job's history.
+                    .col(ColumnDef::new(SuiteAgentJobs::JobId).integer().not_null())
                     .col(ColumnDef::new(SuiteAgentJobs::AgentId).big_integer())
                     .col(
                         ColumnDef::new(SuiteAgentJobs::State)
                             .integer()
                             .not_null()
-                            .default(0), // Provision
-                    )
-                    .col(
-                        ColumnDef::new(SuiteAgentJobs::TasksCompleted)
-                            .integer()
-                            .not_null()
                             .default(0),
                     )
-                    .col(
-                        ColumnDef::new(SuiteAgentJobs::TasksFailed)
-                            .integer()
-                            .not_null()
-                            .default(0),
-                    )
-                    .col(ColumnDef::new(SuiteAgentJobs::FailureReason).json_binary())
                     .col(
                         ColumnDef::new(SuiteAgentJobs::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
-                    .col(ColumnDef::new(SuiteAgentJobs::StartedAt).timestamp_with_time_zone())
-                    .col(ColumnDef::new(SuiteAgentJobs::FinishedAt).timestamp_with_time_zone())
                     .col(
                         ColumnDef::new(SuiteAgentJobs::UpdatedAt)
                             .timestamp_with_time_zone()
@@ -582,14 +559,14 @@ impl MigrationTrait for Migration {
                             .name("fk-suite_agent_jobs-agent_id")
                             .from(SuiteAgentJobs::Table, SuiteAgentJobs::AgentId)
                             .to(Agents::Table, Agents::Id)
-                            .on_delete(ForeignKeyAction::SetNull)
+                            .on_delete(ForeignKeyAction::Restrict)
                             .on_update(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
             )
             .await?;
-        // User-facing key: job_id is ascending per suite (across agents).
-        // The unique index is the safety net for max(job_id)+1 allocation.
+        // User-facing key: job_id is ascending per suite
+        // unique constraint on (task_suite_id, job_id)
         manager
             .create_index(
                 Index::create()
@@ -604,10 +581,9 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_suite_agent_jobs-state_finished")
+                    .name("idx_suite_agent_jobs-state")
                     .table(SuiteAgentJobs::Table)
                     .col(SuiteAgentJobs::State)
-                    .col(SuiteAgentJobs::FinishedAt)
                     .to_owned(),
             )
             .await?;
@@ -621,7 +597,7 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // ── hook_tasks ──────────────────────────────────────────────────
+        // ── hook_tasks ──
         manager
             .create_table(
                 Table::create()
@@ -634,8 +610,6 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    // Handle for indexing this hook's logs in the shared
-                    // `artifacts` table (artifacts.task_id = hook_tasks.uuid).
                     .col(
                         ColumnDef::new(HookTasks::Uuid)
                             .uuid()
@@ -703,90 +677,10 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // ── link tasks to suites (task_suite_id only) ───────────────────
-        for tbl in [Tasks::ActiveTasks, Tasks::ArchivedTasks] {
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(tbl)
-                        .add_column_if_not_exists(ColumnDef::new(Tasks::TaskSuiteId).big_integer())
-                        .to_owned(),
-                )
-                .await?;
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(tbl)
-                        .add_foreign_key(
-                            TableForeignKey::new()
-                                .name(match tbl {
-                                    Tasks::ActiveTasks => "fk-active_tasks-task_suite_id",
-                                    _ => "fk-archived_tasks-task_suite_id",
-                                })
-                                .from_tbl(tbl)
-                                .from_col(Tasks::TaskSuiteId)
-                                .to_tbl(TaskSuites::Table)
-                                .to_col(TaskSuites::Id)
-                                .on_delete(ForeignKeyAction::SetNull)
-                                .on_update(ForeignKeyAction::Cascade),
-                        )
-                        .to_owned(),
-                )
-                .await?;
-            manager
-                .create_index(
-                    Index::create()
-                        .if_not_exists()
-                        .name(match tbl {
-                            Tasks::ActiveTasks => "idx_active_tasks-task_suite_id",
-                            _ => "idx_archived_tasks-task_suite_id",
-                        })
-                        .table(tbl)
-                        .col(Tasks::TaskSuiteId)
-                        .and_where(Expr::col(Tasks::TaskSuiteId).is_not_null())
-                        .to_owned(),
-                )
-                .await?;
-        }
-
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // Unlink tasks from suites.
-        for (tbl, fk, idx) in [
-            (
-                Tasks::ActiveTasks,
-                "fk-active_tasks-task_suite_id",
-                "idx_active_tasks-task_suite_id",
-            ),
-            (
-                Tasks::ArchivedTasks,
-                "fk-archived_tasks-task_suite_id",
-                "idx_archived_tasks-task_suite_id",
-            ),
-        ] {
-            manager
-                .drop_index(Index::drop().name(idx).table(tbl).to_owned())
-                .await?;
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(tbl)
-                        .drop_foreign_key(Alias::new(fk))
-                        .to_owned(),
-                )
-                .await?;
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(tbl)
-                        .drop_column(Tasks::TaskSuiteId)
-                        .to_owned(),
-                )
-                .await?;
-        }
-
         // Drop tables in reverse FK-dependency order (indexes go with them).
         for tbl in [
             HookTasks::Table.into_iden(),
@@ -840,7 +734,6 @@ enum Agents {
     State,
     LastHeartbeat,
     AssignedTaskSuiteId,
-    Metadata,
     CreatedAt,
     UpdatedAt,
 }
@@ -872,9 +765,9 @@ enum TaskSuiteAgent {
     TaskSuiteId,
     AgentId,
     SelectionType,
-    MatchedTags,
-    CreatedAt,
     CreatorId,
+    CreatedAt,
+    UpdatedAt,
 }
 
 #[derive(DeriveIden)]
@@ -885,12 +778,7 @@ enum SuiteAgentJobs {
     JobId,
     AgentId,
     State,
-    TasksCompleted,
-    TasksFailed,
-    FailureReason,
     CreatedAt,
-    StartedAt,
-    FinishedAt,
     UpdatedAt,
 }
 
@@ -908,16 +796,6 @@ enum HookTasks {
     CompletedAt,
     CreatedAt,
     UpdatedAt,
-}
-
-/// Existing task tables, referenced only to add `task_suite_id`. Variant names
-/// map to the `active_tasks` / `archived_tasks` table names.
-#[derive(DeriveIden, Clone, Copy)]
-#[allow(clippy::enum_variant_names)]
-enum Tasks {
-    ActiveTasks,
-    ArchivedTasks,
-    TaskSuiteId,
 }
 
 #[derive(DeriveIden)]

@@ -9,6 +9,7 @@ mod m20250915_111689_add_tasks_trigger;
 mod m20251031_000001_add_reporter_uuid_to_archived_tasks;
 mod m20260703_000000_create_task_suite_tables;
 mod m20260703_000001_alter_tasks_link_suites;
+mod m20260703_000002_alter_tasks_exec_spec;
 
 pub struct Migrator;
 
@@ -25,6 +26,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20251031_000001_add_reporter_uuid_to_archived_tasks::Migration),
             Box::new(m20260703_000000_create_task_suite_tables::Migration),
             Box::new(m20260703_000001_alter_tasks_link_suites::Migration),
+            Box::new(m20260703_000002_alter_tasks_exec_spec::Migration),
         ]
     }
 }

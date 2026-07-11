@@ -13,7 +13,7 @@ pub struct Model {
     pub task_suite_id: i64,
     pub agent_id: i64,
     pub selection_type: SuiteAgentSelectionType,
-    pub creator_id: Option<i64>,
+    pub creator_id: i64,
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
 }

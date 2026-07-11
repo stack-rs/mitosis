@@ -11,7 +11,7 @@ pub mod content;
 pub mod group_agent;
 pub mod group_worker;
 pub mod groups;
-pub mod hook_task;
+pub mod hook_tasks;
 pub mod machines;
 pub mod role;
 pub mod state;

@@ -430,11 +430,7 @@ impl MigrationTrait for Migration {
                             .integer()
                             .not_null(),
                     )
-                    .col(
-                        ColumnDef::new(TaskSuiteAgent::CreatorId)
-                            .big_integer()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(TaskSuiteAgent::CreatorId).big_integer())
                     .col(
                         ColumnDef::new(TaskSuiteAgent::CreatedAt)
                             .timestamp_with_time_zone()

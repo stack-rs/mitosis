@@ -8,7 +8,7 @@ pub use super::attachments::Entity as Attachments;
 pub use super::group_agent::Entity as GroupAgent;
 pub use super::group_worker::Entity as GroupWorker;
 pub use super::groups::Entity as Groups;
-pub use super::hook_task::Entity as HookTasks;
+pub use super::hook_tasks::Entity as HookTasks;
 pub use super::machines::Entity as Machines;
 pub use super::suite_agent_jobs::Entity as SuiteAgentJobs;
 pub use super::task_suite_agent::Entity as TaskSuiteAgent;

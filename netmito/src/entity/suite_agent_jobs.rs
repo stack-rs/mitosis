@@ -4,10 +4,10 @@
 //! (accept → provision → execute → cleanup → terminal state). Because agent
 //! rows are durable, the job references the agent directly (`agent_id`) and
 //! reaches the machine/uuid by join — no denormalized identity. We do not
-//! expose an agent-deletion endpoint, but an admin may manually delete an
-//! agent row via SQL (at their own risk); to preserve job history when that
-//! happens, `agent_id` is nullable and the FK is `SetNull` rather than
-//! `RESTRICT`. Hook tasks of a job reference it via
+//! expose an agent-deletion endpoint, and the FK is `RESTRICT`, so an agent
+//! row that still owns jobs cannot be deleted (its history stays anchored to
+//! the agent). `agent_id` is nullable only to leave room for future
+//! detach/reassignment. Hook tasks of a job reference it via
 //! `hook_tasks.suite_agent_job_id`.
 //! See docs/plans/2026-07-03-suite-entity-design.md.
 
@@ -24,11 +24,7 @@ pub struct Model {
     /// User-facing job number, ascending per suite (across agents).
     /// Allocated as max(job_id)+1 inside the accept transaction.
     pub job_id: i32,
-    /// Owning agent; the machine and registration uuid are reached by join.
-    /// Agent rows are not reaped by the system, but an admin may manually
-    /// delete one via SQL; the FK is `SetNull`, so this becomes NULL rather
-    /// than blocking the delete, keeping the job's history intact.
-    pub agent_id: Option<i64>,
+    pub agent_id: i64,
     pub state: SuiteJobState,
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
@@ -52,7 +48,7 @@ pub enum Relation {
         on_delete = "Restrict"
     )]
     Agents,
-    #[sea_orm(has_many = "super::hook_task::Entity")]
+    #[sea_orm(has_many = "super::hook_tasks::Entity")]
     HookTasks,
 }
 
@@ -68,7 +64,7 @@ impl Related<super::agents::Entity> for Entity {
     }
 }
 
-impl Related<super::hook_task::Entity> for Entity {
+impl Related<super::hook_tasks::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::HookTasks.def()
     }

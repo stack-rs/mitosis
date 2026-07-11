@@ -11,7 +11,7 @@ Before starting a Worker, we need to understand the environment inside a Worker.
 The Worker will spawn a new process for each task it runs and set up the following environment variables:
 
 - `MITO_TASK_UUID`: This will be set to the UUID of the task being executed.
-- `MITO_NEW_TASK`: This will be set to the path a file where you can write a new task specification (i.e., SubmitTaskReq) in json format for the Worker to submit it on behalf of you, as a downstream task of the current task.
+- `MITO_NEW_TASK`: This will be set to the path to a file where you can write a new task specification (i.e., SubmitTaskReq) in json format for the Worker to submit it on behalf of you, as a downstream task of the current task.
 - `MITO_UPSTREAM_TASK_UUID`: This will be set to the UUID of the upstream task if the current task is submitted by another task while running.
 - `MITO_RESOURCE_DIR`: This will be set to the path of a directory where you can find the resources (i.e., attachments) of the task.
 - `MITO_RESULT_DIR`: This will be set to the path of a directory where you can store the results of the task. The Worker will pack the directory and upload it as the artifacts of the task if it is not empty.
@@ -20,13 +20,13 @@ The Worker will spawn a new process for each task it runs and set up the followi
 ## Starting a Worker
 
 To start a Worker, you need to provide a TOML file that configures the Worker.
-The TOML file specifies the Worker's configuration, such as the polling (fetching) interval, the URL of the Coordinator, and the the groups allowed to submit tasks to it.
+The TOML file specifies the Worker's configuration, such as the polling (fetching) interval, the URL of the Coordinator, and the groups allowed to submit tasks to it.
 All configuration options are optional and have default values.
 
 The Worker will merge the configuration from the file and the command-line arguments according to the following order (the latter overrides the former):
 
 ```md
-DEFAULT <- `$CONFIG_DIR`/mitosis/config.toml <- config file specified by `cli.config` or loal `config.toml` <- env prefixed by `MITO_` <- cli arguments
+DEFAULT <- `$CONFIG_DIR`/mitosis/config.toml <- config file specified by `cli.config` or local `config.toml` <- env prefixed by `MITO_` <- cli arguments
 
 `$CONFIG_DIR` will be different on different platforms:
 
@@ -42,6 +42,9 @@ Here is an example of a Worker configuration file (you can also refer to `config
 coordinator_addr = "http://127.0.0.1:5000"
 polling_interval = "3m"
 heartbeat_interval = "5m"
+# lifetime controls the worker JWT token lifetime.
+# Use a duration such as "7d", "1h", or "30m"; use "never" to issue a token without exp.
+# If omitted or set to "default", the coordinator default token lifetime is used.
 lifetime = "7d"
 # credential_path is not set
 # user is not set
@@ -53,7 +56,6 @@ file_log = false
 # log_path is not set. It will use the default rolling log file path if file_log is set to true
 #   - If shared_log is enabled and log_path is not set, it will use workers.log in cache directory
 #   - If shared_log is disabled and log_path is not set, it will use {worker_uuid}.log in cache directory
-# lifetime is not set, default to the coordinator's setting
 ```
 
 To start a Worker, run the following command:
@@ -115,12 +117,20 @@ Options:
           The groups allowed to submit tasks to this worker
   -t, --tags [<TAGS>...]
           The tags of this worker
+  -l, --labels [<LABELS>...]
+          The labels of this worker
       --log-path <LOG_PATH>
           The log file path. If not specified, then the default rolling log file path would be used. If specified, then the log file would be exactly at the path specified
       --file-log
           Enable logging to file
+      --shared-log
+          Enable shared logging across multiple workers with daily rotation (max 3 files)
       --lifetime <LIFETIME>
-          The lifetime of the worker to alive (e.g., 7d, 1year)
+          The lifetime of the worker token (e.g., 7d, 1year, never)
+      --retain
+          Whether to retain the previous login state without refetching the credential
+      --skip-redis
+          Whether to skip connecting to Redis
   -h, --help
           Print help
   -V, --version
@@ -160,6 +170,3 @@ shared_log = true  # Enable shared rolling logs
 - macOS: `$HOME/Library/Caches/mitosis`
 - Windows: `{FOLDERID_LocalAppData}\mitosis`
 
-```
-
-```

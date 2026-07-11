@@ -4,7 +4,7 @@ use std::{
 };
 
 use sea_orm::FromQueryResult;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -99,14 +99,58 @@ pub struct GroupQueryInfo {
     pub users_in_group: Option<HashMap<String, UserGroupRole>>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub enum WorkerTokenLifetime {
+    #[default]
+    Default,
+    Duration(std::time::Duration),
+    Never,
+}
+
+impl WorkerTokenLifetime {
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Default)
+    }
+}
+
+impl Serialize for WorkerTokenLifetime {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Default => serializer.serialize_str("default"),
+            Self::Duration(duration) => serializer.serialize_str(
+                &humantime_serde::re::humantime::format_duration(*duration).to_string(),
+            ),
+            Self::Never => serializer.serialize_str("never"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkerTokenLifetime {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<String>::deserialize(deserializer)?.as_deref() {
+            None => Ok(Self::Default),
+            Some(value) if value.eq_ignore_ascii_case("default") => Ok(Self::Default),
+            Some(value) if value.eq_ignore_ascii_case("never") => Ok(Self::Never),
+            Some(value) => humantime_serde::re::humantime::parse_duration(value)
+                .map(Self::Duration)
+                .map_err(serde::de::Error::custom),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RegisterWorkerReq {
     pub tags: HashSet<String>,
     pub labels: HashSet<String>,
     pub groups: HashSet<String>,
-    #[serde(default)]
-    #[serde(with = "humantime_serde")]
-    pub lifetime: Option<std::time::Duration>,
+    #[serde(default, skip_serializing_if = "WorkerTokenLifetime::is_default")]
+    pub lifetime: WorkerTokenLifetime,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

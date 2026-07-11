@@ -265,8 +265,10 @@ async fn user_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<User::Mod
     let token = bearer.token();
     let claims = verify_token(token).map_err(|_| AuthError::InvalidToken)?;
     let now = TimeDateTimeWithTimeZone::now_utc();
-    if claims.exp < now {
-        return Err(AuthError::WrongCredentials);
+    match claims.exp {
+        Some(exp) if exp >= now => {}
+        Some(_) => return Err(AuthError::WrongCredentials),
+        None => return Err(AuthError::InvalidToken),
     }
 
     let user = User::Entity::find()
@@ -300,8 +302,10 @@ async fn admin_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<AuthAdmi
     let token = bearer.token();
     let claims = verify_token(token).map_err(|_| AuthError::InvalidToken)?;
     let now = TimeDateTimeWithTimeZone::now_utc();
-    if claims.exp < now {
-        return Err(AuthError::WrongCredentials);
+    match claims.exp {
+        Some(exp) if exp >= now => {}
+        Some(_) => return Err(AuthError::WrongCredentials),
+        None => return Err(AuthError::InvalidToken),
     }
 
     let user = User::Entity::find()
@@ -337,6 +341,12 @@ pub async fn worker_auth_middleware(
 async fn worker_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<AuthWorker, AuthError> {
     let token = bearer.token();
     let claims = verify_token(token).map_err(|_| AuthError::InvalidToken)?;
+    if let Some(exp) = claims.exp {
+        let now = TimeDateTimeWithTimeZone::now_utc();
+        if exp < now {
+            return Err(AuthError::WrongCredentials);
+        }
+    }
     let uuid = Uuid::parse_str(&claims.sub).map_err(|_| AuthError::InvalidToken)?;
 
     let worker = Worker::Entity::find()

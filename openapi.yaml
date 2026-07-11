@@ -2529,6 +2529,7 @@ components:
       type: object
       required:
         - tags
+        - labels
         - groups
       properties:
         tags:
@@ -2540,6 +2541,14 @@ components:
             - gpu
             - cuda
             - python
+        labels:
+          type: array
+          items:
+            type: string
+          description: Worker labels for organization and querying
+          example:
+            - linux
+            - cuda12
         groups:
           type: array
           items:
@@ -2551,7 +2560,7 @@ components:
         lifetime:
           type: string
           nullable: true
-          description: Worker lifetime (e.g. "7d", "1h")
+          description: Worker JWT token lifetime. Use a duration such as "7d", "1h", or "30m"; use "never" to issue a token without exp; use "default", omit the field, or set it to null to use the coordinator default token lifetime.
           example: 7d
 
     RegisterWorkerResp:

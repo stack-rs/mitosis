@@ -29,8 +29,8 @@ use crate::{
     },
     error::{ApiError, AuthError, Error},
     schema::{
-        CountQuery, RawWorkerQueryInfo, ReportTaskOp, TaskSpec, WorkerQueryInfo, WorkerQueryResp,
-        WorkerShutdownOp, WorkerTaskResp, WorkersQueryReq, WorkersQueryResp,
+        CountQuery, ExecSpec, RawWorkerQueryInfo, ReportTaskOp, TaskExecOptions, WorkerQueryInfo,
+        WorkerQueryResp, WorkerShutdownOp, WorkerTaskResp, WorkersQueryReq, WorkersQueryResp,
         WorkersShutdownByFilterReq, WorkersShutdownByFilterResp, WorkersShutdownByUuidsReq,
         WorkersShutdownByUuidsResp,
     },
@@ -220,7 +220,7 @@ async fn remove_worker(worker: Worker::Model, pool: &InfraPool) -> crate::error:
     if let Some(task_id) = worker.assigned_task_id {
         let task = ActiveTask::ActiveModel {
             id: Set(task_id),
-            assigned_worker: Set(None),
+            runner_uuid: Set(None),
             state: Set(TaskState::Ready),
             updated_at: Set(TimeDateTimeWithTimeZone::now_utc()),
             ..Default::default()
@@ -457,9 +457,15 @@ pub async fn heartbeat(worker_id: i64, pool: &InfraPool) -> crate::error::Result
             .await?
         {
             if task.state == TaskState::Running {
+                // Timeout lives in the exec spec; default to 600s if unset/unparseable.
+                let timeout_secs = serde_json::from_value::<ExecSpec>(task.spec.clone())
+                    .ok()
+                    .and_then(|s| s.timeout)
+                    .map(|t| t.as_secs() as i64)
+                    .unwrap_or(600);
                 // We allow a 60 seconds grace period
                 if TimeDateTimeWithTimeZone::now_utc() - task.updated_at
-                    > time::Duration::seconds(task.timeout + 60)
+                    > time::Duration::seconds(timeout_secs + 60)
                 {
                     remove_worker(worker, pool).await?;
                     return Ok(());
@@ -492,6 +498,7 @@ pub fn remove_task(task_id: i64, pool: &InfraPool) -> crate::error::Result<()> {
 
 pub async fn fetch_task(
     worker_id: i64,
+    worker_uuid: Uuid,
     pool: &InfraPool,
 ) -> crate::error::Result<Option<WorkerTaskResp>> {
     loop {
@@ -510,11 +517,11 @@ pub async fn fetch_task(
                 Some(id) => {
                     let now = TimeDateTimeWithTimeZone::now_utc();
                     let tasks = ActiveTask::Entity::update_many()
-                        .col_expr(ActiveTask::Column::AssignedWorker, Expr::value(worker_id))
+                        .col_expr(ActiveTask::Column::RunnerUuid, Expr::value(worker_uuid))
                         .col_expr(ActiveTask::Column::UpdatedAt, Expr::value(now))
                         .col_expr(ActiveTask::Column::State, Expr::value(TaskState::Running))
                         .filter(ActiveTask::Column::Id.eq(id))
-                        .filter(ActiveTask::Column::AssignedWorker.is_null())
+                        .filter(ActiveTask::Column::RunnerUuid.is_null())
                         .filter(ActiveTask::Column::State.eq(TaskState::Ready))
                         .exec_with_returning(&pool.db)
                         .await?;
@@ -527,13 +534,15 @@ pub async fn fetch_task(
                             ..Default::default()
                         };
                         worker.update(&pool.db).await?;
-                        let spec: TaskSpec = serde_json::from_value(task.spec)?;
+                        let spec: ExecSpec = serde_json::from_value(task.spec)?;
+                        let exec_options: Option<TaskExecOptions> =
+                            task.exec_options.map(serde_json::from_value).transpose()?;
                         let task_resp = WorkerTaskResp {
                             id: task.id,
                             uuid: task.uuid,
-                            timeout: std::time::Duration::from_secs(task.timeout as u64),
                             upstream_task_uuid: task.upstream_task_uuid,
                             spec,
+                            exec_options,
                         };
                         break Ok(Some(task_resp));
                     }
@@ -556,8 +565,8 @@ pub async fn report_task(
         .one(&pool.db)
         .await?
         .ok_or(ApiError::NotFound(format!("Task {task_id} not found")))?;
-    if let Some(w_id) = task.assigned_worker {
-        if w_id != worker_id {
+    if let Some(r_id) = task.runner_uuid {
+        if r_id != worker_uuid {
             return Err(ApiError::NotFound(format!("Task {task_id} not found")).into());
         }
     } else {
@@ -667,14 +676,13 @@ pub async fn report_task(
                 created_at: Set(task.created_at),
                 updated_at: Set(now),
                 state: Set(task.state),
-                assigned_worker: Set(task.assigned_worker),
-                timeout: Set(task.timeout),
+                runner_uuid: Set(task.runner_uuid),
                 priority: Set(task.priority),
                 spec: Set(task.spec),
+                exec_options: Set(task.exec_options),
                 result: Set(Some(result)),
                 upstream_task_uuid: Set(task.upstream_task_uuid),
                 downstream_task_uuid: Set(task.downstream_task_uuid),
-                reporter_uuid: Set(Some(worker_uuid)),
                 task_suite_id: Set(task.task_suite_id),
             };
             let worker = Worker::ActiveModel {
@@ -961,16 +969,23 @@ pub async fn shutdown_workers_by_filter(
                     WorkerShutdownOp::Force => {
                         // 1. Reassign tasks assigned to matching workers.
                         //    The subquery joins group_worker which still exists at this point.
+                        //    runner_uuid holds worker UUIDs, so map the worker ids to uuids.
+                        let runner_uuid_subquery = Query::select()
+                            .column((Worker::Entity, Worker::Column::WorkerId))
+                            .from(Worker::Entity)
+                            .and_where(
+                                Worker::Column::Id.in_subquery(worker_filter_subquery.clone()),
+                            )
+                            .to_owned();
                         tasks_to_reassign = ActiveTask::Entity::update_many()
                             .col_expr(
-                                ActiveTask::Column::AssignedWorker,
-                                Expr::value(Option::<i64>::None),
+                                ActiveTask::Column::RunnerUuid,
+                                Expr::value(Option::<Uuid>::None),
                             )
                             .col_expr(ActiveTask::Column::State, Expr::value(TaskState::Ready))
                             .col_expr(ActiveTask::Column::UpdatedAt, Expr::value(now))
                             .filter(
-                                ActiveTask::Column::AssignedWorker
-                                    .in_subquery(worker_filter_subquery.clone()),
+                                ActiveTask::Column::RunnerUuid.in_subquery(runner_uuid_subquery),
                             )
                             .exec_with_returning(txn)
                             .await?;
@@ -1251,8 +1266,8 @@ pub async fn shutdown_workers_by_uuids(
                                 if !task_ids.is_empty() {
                                     tasks_to_reassign = ActiveTask::Entity::update_many()
                                         .col_expr(
-                                            ActiveTask::Column::AssignedWorker,
-                                            Expr::value(Option::<i64>::None),
+                                            ActiveTask::Column::RunnerUuid,
+                                            Expr::value(Option::<Uuid>::None),
                                         )
                                         .col_expr(
                                             ActiveTask::Column::State,

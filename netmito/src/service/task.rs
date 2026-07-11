@@ -1,6 +1,6 @@
 use sea_orm::sea_query::{
     extension::postgres::PgExpr, Alias, CommonTableExpression, DeleteStatement, ExprTrait,
-    InsertStatement, PgFunc, Query, SimpleExpr, Value,
+    InsertStatement, PgFunc, Query,
 };
 use sea_orm::{prelude::*, FromQueryResult, Set, TransactionTrait};
 use std::collections::HashSet;
@@ -15,7 +15,7 @@ use crate::schema::{
     TasksCancelByFilterResp, TasksCancelByUuidsReq, TasksCancelByUuidsResp, TasksQueryReq,
     TasksQueryResp, UpdateTaskLabelsReq,
 };
-use crate::{config::InfraPool, schema::TaskSpec};
+use crate::{config::InfraPool, schema::ExecSpec};
 
 use crate::{
     entity::{
@@ -30,7 +30,7 @@ use super::worker::{remove_task, TaskDispatcherOp};
 
 // XXX: Not sure if we can relax the constrains on local path checking.
 // We currently only check if the path is absolute or contains `..` and not check for `.`.
-fn check_task_spec(spec: &TaskSpec) -> crate::error::Result<()> {
+fn check_exec_spec(spec: &ExecSpec) -> crate::error::Result<()> {
     if spec.resources.iter().any(|r| {
         r.local_path.is_absolute()
             || r.local_path
@@ -51,9 +51,9 @@ pub async fn user_submit_task(
         group_name,
         tags,
         labels,
-        timeout,
         priority,
-        task_spec,
+        spec,
+        exec_options,
     }: SubmitTaskReq,
 ) -> crate::error::Result<SubmitTaskResp> {
     let tags = Vec::from_iter(tags);
@@ -77,8 +77,9 @@ pub async fn user_submit_task(
     let group_id = group.id;
     let task_id = group.task_count;
     let uuid = Uuid::new_v4();
-    check_task_spec(&task_spec)?;
-    let spec = serde_json::to_value(task_spec)?;
+    check_exec_spec(&spec)?;
+    let spec_json = serde_json::to_value(spec)?;
+    let exec_options = exec_options.map(serde_json::to_value).transpose()?;
     let task = ActiveTasks::ActiveModel {
         creator_id: Set(creator_id),
         group_id: Set(group_id),
@@ -89,10 +90,10 @@ pub async fn user_submit_task(
         created_at: Set(now),
         updated_at: Set(now),
         state: Set(crate::entity::state::TaskState::Ready),
-        assigned_worker: Set(None),
-        timeout: Set(timeout.as_secs() as i64),
+        runner_uuid: Set(None),
         priority: Set(priority),
-        spec: Set(spec),
+        spec: Set(spec_json),
+        exec_options: Set(exec_options),
         result: Set(None),
         ..Default::default()
     };
@@ -144,9 +145,9 @@ pub async fn worker_submit_pending_task(
         group_name,
         tags,
         labels,
-        timeout,
         priority,
-        task_spec,
+        spec,
+        exec_options,
     }: SubmitTaskReq,
 ) -> crate::error::Result<SubmitTaskResp> {
     let tags = Vec::from_iter(tags);
@@ -170,8 +171,9 @@ pub async fn worker_submit_pending_task(
     let group_id = group.id;
     let task_id = group.task_count;
     let uuid = Uuid::new_v4();
-    check_task_spec(&task_spec)?;
-    let spec = serde_json::to_value(task_spec)?;
+    check_exec_spec(&spec)?;
+    let spec_json = serde_json::to_value(spec)?;
+    let exec_options = exec_options.map(serde_json::to_value).transpose()?;
     let task = ActiveTasks::ActiveModel {
         creator_id: Set(creator_id),
         group_id: Set(group_id),
@@ -182,10 +184,10 @@ pub async fn worker_submit_pending_task(
         created_at: Set(now),
         updated_at: Set(now),
         state: Set(crate::entity::state::TaskState::Pending),
-        assigned_worker: Set(None),
-        timeout: Set(timeout.as_secs() as i64),
+        runner_uuid: Set(None),
         priority: Set(priority),
-        spec: Set(spec),
+        spec: Set(spec_json),
+        exec_options: Set(exec_options),
         result: Set(None),
         upstream_task_uuid: Set(Some(upstream_task_uuid)),
         ..Default::default()
@@ -253,12 +255,12 @@ pub async fn user_change_task(
     uuid: Uuid,
     ChangeTaskReq {
         tags,
-        timeout,
         priority,
-        task_spec,
+        spec,
+        exec_options,
     }: ChangeTaskReq,
 ) -> crate::error::Result<()> {
-    if tags.is_none() && timeout.is_none() && priority.is_none() && task_spec.is_none() {
+    if tags.is_none() && priority.is_none() && spec.is_none() && exec_options.is_none() {
         return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
             "No change specified".to_string(),
         )));
@@ -295,13 +297,13 @@ pub async fn user_change_task(
                 if let Some(tags) = tags {
                     task.tags = Set(Vec::from_iter(tags));
                 }
-                if let Some(task_spec) = task_spec {
-                    check_task_spec(&task_spec)?;
-                    let spec = serde_json::to_value(task_spec)?;
-                    task.spec = Set(spec);
+                if let Some(spec) = spec {
+                    check_exec_spec(&spec)?;
+                    let spec_json = serde_json::to_value(spec)?;
+                    task.spec = Set(spec_json);
                 }
-                if let Some(timeout) = timeout {
-                    task.timeout = Set(timeout.as_secs() as i64);
+                if let Some(exec_options) = exec_options {
+                    task.exec_options = Set(Some(serde_json::to_value(exec_options)?));
                 }
                 if let Some(priority) = priority {
                     task.priority = Set(priority);
@@ -472,14 +474,13 @@ pub async fn user_cancel_task(
                     created_at: Set(task.created_at),
                     updated_at: Set(now),
                     state: Set(TaskState::Cancelled),
-                    assigned_worker: Set(task.assigned_worker),
-                    timeout: Set(task.timeout),
+                    runner_uuid: Set(task.runner_uuid),
                     priority: Set(task.priority),
                     spec: Set(task.spec),
+                    exec_options: Set(task.exec_options),
                     result: Set(Some(result)),
                     upstream_task_uuid: Set(task.upstream_task_uuid),
                     downstream_task_uuid: Set(task.downstream_task_uuid),
-                    reporter_uuid: Set(None),
                     task_suite_id: Set(task.task_suite_id),
                 };
                 archived_task.insert(txn).await?;
@@ -503,15 +504,14 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             (ActiveTasks::Entity, ActiveTasks::Column::CreatedAt),
             (ActiveTasks::Entity, ActiveTasks::Column::UpdatedAt),
             (ActiveTasks::Entity, ActiveTasks::Column::State),
-            (ActiveTasks::Entity, ActiveTasks::Column::Timeout),
             (ActiveTasks::Entity, ActiveTasks::Column::Priority),
             (ActiveTasks::Entity, ActiveTasks::Column::Spec),
+            (ActiveTasks::Entity, ActiveTasks::Column::ExecOptions),
             (ActiveTasks::Entity, ActiveTasks::Column::Result),
             (ActiveTasks::Entity, ActiveTasks::Column::UpstreamTaskUuid),
             (ActiveTasks::Entity, ActiveTasks::Column::DownstreamTaskUuid),
+            (ActiveTasks::Entity, ActiveTasks::Column::RunnerUuid),
         ])
-        // Active tasks do not have reporter_uuid; return NULL
-        .expr_as(Expr::val(Value::Uuid(None)), Alias::new("reporter_uuid"))
         .expr_as(
             Expr::col((User::Entity, User::Column::Username)),
             Alias::new("creator_username"),
@@ -547,9 +547,9 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             (ArchivedTasks::Entity, ArchivedTasks::Column::CreatedAt),
             (ArchivedTasks::Entity, ArchivedTasks::Column::UpdatedAt),
             (ArchivedTasks::Entity, ArchivedTasks::Column::State),
-            (ArchivedTasks::Entity, ArchivedTasks::Column::Timeout),
             (ArchivedTasks::Entity, ArchivedTasks::Column::Priority),
             (ArchivedTasks::Entity, ArchivedTasks::Column::Spec),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::ExecOptions),
             (ArchivedTasks::Entity, ArchivedTasks::Column::Result),
             (
                 ArchivedTasks::Entity,
@@ -559,7 +559,7 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
                 ArchivedTasks::Entity,
                 ArchivedTasks::Column::DownstreamTaskUuid,
             ),
-            (ArchivedTasks::Entity, ArchivedTasks::Column::ReporterUuid),
+            (ArchivedTasks::Entity, ArchivedTasks::Column::RunnerUuid),
         ])
         .expr_as(
             Expr::col((User::Entity, User::Column::Username)),
@@ -619,13 +619,13 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
         created_at: info.created_at,
         updated_at: info.updated_at,
         state: info.state,
-        timeout: info.timeout,
         priority: info.priority,
         spec: serde_json::from_value(info.spec)?,
+        exec_options: info.exec_options.map(serde_json::from_value).transpose()?,
         result: info.result.map(serde_json::from_value).transpose()?,
         upstream_task_uuid: info.upstream_task_uuid,
         downstream_task_uuid: info.downstream_task_uuid,
-        reporter_uuid: info.reporter_uuid,
+        runner_uuid: info.runner_uuid,
     };
     Ok(TaskQueryResp { info, artifacts })
 }
@@ -751,13 +751,13 @@ pub(crate) fn apply_task_filters(
     archive_stmt: &mut sea_orm::sea_query::SelectStatement,
     query: &TasksQueryReq,
 ) -> crate::error::Result<()> {
-    if let Some(reporter_uuid) = query.reporter_uuid {
-        // reporter_uuid applies only to archived tasks. Ensure active query returns nothing.
-        // Exclude active tasks by adding a false condition.
-        active_stmt.and_where(Expr::value(false));
+    if let Some(runner_uuid) = query.runner_uuid {
+        // runner_uuid is on both active and archived tasks; filter both directly.
+        active_stmt.and_where(
+            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::RunnerUuid)).eq(runner_uuid),
+        );
         archive_stmt.and_where(
-            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::ReporterUuid))
-                .eq(reporter_uuid),
+            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::RunnerUuid)).eq(runner_uuid),
         );
     }
     if let Some(ref creator_usernames) = query.creator_usernames {
@@ -965,15 +965,14 @@ pub async fn query_tasks_by_filter(
                 (ActiveTasks::Entity, ActiveTasks::Column::CreatedAt),
                 (ActiveTasks::Entity, ActiveTasks::Column::UpdatedAt),
                 (ActiveTasks::Entity, ActiveTasks::Column::State),
-                (ActiveTasks::Entity, ActiveTasks::Column::Timeout),
                 (ActiveTasks::Entity, ActiveTasks::Column::Priority),
                 (ActiveTasks::Entity, ActiveTasks::Column::Spec),
+                (ActiveTasks::Entity, ActiveTasks::Column::ExecOptions),
                 (ActiveTasks::Entity, ActiveTasks::Column::Result),
                 (ActiveTasks::Entity, ActiveTasks::Column::UpstreamTaskUuid),
                 (ActiveTasks::Entity, ActiveTasks::Column::DownstreamTaskUuid),
+                (ActiveTasks::Entity, ActiveTasks::Column::RunnerUuid),
             ])
-            // Active tasks do not have reporter_uuid; return NULL
-            .expr_as(Expr::val(Value::Uuid(None)), Alias::new("reporter_uuid"))
             .expr_as(
                 Expr::col((User::Entity, User::Column::Username)),
                 Alias::new("creator_username"),
@@ -1012,9 +1011,9 @@ pub async fn query_tasks_by_filter(
                 (ArchivedTasks::Entity, ArchivedTasks::Column::CreatedAt),
                 (ArchivedTasks::Entity, ArchivedTasks::Column::UpdatedAt),
                 (ArchivedTasks::Entity, ArchivedTasks::Column::State),
-                (ArchivedTasks::Entity, ArchivedTasks::Column::Timeout),
                 (ArchivedTasks::Entity, ArchivedTasks::Column::Priority),
                 (ArchivedTasks::Entity, ArchivedTasks::Column::Spec),
+                (ArchivedTasks::Entity, ArchivedTasks::Column::ExecOptions),
                 (ArchivedTasks::Entity, ArchivedTasks::Column::Result),
                 (
                     ArchivedTasks::Entity,
@@ -1024,7 +1023,7 @@ pub async fn query_tasks_by_filter(
                     ArchivedTasks::Entity,
                     ArchivedTasks::Column::DownstreamTaskUuid,
                 ),
-                (ArchivedTasks::Entity, ArchivedTasks::Column::ReporterUuid),
+                (ArchivedTasks::Entity, ArchivedTasks::Column::RunnerUuid),
             ])
             .expr_as(
                 Expr::col((User::Entity, User::Column::Username)),
@@ -1107,7 +1106,7 @@ pub async fn cancel_tasks_by_filter(
         group_name: req.group_name,
         tags: req.tags,
         labels: req.labels,
-        reporter_uuid: None,
+        runner_uuid: None,
         // Filter for Ready and Pending tasks (cancellable states)
         states: {
             let mut states = HashSet::new();
@@ -1204,14 +1203,13 @@ pub async fn cancel_tasks_by_filter(
                     .expr(Expr::col(Alias::new("created_at")))
                     .expr(Expr::value(now))
                     .expr(Expr::value(TaskState::Cancelled))
-                    .expr(Expr::col(Alias::new("assigned_worker")))
-                    .expr(Expr::col(Alias::new("timeout")))
+                    .expr(Expr::col(Alias::new("runner_uuid")))
+                    .expr(Expr::col(Alias::new("exec_options")))
                     .expr(Expr::col(Alias::new("priority")))
                     .expr(Expr::col(Alias::new("spec")))
                     .expr(Expr::value(result.clone()))
                     .expr(Expr::col(Alias::new("upstream_task_uuid")))
                     .expr(Expr::col(Alias::new("downstream_task_uuid")))
-                    .expr(SimpleExpr::Constant(Value::Uuid(None)))
                     .from(Alias::new("deleted"))
                     .to_owned();
 
@@ -1229,14 +1227,13 @@ pub async fn cancel_tasks_by_filter(
                         ArchivedTasks::Column::CreatedAt,
                         ArchivedTasks::Column::UpdatedAt,
                         ArchivedTasks::Column::State,
-                        ArchivedTasks::Column::AssignedWorker,
-                        ArchivedTasks::Column::Timeout,
+                        ArchivedTasks::Column::RunnerUuid,
+                        ArchivedTasks::Column::ExecOptions,
                         ArchivedTasks::Column::Priority,
                         ArchivedTasks::Column::Spec,
                         ArchivedTasks::Column::Result,
                         ArchivedTasks::Column::UpstreamTaskUuid,
                         ArchivedTasks::Column::DownstreamTaskUuid,
-                        ArchivedTasks::Column::ReporterUuid,
                     ])
                     .to_owned();
 
@@ -1375,14 +1372,13 @@ pub async fn cancel_tasks_by_uuids(
                         .expr(Expr::col(Alias::new("created_at")))
                         .expr(Expr::value(now))
                         .expr(Expr::value(TaskState::Cancelled))
-                        .expr(Expr::col(Alias::new("assigned_worker")))
-                        .expr(Expr::col(Alias::new("timeout")))
+                        .expr(Expr::col(Alias::new("runner_uuid")))
+                        .expr(Expr::col(Alias::new("exec_options")))
                         .expr(Expr::col(Alias::new("priority")))
                         .expr(Expr::col(Alias::new("spec")))
                         .expr(Expr::value(result.clone()))
                         .expr(Expr::col(Alias::new("upstream_task_uuid")))
                         .expr(Expr::col(Alias::new("downstream_task_uuid")))
-                        .expr(SimpleExpr::Constant(Value::Uuid(None)))
                         .from(Alias::new("deleted"))
                         .to_owned();
 
@@ -1400,14 +1396,13 @@ pub async fn cancel_tasks_by_uuids(
                             ArchivedTasks::Column::CreatedAt,
                             ArchivedTasks::Column::UpdatedAt,
                             ArchivedTasks::Column::State,
-                            ArchivedTasks::Column::AssignedWorker,
-                            ArchivedTasks::Column::Timeout,
+                            ArchivedTasks::Column::RunnerUuid,
+                            ArchivedTasks::Column::ExecOptions,
                             ArchivedTasks::Column::Priority,
                             ArchivedTasks::Column::Spec,
                             ArchivedTasks::Column::Result,
                             ArchivedTasks::Column::UpstreamTaskUuid,
                             ArchivedTasks::Column::DownstreamTaskUuid,
-                            ArchivedTasks::Column::ReporterUuid,
                         ])
                         .to_owned();
 

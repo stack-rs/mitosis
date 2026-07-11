@@ -13,7 +13,8 @@ pub struct Model {
     pub task_suite_id: i64,
     pub agent_id: i64,
     pub selection_type: SuiteAgentSelectionType,
-    pub creator_id: i64,
+    /// Nullable so the creator FK can be `on_delete=SetNull`.
+    pub creator_id: Option<i64>,
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
 }
@@ -72,10 +73,8 @@ impl ActiveModelBehavior for ActiveModel {}
 pub enum SuiteAgentSelectionType {
     /// Agent was manually selected by user
     UserIncluded = 0,
-    /// Agnet was manually excluded by user
+    /// Agent was manually excluded by user
     UserExcluded = 1,
-    // /// Agent was selected by tag matching
-    // TagMatched = 1,
 }
 
 impl Display for SuiteAgentSelectionType {

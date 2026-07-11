@@ -6,8 +6,9 @@ use crate::{
     config::client::parse_resources,
     entity::state::{TaskExecState, TaskState},
     schema::{
-        ChangeTaskReq, RemoteResourceDownload, SubmitTaskReq, TaskSpec, TasksCancelByFilterReq,
-        TasksCancelByUuidsReq, TasksQueryReq, TasksSubmitReq, UpdateTaskLabelsReq,
+        ChangeTaskReq, ExecSpec, RemoteResourceDownload, SubmitTaskReq, TaskExecOptions,
+        TasksCancelByFilterReq, TasksCancelByUuidsReq, TasksQueryReq, TasksSubmitReq,
+        UpdateTaskLabelsReq,
     },
 };
 
@@ -106,9 +107,9 @@ pub struct QueryTasksArgs {
     /// The priority of the tasks, support operators like `=`(default), `!=`, `<`, `<=`, `>`, `>=`
     #[arg(short, long)]
     pub priority: Option<String>,
-    /// Filter by reporter worker UUID (only returns completed tasks reported by this worker)
+    /// Filter by the runner worker UUID that executed the tasks
     #[arg(long)]
-    pub reporter_uuid: Option<Uuid>,
+    pub runner_uuid: Option<Uuid>,
     /// The limit of the tasks to query
     #[arg(long)]
     pub limit: Option<u64>,
@@ -203,7 +204,7 @@ pub struct ChangeTaskArgs {
 impl From<QueryTasksArgs> for TasksQueryReq {
     fn from(args: QueryTasksArgs) -> Self {
         Self {
-            reporter_uuid: args.reporter_uuid,
+            runner_uuid: args.runner_uuid,
             creator_usernames: if args.creators.is_empty() {
                 None
             } else {
@@ -236,26 +237,27 @@ impl From<QueryTasksArgs> for TasksQueryReq {
 
 impl From<ChangeTaskArgs> for ChangeTaskReq {
     fn from(args: ChangeTaskArgs) -> Self {
-        let task_spec = if args.command.is_empty() {
+        let spec = if args.command.is_empty() {
             None
         } else {
-            Some(TaskSpec::new(
+            Some(ExecSpec::new(
                 args.command,
                 args.envs,
                 args.resources,
+                args.timeout,
                 args.terminal_output,
-                args.watch,
             ))
         };
+        let exec_options = args.watch.map(|w| TaskExecOptions { watch: Some(w) });
         Self {
             tags: if args.tags.is_empty() {
                 None
             } else {
                 Some(args.tags.into_iter().collect())
             },
-            timeout: args.timeout,
             priority: args.priority,
-            task_spec,
+            spec,
+            exec_options,
         }
     }
 }

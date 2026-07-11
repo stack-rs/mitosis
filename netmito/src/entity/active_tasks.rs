@@ -19,10 +19,10 @@ pub struct Model {
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
     pub state: TaskState,
-    pub assigned_worker: Option<i64>,
-    pub timeout: i64,
+    pub runner_uuid: Option<Uuid>,
     pub priority: i32,
     pub spec: Json,
+    pub exec_options: Option<Json>,
     pub result: Option<Json>,
     pub upstream_task_uuid: Option<Uuid>,
     pub downstream_task_uuid: Option<Uuid>,
@@ -78,8 +78,8 @@ impl Related<super::task_suites::Entity> for Entity {
 
 impl ActiveModelBehavior for ActiveModel {}
 
-/// This conversion is used when archiving an active task.
-/// But do remember to set reporter_uuid separately after conversion
+/// This conversion is used when archiving an active task. `runner_uuid` (the worker
+/// that ran the task, set at fetch time) is carried straight through.
 impl From<Model> for super::archived_tasks::Model {
     fn from(task: Model) -> super::archived_tasks::Model {
         Self {
@@ -93,14 +93,13 @@ impl From<Model> for super::archived_tasks::Model {
             created_at: task.created_at,
             updated_at: task.updated_at,
             state: task.state,
-            assigned_worker: task.assigned_worker,
-            timeout: task.timeout,
+            runner_uuid: task.runner_uuid,
             priority: task.priority,
             spec: task.spec,
+            exec_options: task.exec_options,
             result: task.result,
             upstream_task_uuid: task.upstream_task_uuid,
             downstream_task_uuid: task.downstream_task_uuid,
-            reporter_uuid: None,
             task_suite_id: task.task_suite_id,
         }
     }

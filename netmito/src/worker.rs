@@ -826,7 +826,9 @@ async fn execute_task(
         }
     }
 
-    if let Some((watched_task_uuid, watched_task_state)) = task.spec.watch {
+    if let Some((watched_task_uuid, watched_task_state)) =
+        task.exec_options.as_ref().and_then(|o| o.watch)
+    {
         // Watch other tasks to specified state to trigger this task
         if task_executor.task_redis_conn.is_some() && task_executor.task_redis_pubsub.is_some() {
             task_executor
@@ -876,14 +878,18 @@ async fn execute_task(
         }
     }
 
+    let exec_timeout = task
+        .spec
+        .timeout
+        .unwrap_or(std::time::Duration::from_secs(600));
     task_executor
         .announce_task_state_ex(
             &task.uuid,
             TaskExecState::ExecPending as i32,
-            task.timeout.as_secs() + 60,
+            exec_timeout.as_secs() + 60,
         )
         .await;
-    let timeout_until = tokio::time::Instant::now() + task.timeout;
+    let timeout_until = tokio::time::Instant::now() + exec_timeout;
 
     // Setup new task file path and clean up any stale file
     let new_task_path = task_executor.task_cache_path.join("new_task.json");

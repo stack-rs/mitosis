@@ -24,7 +24,7 @@ pub struct Model {
     /// User-facing job number, ascending per suite (across agents).
     /// Allocated as max(job_id)+1 inside the accept transaction.
     pub job_id: i32,
-    pub agent_id: i64,
+    pub agent_id: Option<i64>,
     pub state: SuiteJobState,
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,

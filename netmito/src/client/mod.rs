@@ -1945,22 +1945,23 @@ impl MitoClient {
     }
 
     fn gen_submit_task_req(&self, args: SubmitTaskArgs) -> SubmitTaskReq {
-        let task_spec = TaskSpec::new(
+        let spec = ExecSpec::new(
             args.command,
             args.envs,
             args.resources,
+            args.timeout,
             args.terminal_output,
-            args.watch,
         );
+        let exec_options = args.watch.map(|w| TaskExecOptions { watch: Some(w) });
         let mut req = SubmitTaskReq {
             group_name: args.group_name.unwrap_or(self.username.clone()),
             tags: args.tags.into_iter().collect(),
             labels: args.labels.into_iter().collect(),
-            timeout: args.timeout,
             priority: args.priority,
-            task_spec,
+            spec,
+            exec_options,
         };
-        req.task_spec.resources.iter_mut().for_each(|r| {
+        req.spec.resources.iter_mut().for_each(|r| {
             if let RemoteResource::Attachment { ref key } = r.remote_file {
                 r.remote_file = RemoteResource::Attachment {
                     key: path_clean::clean(key).display().to_string(),

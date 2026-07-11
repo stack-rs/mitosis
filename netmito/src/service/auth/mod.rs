@@ -203,7 +203,7 @@ pub async fn refresh_user_token(
     Ok(token)
 }
 
-pub async fn logout_all(db: &DatabaseConnection, user_id: i64) -> crate::error::Result<()> {
+pub async fn revoke(db: &DatabaseConnection, user_id: i64) -> crate::error::Result<()> {
     let user = User::Entity::find_by_id(user_id)
         .one(db)
         .await?

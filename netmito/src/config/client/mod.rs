@@ -43,8 +43,6 @@ pub struct ClientConfig {
     pub user: Option<String>,
     pub password: Option<String>,
     #[serde(default)]
-    pub retain: bool,
-    #[serde(default)]
     pub refresh: bool,
 }
 
@@ -74,12 +72,8 @@ pub struct ClientConfigCli {
     /// Enable interactive mode
     #[arg(short, long)]
     pub interactive: bool,
-    /// Whether to keep previously issued login tokens valid during client setup
-    #[arg(long)]
-    #[serde(skip_serializing_if = "<&bool>::not")]
-    pub retain: bool,
     /// Refresh current login token and invalidate previous tokens during client setup
-    #[arg(long, conflicts_with = "retain")]
+    #[arg(long)]
     #[serde(skip_serializing_if = "<&bool>::not")]
     pub refresh: bool,
     /// The command to run
@@ -103,9 +97,8 @@ pub enum ClientCommand {
     Auth,
     /// Refresh current login token and invalidate previous tokens
     Refresh,
-    /// Logout all login tokens of current user
-    #[command(name = "logout-all")]
-    LogoutAll,
+    /// Revoke all login tokens of current user
+    Revoke,
     /// Login with username and password
     Login(LoginArgs),
     /// Manage users, including changing password, querying the accessible groups etc.
@@ -129,12 +122,8 @@ pub struct LoginArgs {
     pub username: Option<String>,
     /// The password of the user
     pub password: Option<String>,
-    /// Whether to keep previously issued login tokens valid when logging in
-    #[arg(long)]
-    #[serde(default)]
-    pub retain: bool,
     /// Refresh login state and invalidate previous tokens when logging in
-    #[arg(long, conflicts_with = "retain")]
+    #[arg(long)]
     #[serde(default)]
     pub refresh: bool,
 }
@@ -262,7 +251,6 @@ impl Default for ClientConfig {
             credential_path: None,
             user: None,
             password: None,
-            retain: true,
             refresh: false,
         }
     }
@@ -288,13 +276,6 @@ impl ClientConfig {
             .select("client");
 
         let config: Self = figment.extract()?;
-        if config.refresh && !config.retain {
-            return Err(crate::error::Error::ConfigError(Box::new(
-                figment::Error::from(
-                    "client.refresh = true conflicts with client.retain = false; remove retain = false or set retain = true when using refresh",
-                ),
-            )));
-        }
         Ok(config)
     }
 }

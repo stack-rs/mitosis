@@ -173,8 +173,8 @@ impl MitoHttpClient {
         }
     }
 
-    pub async fn logout_all(&mut self, username: &str) -> crate::error::Result<()> {
-        self.url.set_path("logout-all");
+    pub async fn revoke(&mut self, username: &str) -> crate::error::Result<()> {
+        self.url.set_path("revoke");
         let resp = self
             .http_client
             .post(self.url.as_str())

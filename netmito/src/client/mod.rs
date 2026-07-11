@@ -87,12 +87,7 @@ impl MitoClient {
         let refresh = config.refresh;
         let mut http_client = MitoHttpClient::new(config.coordinator_addr);
         let username = http_client
-            .connect(
-                config.credential_path,
-                config.user,
-                config.password,
-                config.retain,
-            )
+            .connect(config.credential_path, config.user, config.password, true)
             .await?;
 
         let mut client = MitoClient {
@@ -307,8 +302,8 @@ impl MitoClient {
         Ok(())
     }
 
-    pub async fn logout_all(&mut self) -> crate::error::Result<()> {
-        self.http_client.logout_all(&self.username).await
+    pub async fn revoke(&mut self) -> crate::error::Result<()> {
+        self.http_client.revoke(&self.username).await
     }
 
     pub async fn refresh_token(&mut self) -> crate::error::Result<()> {
@@ -1357,9 +1352,9 @@ impl MitoClient {
                     tracing::error!("{}", e);
                 }
             },
-            ClientCommand::LogoutAll => match self.logout_all().await {
+            ClientCommand::Revoke => match self.revoke().await {
                 Ok(_) => {
-                    tracing::info!("Successfully logged out all login tokens");
+                    tracing::info!("Successfully revoked all login tokens");
                     return false;
                 }
                 Err(e) => {

@@ -35,7 +35,7 @@ Once authenticated, the Client will retain their credentials in a file for futur
 By default, logging in retains the previous login state, so tokens used by other clients remain valid.
 To invalidate previously issued tokens while logging in with username and password, use `login --refresh`.
 To refresh the current authenticated session without entering username and password again, use `refresh`.
-To invalidate all login tokens for the current user, use `logout-all`.
+To invalidate all login tokens for the current user, use `revoke`.
 
 We recommend using the interactive mode for most operations, as it provides a more user-friendly experience. It will prompt you something like this:
 
@@ -63,7 +63,7 @@ Commands:
   admin       Admin operations, including shutdown the coordinator, chaning user password, etc
   auth        Authenticate current user
   refresh     Refresh current login token and invalidate previous tokens
-  logout-all  Logout all login tokens of current user
+  revoke      Revoke all login tokens of current user
   login       Login with username and password
   users       Manage users, including changing password, querying the accessible groups etc
   groups      Manage groups, including creating a group, querying groups, etc
@@ -86,8 +86,6 @@ Options:
           The password of the user
   -i, --interactive
           Enable interactive mode
-      --retain
-          Whether to keep previously issued login tokens valid during client setup
       --refresh
           Refresh current login token and invalidate previous tokens during client setup
   -h, --help
@@ -144,10 +142,10 @@ Input `refresh` to refresh the current valid token and invalidate previous token
 refresh
 ```
 
-Input `logout-all` to invalidate all login tokens for the current user. In interactive mode, the client exits after a successful `logout-all`.
+Input `revoke` to invalidate all login tokens for the current user. In interactive mode, the client exits after a successful `revoke`.
 
 ```txt
-logout-all
+revoke
 ```
 
 ## `admin` sub-commands

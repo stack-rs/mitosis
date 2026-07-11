@@ -257,7 +257,7 @@ impl MitoWorker {
             config.coordinator_addr.clone(),
             config.user.take(),
             config.password.take(),
-            config.retain,
+            true,
         )
         .await?;
         let mut url = config.coordinator_addr.clone();

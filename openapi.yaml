@@ -13,7 +13,7 @@ info:
     - `/auth` - User authentication status
     - `/login` - User login
     - `/refresh` - Refresh current login token
-    - `/logout-all` - Invalidate all login tokens for current user
+    - `/revoke` - Revoke all login tokens for current user
     - `/users` - User management
     - `/groups` - Group management and file attachments
     - `/workers` - Worker registration and management
@@ -99,18 +99,18 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
-  /logout-all:
+  /revoke:
     post:
-      summary: Logout all login tokens
-      description: Invalidate all issued login tokens for the current authenticated user.
-      operationId: logoutAll
+      summary: Revoke all login tokens
+      description: Revoke all issued login tokens for the current authenticated user.
+      operationId: revokeTokens
       tags:
         - Authentication
       security:
         - bearerAuth: []
       responses:
         "200":
-          description: Successfully logged out all login tokens
+          description: Successfully revoked all login tokens
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -2039,7 +2039,7 @@ components:
         retain:
           type: boolean
           default: true
-          description: Whether to retain existing login state. When true, logging in does not invalidate previously issued tokens.
+          description: Whether to retain existing login state. Defaults to true. Set to false to refresh the login state and invalidate previously issued tokens.
 
     UserLoginResp:
       type: object

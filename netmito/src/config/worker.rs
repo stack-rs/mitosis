@@ -217,7 +217,6 @@ impl Default for WorkerConfig {
             file_log: false,
             shared_log: false,
             lifetime: WorkerTokenLifetime::Default,
-            retain: false,
             skip_redis: false,
         }
     }

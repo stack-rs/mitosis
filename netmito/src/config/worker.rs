@@ -12,7 +12,7 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt::MakeWriter, layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use url::Url;
 
-use crate::error::Error;
+use crate::{error::Error, schema::WorkerTokenLifetime};
 
 use super::{coordinator::DEFAULT_COORDINATOR_ADDR, TracingGuard};
 
@@ -129,8 +129,8 @@ pub struct WorkerConfig {
     pub(crate) file_log: bool,
     #[serde(default)]
     pub(crate) shared_log: bool,
-    #[serde(with = "humantime_serde")]
-    pub(crate) lifetime: Option<Duration>,
+    #[serde(default)]
+    pub(crate) lifetime: WorkerTokenLifetime,
     #[serde(default)]
     pub(crate) skip_redis: bool,
 }
@@ -191,7 +191,7 @@ pub struct WorkerConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "<&bool>::not")]
     pub shared_log: bool,
-    /// The lifetime of the worker to alive (e.g., 7d, 1year)
+    /// The lifetime of the worker token (e.g., 7d, 1year, never)
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub lifetime: Option<String>,
@@ -216,7 +216,8 @@ impl Default for WorkerConfig {
             log_path: None,
             file_log: false,
             shared_log: false,
-            lifetime: None,
+            lifetime: WorkerTokenLifetime::Default,
+            retain: false,
             skip_redis: false,
         }
     }

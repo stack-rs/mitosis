@@ -346,9 +346,8 @@ pub async fn user_auth_with_name_middleware(
 async fn user_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<User::Model, AuthError> {
     let token = bearer.token();
     let claims = verify_token(token).map_err(|_| AuthError::InvalidToken)?;
-    let now = TimeDateTimeWithTimeZone::now_utc();
-    if claims.exp < now {
-        return Err(AuthError::WrongCredentials);
+    if claims.exp.is_none() {
+        return Err(AuthError::InvalidToken);
     }
 
     let user = User::Entity::find()
@@ -381,9 +380,8 @@ pub async fn admin_auth_middleware(
 async fn admin_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<AuthAdminUser, AuthError> {
     let token = bearer.token();
     let claims = verify_token(token).map_err(|_| AuthError::InvalidToken)?;
-    let now = TimeDateTimeWithTimeZone::now_utc();
-    if claims.exp < now {
-        return Err(AuthError::WrongCredentials);
+    if claims.exp.is_none() {
+        return Err(AuthError::InvalidToken);
     }
 
     let user = User::Entity::find()

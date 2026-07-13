@@ -29,6 +29,9 @@ file_log = false
 coordinator_addr = "http://127.0.0.1:5000"
 polling_interval = "3m"
 heartbeat_interval = "5m"
+# lifetime controls the worker JWT token lifetime.
+# Use a duration such as "7d", "1h", or "30m"; use "never" to issue a token without exp.
+# If omitted or set to "default", the coordinator default token lifetime is used.
 lifetime = "7d"
 # credential_path is not set
 # user is not set

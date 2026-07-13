@@ -10,7 +10,7 @@ use crate::{
     config::{client::*, ClientConfig, ClientConfigCli},
     entity::state::TaskExecState,
     schema::*,
-    service::auth::fill_user_login,
+    service::auth::{fill_user_login, fill_user_login_refreshing},
 };
 
 pub mod http;
@@ -87,7 +87,7 @@ impl MitoClient {
         let refresh = config.refresh;
         let mut http_client = MitoHttpClient::new(config.coordinator_addr);
         let username = http_client
-            .connect(config.credential_path, config.user, config.password, true)
+            .connect(config.credential_path, config.user, config.password)
             .await?;
 
         let mut client = MitoClient {
@@ -294,8 +294,11 @@ impl MitoClient {
     }
 
     pub async fn user_login(&mut self, args: LoginArgs) -> crate::error::Result<()> {
-        let retain = !args.refresh;
-        let req = fill_user_login(args.username, args.password, retain)?;
+        let req = if args.refresh {
+            fill_user_login_refreshing(args.username, args.password)?
+        } else {
+            fill_user_login(args.username, args.password)?
+        };
         let username = req.username.clone();
         self.http_client.user_login(req).await?;
         self.username = username;

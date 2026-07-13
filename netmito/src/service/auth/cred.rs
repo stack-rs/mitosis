@@ -177,7 +177,6 @@ pub async fn get_user_credential(
     mut url: Url,
     user: Option<String>,
     password: Option<String>,
-    retain: bool,
 ) -> crate::error::Result<(String, String)> {
     // Try to load credential from file
     let cred_path = cred_path
@@ -223,7 +222,7 @@ pub async fn get_user_credential(
     }
     // Local credential not found or invalid, need to login
     tracing::warn!("Local credential not found or invalid, need to login");
-    let req = fill_user_login(user, password, retain)?;
+    let req = fill_user_login(user, password)?;
     url.set_path("login");
     let resp = client
         .post(url.as_str())

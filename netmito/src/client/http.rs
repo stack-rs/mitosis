@@ -36,7 +36,6 @@ impl MitoHttpClient {
         credential_path: Option<RelativePathBuf>,
         user: Option<String>,
         password: Option<String>,
-        retain: bool,
     ) -> crate::error::Result<String> {
         let client_credential_path = credential_path
             .as_ref()
@@ -57,7 +56,6 @@ impl MitoHttpClient {
             self.url.clone(),
             user,
             password,
-            retain,
         )
         .await?;
         self.credential_path = client_credential_path;

@@ -94,27 +94,42 @@ pub(crate) fn get_and_prompt_password(
     Ok(md5_password)
 }
 
-pub(crate) fn fill_user_login(
+fn fill_user_login_fields(
     username: Option<String>,
     password: Option<String>,
-    retain: bool,
-) -> crate::error::Result<UserLoginReq> {
+) -> crate::error::Result<(String, [u8; 16])> {
     match (username, password) {
-        (Some(username), Some(password)) => Ok(UserLoginReq {
-            username,
-            md5_password: md5::compute(password.as_bytes()).0,
-            retain,
-        }),
+        (Some(username), Some(password)) => Ok((username, md5::compute(password.as_bytes()).0)),
         (username, password) => {
             let username = get_and_prompt_username(username, "Username")?;
             let md5_password = get_and_prompt_password(password, "Password")?;
-            Ok(UserLoginReq {
-                username,
-                md5_password,
-                retain,
-            })
+            Ok((username, md5_password))
         }
     }
+}
+
+pub(crate) fn fill_user_login(
+    username: Option<String>,
+    password: Option<String>,
+) -> crate::error::Result<UserLoginReq> {
+    let (username, md5_password) = fill_user_login_fields(username, password)?;
+    Ok(UserLoginReq {
+        username,
+        md5_password,
+        retain: true,
+    })
+}
+
+pub(crate) fn fill_user_login_refreshing(
+    username: Option<String>,
+    password: Option<String>,
+) -> crate::error::Result<UserLoginReq> {
+    let (username, md5_password) = fill_user_login_fields(username, password)?;
+    Ok(UserLoginReq {
+        username,
+        md5_password,
+        retain: false,
+    })
 }
 
 pub async fn user_login(

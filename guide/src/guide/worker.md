@@ -117,20 +117,12 @@ Options:
           The groups allowed to submit tasks to this worker
   -t, --tags [<TAGS>...]
           The tags of this worker
-  -l, --labels [<LABELS>...]
-          The labels of this worker
       --log-path <LOG_PATH>
           The log file path. If not specified, then the default rolling log file path would be used. If specified, then the log file would be exactly at the path specified
       --file-log
           Enable logging to file
-      --shared-log
-          Enable shared logging across multiple workers with daily rotation (max 3 files)
       --lifetime <LIFETIME>
           The lifetime of the worker token (e.g., 7d, 1year, never)
-      --retain
-          Whether to retain the previous login state without refetching the credential
-      --skip-redis
-          Whether to skip connecting to Redis
   -h, --help
           Print help
   -V, --version
@@ -169,4 +161,6 @@ shared_log = true  # Enable shared rolling logs
 - Linux: `$XDG_CACHE_HOME` or `$HOME/.cache/mitosis`
 - macOS: `$HOME/Library/Caches/mitosis`
 - Windows: `{FOLDERID_LocalAppData}\mitosis`
+```
 
+```

@@ -107,12 +107,6 @@ pub enum WorkerTokenLifetime {
     Never,
 }
 
-impl WorkerTokenLifetime {
-    pub fn is_default(&self) -> bool {
-        matches!(self, Self::Default)
-    }
-}
-
 impl Serialize for WorkerTokenLifetime {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -149,7 +143,7 @@ pub struct RegisterWorkerReq {
     pub tags: HashSet<String>,
     pub labels: HashSet<String>,
     pub groups: HashSet<String>,
-    #[serde(default, skip_serializing_if = "WorkerTokenLifetime::is_default")]
+    #[serde(default)]
     pub lifetime: WorkerTokenLifetime,
 }
 

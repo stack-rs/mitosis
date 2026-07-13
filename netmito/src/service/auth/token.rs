@@ -108,7 +108,6 @@ pub fn verify_token(token: &str) -> crate::error::Result<TokenClaims<'_>> {
     let token = String::from_utf8(token).map_err(DecodeTokenError::from)?;
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::EdDSA);
     validation.required_spec_claims.remove("exp");
-    validation.validate_exp = false;
     let decoding_key = crate::config::DECODING_KEY
         .get()
         .ok_or(crate::error::Error::Custom(

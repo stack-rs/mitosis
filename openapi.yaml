@@ -2529,7 +2529,6 @@ components:
       type: object
       required:
         - tags
-        - labels
         - groups
       properties:
         tags:
@@ -2541,14 +2540,6 @@ components:
             - gpu
             - cuda
             - python
-        labels:
-          type: array
-          items:
-            type: string
-          description: Worker labels for organization and querying
-          example:
-            - linux
-            - cuda12
         groups:
           type: array
           items:

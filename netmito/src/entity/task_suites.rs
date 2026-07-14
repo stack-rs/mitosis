@@ -11,14 +11,18 @@ pub struct Model {
     pub id: i64,
     #[sea_orm(unique)]
     pub uuid: Uuid,
+    #[sea_orm(column_type = "Text", nullable)]
     pub name: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
     pub description: Option<String>,
     pub group_id: i64,
     pub creator_id: i64,
     pub tags: Vec<String>,
     pub labels: Vec<String>,
     pub priority: i32,
+    #[sea_orm(column_type = "JsonBinary")]
     pub worker_schedule: Json,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
     pub exec_hooks: Option<Json>,
     pub state: TaskSuiteState,
     pub last_task_submitted_at: Option<TimeDateTimeWithTimeZone>,

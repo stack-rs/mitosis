@@ -21,8 +21,11 @@ pub struct Model {
     pub state: TaskState,
     pub runner_uuid: Option<Uuid>,
     pub priority: i32,
+    #[sea_orm(column_type = "JsonBinary")]
     pub spec: Json,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
     pub exec_options: Option<Json>,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
     pub result: Option<Json>,
     pub upstream_task_uuid: Option<Uuid>,
     pub downstream_task_uuid: Option<Uuid>,

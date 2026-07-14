@@ -25,8 +25,10 @@ pub struct Model {
     pub uuid: Uuid,
     pub suite_agent_job_id: i64,
     pub hook_type: HookType,
+    #[sea_orm(column_type = "JsonBinary")]
     pub spec: Json,
     pub state: HookExecState,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
     pub result: Option<Json>,
     pub started_at: Option<TimeDateTimeWithTimeZone>,
     pub completed_at: Option<TimeDateTimeWithTimeZone>,

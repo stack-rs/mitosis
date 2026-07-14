@@ -17,8 +17,9 @@ pub struct Model {
     /// machine row references it.
     #[sea_orm(unique)]
     pub agent_id: i64,
-    #[sea_orm(unique)]
+    #[sea_orm(column_type = "Text", unique)]
     pub machine_code: String,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
     pub metadata: Option<Json>,
     pub first_seen_at: TimeDateTimeWithTimeZone,
     pub last_seen_at: TimeDateTimeWithTimeZone,

@@ -360,9 +360,7 @@ impl TaskSuiteState {
 }
 
 // TODO: should get further check on what states are needed
-/// Runtime phase of an agent. An agent row is durable (one row per registered
-/// machine instance) and is not deleted when the agent goes up or down; this
-/// state only tracks what the live session is doing.
+/// Runtime phase of an agent.
 #[derive(
     EnumIter,
     DeriveActiveEnum,
@@ -413,24 +411,21 @@ impl AgentState {
 }
 
 /// Lifecycle state of a hook task (provision / cleanup / background).
-/// A hook task is written on completion, so `Running` is rarely persisted.
+/// A hook task is reported on completion, so There is no `Running` state
 #[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum HookExecState {
-    /// Hook is currently running
-    Running = 0,
     /// Hook completed successfully
-    Completed = 1,
-    /// Hook failed
-    Failed = 2,
+    Completed = 0,
+    /// Hook failed (the return value of the program is none-zero)
+    Failed = 1,
     /// Hook was cancelled
-    Cancelled = 3,
+    Cancelled = 2,
 }
 
 impl Display for HookExecState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HookExecState::Running => write!(f, "Running"),
             HookExecState::Completed => write!(f, "Completed"),
             HookExecState::Failed => write!(f, "Failed"),
             HookExecState::Cancelled => write!(f, "Cancelled"),
@@ -438,18 +433,21 @@ impl Display for HookExecState {
     }
 }
 
-impl HookExecState {
-    pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
-    }
-}
-
 /// Lifecycle state of one job: an attempt of an agent running a task suite.
 ///
-/// There is deliberately no `Lost` state — an agent that times out or is
-/// removed mid-job is recorded as `Failed` with `failure_reason.kind =
-/// AgentLost`. `Provision`/`Executing`/`Cleanup` are non-terminal; the rest
-/// are terminal. `Preempted` is a reserved future append (next discriminant).
+/// A job that is gracefully stopped will not execute any new task,
+/// will ask tasks still executing to gracefully shut down, and will still
+/// run the cleanup hook and report the hook execution result.
+///
+/// A job that is forcefully stopped will not execute any new task,
+/// will ask tasks still executing to forcefully shut down, and will NOT run
+/// any cleanup hook.
+///
+/// A task's execution result is only accepted while the job is `Executing`
+/// (see `accepts_task_result`); the agent must drain all pending task
+/// reports before the job leaves that state. Reports against any other
+/// state are rejected.
+///
 #[derive(
     EnumIter,
     DeriveActiveEnum,
@@ -471,12 +469,23 @@ pub enum SuiteJobState {
     Executing = 1,
     /// Cleanup hook running
     Cleanup = 2,
-    /// Terminal: job finished successfully
+    /// Terminal: job finished successfully, get another suite to execute after
     Completed = 3,
-    /// Terminal: job failed (failure_reason has phase and cause)
+    /// Terminal: a hook execution failed. Job terminated, get another suite to execute after.
     Failed = 4,
-    /// Terminal: suite was cancelled while the job was in flight
-    Cancelled = 5,
+    /// Terminal: the agent was lost while executing this job.
+    Lost = 5,
+    /// Terminal: the job was cancelled by the coordinator. Job gracefully stopped, get another suite to execute after
+    Cancelled = 6,
+    /// Terminal: the job was stopped because the agent is asked to
+    /// gracefully shut down. Job gracefully stopped, then shut down agent
+    Halted = 7,
+    /// Terminal: the job was forcefully stopped. Job force stopped,
+    /// get another suite to execute later
+    Aborted = 8,
+    /// Terminal: the job was stopped because the agent is asked to
+    /// forcefully shut down. Job force stopped, then shut down agent
+    Killed = 9,
 }
 
 impl Display for SuiteJobState {
@@ -487,13 +496,27 @@ impl Display for SuiteJobState {
             SuiteJobState::Cleanup => write!(f, "Cleanup"),
             SuiteJobState::Completed => write!(f, "Completed"),
             SuiteJobState::Failed => write!(f, "Failed"),
+            SuiteJobState::Lost => write!(f, "Lost"),
             SuiteJobState::Cancelled => write!(f, "Cancelled"),
+            SuiteJobState::Halted => write!(f, "Halted"),
+            SuiteJobState::Aborted => write!(f, "Aborted"),
+            SuiteJobState::Killed => write!(f, "Killed"),
         }
     }
 }
 
 impl SuiteJobState {
+    /// Whether the job is still running one of its lifecycle phases
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Provisioning | Self::Executing | Self::Cleanup)
+    }
+
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+        !self.is_active()
+    }
+
+    /// Whether a task's execution result may be recorded in this job state.
+    pub fn accepts_task_result(&self) -> bool {
+        matches!(self, Self::Executing)
     }
 }

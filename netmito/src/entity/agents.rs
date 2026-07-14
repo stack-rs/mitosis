@@ -1,11 +1,10 @@
 //! `SeaORM` Entity for agents table
 //!
-//! An agent row is the durable identity of a registered machine instance. It
-//! is **not** deleted when the agent goes online/offline; `state` only reflects
-//! the live session. The subordinate `machines` row (physical machine code and
-//! metadata) points back at the agent (`machines.agent_id`), so an agent row
+//! An agent row is the durable identity of a registered machine instance.
+//! `state` only reflects the live session. The subordinate `machines` row
+//! (physical machine code and metadata) points back at the agent, so an agent row
 //! cannot be deleted while its machine row still exists — the machine row must
-//! be removed first. See docs/plans/2026-07-03-suite-entity-design.md.
+//! be removed first.
 
 use sea_orm::entity::prelude::*;
 
@@ -47,6 +46,7 @@ pub enum Relation {
     )]
     TaskSuites,
     /// The subordinate machine row (1:1); it holds the FK back to this agent.
+    /// The (1:1) is ensured at service logic level, not enforced at database schema.
     #[sea_orm(has_one = "super::machines::Entity")]
     Machines,
 }

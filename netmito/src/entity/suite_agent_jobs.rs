@@ -1,15 +1,6 @@
 //! `SeaORM` Entity for suite_agent_jobs table
 //!
 //! Each row is one **job**: an attempt of an agent running a task suite
-//! (accept → provision → execute → cleanup → terminal state). Because agent
-//! rows are durable, the job references the agent directly (`agent_id`) and
-//! reaches the machine/uuid by join — no denormalized identity. We do not
-//! expose an agent-deletion endpoint, and the FK is `RESTRICT`, so an agent
-//! row that still owns jobs cannot be deleted (its history stays anchored to
-//! the agent). `agent_id` is nullable only to leave room for future
-//! detach/reassignment. Hook tasks of a job reference it via
-//! `hook_tasks.suite_agent_job_id`.
-//! See docs/plans/2026-07-03-suite-entity-design.md.
 
 use sea_orm::entity::prelude::*;
 

@@ -752,7 +752,6 @@ pub(crate) fn apply_task_filters(
     query: &TasksQueryReq,
 ) -> crate::error::Result<()> {
     if let Some(runner_uuid) = query.runner_uuid {
-        // runner_uuid is on both active and archived tasks; filter both directly.
         active_stmt.and_where(
             Expr::col((ActiveTasks::Entity, ActiveTasks::Column::RunnerUuid)).eq(runner_uuid),
         );

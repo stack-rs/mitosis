@@ -3,10 +3,8 @@
 //! One row per hook (provision / cleanup / background) executed within a suite
 //! agent job. A hook task is task-shaped: it carries its own `uuid`, and its
 //! logs are stored in the shared `artifacts` table keyed by that uuid
-//! (`artifacts.task_id = hook_task.uuid`) — there is no separate hook-artifact
-//! table. Rows cascade-delete with their job, so retention is handled at the
-//! job level. See docs/plans/2026-07-03-suite-entity-design.md.
-
+//! (`artifacts.task_id = hook_task.uuid`). Rows cascade-delete with their
+//! job, so retention is handled at the job level.
 use std::fmt::Display;
 
 use sea_orm::entity::prelude::*;
@@ -19,8 +17,8 @@ use super::state::HookExecState;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
-    /// Globally-unique handle (v4); indexes this hook's artifacts in the shared
-    /// `artifacts` table. Must not collide with task uuids (same keyspace).
+    /// Globally-unique handle; indexes this hook's artifacts in the shared
+    /// `artifacts` table. Must not collide with task uuids.
     #[sea_orm(unique)]
     pub uuid: Uuid,
     pub suite_agent_job_id: i64,

@@ -97,8 +97,6 @@ impl MigrationTrait for Migration {
     }
 }
 
-/// Existing task tables, referenced only to add `task_suite_id`. Variant names
-/// map to the `active_tasks` / `archived_tasks` table names.
 #[derive(DeriveIden, Clone, Copy)]
 #[allow(clippy::enum_variant_names)]
 enum Tasks {

@@ -81,8 +81,7 @@ impl Related<super::task_suites::Entity> for Entity {
 
 impl ActiveModelBehavior for ActiveModel {}
 
-/// This conversion is used when archiving an active task. `runner_uuid` (the worker
-/// that ran the task, set at fetch time) is carried straight through.
+/// This conversion is used when archiving an active task.
 impl From<Model> for super::archived_tasks::Model {
     fn from(task: Model) -> super::archived_tasks::Model {
         Self {

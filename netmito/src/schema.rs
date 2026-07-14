@@ -124,6 +124,8 @@ pub struct ExecSpec {
     #[serde(default)]
     pub resources: Vec<RemoteResourceDownload>,
     /// Execution timeout; runs without a deadline if unset.
+    // TODO: should check if we currently correctly handle the non-set timeout situation on task
+    // submission side (include client and worker) and coordinator logic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub timeout: Option<std::time::Duration>,

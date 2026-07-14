@@ -347,6 +347,7 @@ impl TaskSuiteState {
         !matches!(self, Self::Cancelled)
     }
 
+    // TODO: this method might be removed as we should do an idempotent update to state
     /// Returns true if the suite needs to be reopened before accepting tasks.
     /// This is true for Closed and Complete states.
     pub fn needs_reopen(&self) -> bool {
@@ -358,6 +359,7 @@ impl TaskSuiteState {
     }
 }
 
+// TODO: should get further check on what states are needed
 /// Runtime phase of an agent. An agent row is durable (one row per registered
 /// machine instance) and is not deleted when the agent goes up or down; this
 /// state only tracks what the live session is doing.

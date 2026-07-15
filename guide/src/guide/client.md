@@ -32,6 +32,11 @@ If a user has never logged in or if his/her session has expired, the Client will
 Alternatively, they can directly specify their username (`-u`) or password (`-p`) during execution.
 Once authenticated, the Client will retain their credentials in a file for future use.
 
+By default, logging in retains the previous login state, so tokens used by other clients remain valid.
+To invalidate previously issued tokens while logging in with username and password, use `login --refresh`.
+To refresh the current authenticated session without entering username and password again, use `refresh`.
+To invalidate all login tokens for the current user, use `revoke`.
+
 We recommend using the interactive mode for most operations, as it provides a more user-friendly experience. It will prompt you something like this:
 
 ```txt
@@ -55,16 +60,18 @@ Run a mitosis client
 Usage: mito client [OPTIONS] [COMMAND]
 
 Commands:
-  admin    Admin operations, including shutdown the coordinator, chaning user password, etc
-  auth     Authenticate current user
-  login    Login with username and password
-  users    Manage users, including changing password, querying the accessible groups etc
-  groups   Manage groups, including creating a group, querying groups, etc
-  tasks    Manage tasks, including submitting a task, querying tasks, etc
-  workers  Manage workers, including querying workers, cancel workers, etc
-  cmd      Run an external command
-  quit     Quit the client's interactive mode [aliases: exit]
-  help     Print this message or the help of the given subcommand(s)
+  admin       Admin operations, including shutdown the coordinator, chaning user password, etc
+  auth        Authenticate current user
+  refresh     Refresh current login token and invalidate previous tokens
+  revoke      Revoke all login tokens of current user
+  login       Login with username and password
+  users       Manage users, including changing password, querying the accessible groups etc
+  groups      Manage groups, including creating a group, querying groups, etc
+  tasks       Manage tasks, including submitting a task, querying tasks, etc
+  workers     Manage workers, including querying workers, cancel workers, etc
+  cmd         Run an external command
+  quit        Quit the client's interactive mode [aliases: exit]
+  help        Print this message or the help of the given subcommand(s)
 
 Options:
       --config <CONFIG>
@@ -79,8 +86,8 @@ Options:
           The password of the user
   -i, --interactive
           Enable interactive mode
-      --retain
-          Whether to retain the previous login state without refetching the credential
+      --refresh
+          Refresh current login token and invalidate previous tokens during client setup
   -h, --help
           Print help
   -V, --version
@@ -108,6 +115,38 @@ Options:
 For the rest of this section, we will explain the common use cases of the Client on different scenarios.
 For the sake of convenience, we will assume that the user is already in interactive mode.
 And for the direct executing mode, it only requires adding "mito client" at the front.
+
+## Authentication commands
+
+Input `auth` to show the current authenticated user:
+
+```txt
+auth
+```
+
+Input `login` to log in with username and password. Login retains previous tokens by default.
+
+```txt
+login <mitosis_username> <mitosis_password>
+```
+
+Input `login --refresh` to log in with username and password and invalidate previously issued tokens.
+
+```txt
+login <mitosis_username> <mitosis_password> --refresh
+```
+
+Input `refresh` to refresh the current valid token and invalidate previous tokens.
+
+```txt
+refresh
+```
+
+Input `revoke` to invalidate all login tokens for the current user. In interactive mode, the client exits after a successful `revoke`.
+
+```txt
+revoke
+```
 
 ## `admin` sub-commands
 

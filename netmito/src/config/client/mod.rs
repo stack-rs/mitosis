@@ -45,7 +45,7 @@ pub struct ClientConfig {
     pub user: Option<String>,
     pub password: Option<String>,
     #[serde(default)]
-    pub retain: bool,
+    pub refresh: bool,
 }
 
 #[derive(Args, Debug, Serialize, Default, Clone)]
@@ -74,10 +74,10 @@ pub struct ClientConfigCli {
     /// Enable interactive mode
     #[arg(short, long)]
     pub interactive: bool,
-    /// Whether to retain the previous login state without refetching the credential
+    /// Refresh current login token and invalidate previous tokens during client setup
     #[arg(long)]
     #[serde(skip_serializing_if = "<&bool>::not")]
-    pub retain: bool,
+    pub refresh: bool,
     /// The command to run
     #[command(subcommand)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -97,6 +97,10 @@ pub enum ClientCommand {
     Admin(AdminArgs),
     /// Authenticate current user
     Auth,
+    /// Refresh current login token and invalidate previous tokens
+    Refresh,
+    /// Revoke all login tokens of current user
+    Revoke,
     /// Login with username and password
     Login(LoginArgs),
     /// Manage users, including changing password, querying the accessible groups etc.
@@ -122,9 +126,10 @@ pub struct LoginArgs {
     pub username: Option<String>,
     /// The password of the user
     pub password: Option<String>,
-    /// Whether to retain the previous login state without refetching the credential
+    /// Refresh login state and invalidate previous tokens when logging in
     #[arg(long)]
-    pub retain: bool,
+    #[serde(default)]
+    pub refresh: bool,
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -250,7 +255,7 @@ impl Default for ClientConfig {
             credential_path: None,
             user: None,
             password: None,
-            retain: false,
+            refresh: false,
         }
     }
 }
@@ -273,6 +278,8 @@ impl ClientConfig {
             .merge(Env::prefixed("MITO_").profile("client"))
             .merge(Serialized::from(cli, "client"))
             .select("client");
-        Ok(figment.extract()?)
+
+        let config: Self = figment.extract()?;
+        Ok(config)
     }
 }

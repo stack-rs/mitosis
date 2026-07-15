@@ -142,9 +142,6 @@ impl MitoManager {
             if let Some(lifetime) = &worker_config.lifetime {
                 cmd.arg("--lifetime").arg(lifetime);
             }
-            if worker_config.retain {
-                cmd.arg("--retain");
-            }
             if worker_config.skip_redis {
                 cmd.arg("--skip-redis");
             }

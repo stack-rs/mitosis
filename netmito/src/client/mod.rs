@@ -40,7 +40,9 @@ impl MitoClient {
             Ok(config) => match Self::setup(config).await {
                 Ok(mut client) => {
                     if let Some(cmd) = cli.command.take() {
-                        client.handle_command(cmd).await;
+                        if !client.handle_command(cmd).await {
+                            return;
+                        }
                     }
                     if cli.interactive {
                         let username = client.username.as_str();
@@ -82,22 +84,25 @@ impl MitoClient {
 
     pub async fn setup(config: ClientConfig) -> crate::error::Result<Self> {
         tracing::debug!("Client is setting up");
+        let refresh = config.refresh;
         let mut http_client = MitoHttpClient::new(config.coordinator_addr);
         let username = http_client
-            .connect(
-                config.credential_path,
-                config.user,
-                config.password,
-                config.retain,
-            )
+            .connect(config.credential_path, config.user, config.password)
             .await?;
-        Ok(MitoClient {
+
+        let mut client = MitoClient {
             http_client,
             username,
             redis_client: None,
             redis_pubsub_client: None,
             async_redis_client: None,
-        })
+        };
+
+        if refresh {
+            client.refresh_token().await?;
+        }
+
+        Ok(client)
     }
 
     pub fn http_client(&self) -> &http::MitoHttpClient {
@@ -289,8 +294,19 @@ impl MitoClient {
     }
 
     pub async fn user_login(&mut self, args: LoginArgs) -> crate::error::Result<()> {
-        let req = fill_user_login(args.username, args.password, args.retain)?;
-        self.http_client.user_login(req).await
+        let req = fill_user_login(args.username, args.password, !args.refresh)?;
+        let username = req.username.clone();
+        self.http_client.user_login(req).await?;
+        self.username = username;
+        Ok(())
+    }
+
+    pub async fn revoke(&mut self) -> crate::error::Result<()> {
+        self.http_client.revoke(&self.username).await
+    }
+
+    pub async fn refresh_token(&mut self) -> crate::error::Result<()> {
+        self.http_client.refresh_token(&self.username).await
     }
 
     pub async fn user_auth(&mut self) -> crate::error::Result<String> {
@@ -1322,6 +1338,23 @@ impl MitoClient {
             ClientCommand::Auth => match self.user_auth().await {
                 Ok(username) => {
                     tracing::info!("Currently logged in as {}", username);
+                }
+                Err(e) => {
+                    tracing::error!("{}", e);
+                }
+            },
+            ClientCommand::Refresh => match self.refresh_token().await {
+                Ok(_) => {
+                    tracing::info!("Successfully refreshed login token");
+                }
+                Err(e) => {
+                    tracing::error!("{}", e);
+                }
+            },
+            ClientCommand::Revoke => match self.revoke().await {
+                Ok(_) => {
+                    tracing::info!("Successfully revoked all login tokens");
+                    return false;
                 }
                 Err(e) => {
                     tracing::error!("{}", e);

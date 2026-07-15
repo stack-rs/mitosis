@@ -51,6 +51,43 @@ pub async fn user_auth(Extension(u): Extension<AuthUserWithName>) -> String {
     u.username
 }
 
+pub async fn refresh_token(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+) -> Result<Json<UserLoginResp>, ApiError> {
+    let token = service::auth::refresh_user_token(&pool.db, u.id, addr)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+
+    Ok(Json(UserLoginResp { token }))
+}
+
+pub async fn revoke(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+) -> Result<(), ApiError> {
+    service::auth::revoke(&pool.db, u.id)
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+
+    Ok(())
+}
+
 pub async fn change_password(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Extension(u): Extension<AuthUser>,

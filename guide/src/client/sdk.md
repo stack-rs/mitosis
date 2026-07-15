@@ -35,12 +35,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let login_args = LoginArgs {
         username: Some("username".to_string()),
         password: Some("password".to_string()),
-        retain: true,
+        refresh: false,
     };
     client.user_login(login_args).await?;
 
     Ok(())
 }
+```
+
+### Authentication
+
+Refresh the current login token and invalidate previous tokens:
+
+```rust,ignore
+client.refresh_token().await?;
+```
+
+Revoke all login tokens for the current user:
+
+```rust,ignore
+client.revoke().await?;
+```
+
+Log in with username and password while invalidating previously issued tokens.
+When `refresh` is true, `MitoClient::user_login` invalidates previously issued tokens.
+
+```rust,ignore
+let login_args = LoginArgs {
+    username: Some("username".to_string()),
+    password: Some("password".to_string()),
+    refresh: true,
+};
+client.user_login(login_args).await?;
 ```
 
 ### Task Management
@@ -356,7 +382,7 @@ let config = ClientConfig {
     credential_path: Some(RelativePathBuf::from("/path/to/credentials")),
     user: Some("api-user".to_string()),
     password: Some("api-password".to_string()),
-    retain: true, // Keep existing login state
+    refresh: false, // Do not refresh the login token on setup
 };
 ```
 

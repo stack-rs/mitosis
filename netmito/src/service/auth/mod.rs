@@ -49,6 +49,19 @@ pub struct AuthWorker {
     pub uuid: Uuid,
 }
 
+fn generate_auth_signature() -> i64 {
+    StdRng::from_os_rng().next_u32() as i64 + 1
+}
+
+fn generate_new_auth_signature(old: Option<i64>) -> i64 {
+    loop {
+        let sign = generate_auth_signature();
+        if Some(sign) != old {
+            return sign;
+        }
+    }
+}
+
 pub(crate) fn get_and_prompt_username(
     username: Option<String>,
     prompt: &str,
@@ -85,27 +98,31 @@ pub(crate) fn get_and_prompt_password(
     Ok(md5_password)
 }
 
+fn fill_user_login_fields(
+    username: Option<String>,
+    password: Option<String>,
+) -> crate::error::Result<(String, [u8; 16])> {
+    match (username, password) {
+        (Some(username), Some(password)) => Ok((username, md5::compute(password.as_bytes()).0)),
+        (username, password) => {
+            let username = get_and_prompt_username(username, "Username")?;
+            let md5_password = get_and_prompt_password(password, "Password")?;
+            Ok((username, md5_password))
+        }
+    }
+}
+
 pub(crate) fn fill_user_login(
     username: Option<String>,
     password: Option<String>,
     retain: bool,
 ) -> crate::error::Result<UserLoginReq> {
-    match (username, password) {
-        (Some(username), Some(password)) => Ok(UserLoginReq {
-            username,
-            md5_password: md5::compute(password.as_bytes()).0,
-            retain,
-        }),
-        (username, password) => {
-            let username = get_and_prompt_username(username, "Username")?;
-            let md5_password = get_and_prompt_password(password, "Password")?;
-            Ok(UserLoginReq {
-                username,
-                md5_password,
-                retain,
-            })
-        }
-    }
+    let (username, md5_password) = fill_user_login_fields(username, password)?;
+    Ok(UserLoginReq {
+        username,
+        md5_password,
+        retain,
+    })
 }
 
 pub async fn user_login(
@@ -130,10 +147,9 @@ pub async fn user_login(
                 .is_ok()
             {
                 let sign = if retain {
-                    user.auth_signature
-                        .unwrap_or_else(|| StdRng::from_os_rng().next_u32() as i64)
+                    user.auth_signature.unwrap_or_else(generate_auth_signature)
                 } else {
-                    (1 + StdRng::from_os_rng().next_u32()) as i64
+                    generate_new_auth_signature(user.auth_signature)
                 };
                 let token = generate_token(username, sign)?;
                 let now = TimeDateTimeWithTimeZone::now_utc();
@@ -160,6 +176,61 @@ pub async fn user_login(
             Err(AuthError::WrongCredentials.into())
         }
     }
+}
+
+pub async fn refresh_user_token(
+    db: &DatabaseConnection,
+    user_id: i64,
+    ip: SocketAddr,
+) -> crate::error::Result<String> {
+    let user = User::Entity::find_by_id(user_id)
+        .one(db)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+
+    if user.state != UserState::Active {
+        return Err(AuthError::PermissionDenied.into());
+    }
+
+    let sign = generate_new_auth_signature(user.auth_signature);
+    let token = generate_token(&user.username, sign)?;
+    let now = TimeDateTimeWithTimeZone::now_utc();
+
+    let active_user = User::ActiveModel {
+        id: Set(user.id),
+        auth_signature: Set(Some(sign)),
+        current_sign_in_at: Set(Some(now)),
+        last_sign_in_at: Set(user.current_sign_in_at),
+        current_sign_in_ip: Set(Some(ip.ip().to_string())),
+        last_sign_in_ip: Set(user.current_sign_in_ip),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+
+    active_user.update(db).await?;
+    Ok(token)
+}
+
+pub async fn revoke(db: &DatabaseConnection, user_id: i64) -> crate::error::Result<()> {
+    let user = User::Entity::find_by_id(user_id)
+        .one(db)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+
+    if user.state != UserState::Active {
+        return Err(AuthError::PermissionDenied.into());
+    }
+
+    let now = TimeDateTimeWithTimeZone::now_utc();
+    let active_user = User::ActiveModel {
+        id: Set(user.id),
+        auth_signature: Set(Some(generate_new_auth_signature(user.auth_signature))),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+
+    active_user.update(db).await?;
+    Ok(())
 }
 
 pub async fn user_change_password(

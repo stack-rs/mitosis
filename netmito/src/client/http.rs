@@ -137,8 +137,13 @@ impl MitoHttpClient {
                 if let Some(parent) = self.credential_path.parent() {
                     tokio::fs::create_dir_all(parent).await?;
                 }
-                modify_or_append_credential(&self.credential_path, &req.username, &self.credential)
-                    .await?;
+                modify_or_append_credential(
+                    &self.credential_path,
+                    &self.url,
+                    &req.username,
+                    &self.credential,
+                )
+                .await?;
             }
             Ok(())
         } else {
@@ -192,8 +197,13 @@ impl MitoHttpClient {
                 if let Some(parent) = self.credential_path.parent() {
                     tokio::fs::create_dir_all(parent).await?;
                 }
-                modify_or_append_credential(&self.credential_path, &username, &self.credential)
-                    .await?;
+                modify_or_append_credential(
+                    &self.credential_path,
+                    &self.url,
+                    &username,
+                    &self.credential,
+                )
+                .await?;
             }
             Ok(())
         } else {

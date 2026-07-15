@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use figment::value::magic::RelativePathBuf;
 use reqwest::Client;
-
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncBufReadExt;
 use url::Url;
 
@@ -12,14 +12,15 @@ use crate::{
     service::auth::fill_user_login,
 };
 
-macro_rules! expect_two {
-    ($iter:expr) => {{
-        let mut i = $iter;
-        match (i.next(), i.next(), i.next()) {
-            (Some(first), Some(second), None) => Some((first, second)),
-            _ => None,
-        }
-    }};
+#[derive(Debug, Deserialize, Serialize)]
+struct CachedCredential {
+    coordinator_addr: String,
+    username: String,
+    token: String,
+}
+
+fn normalize_coordinator_addr(url: &Url) -> String {
+    url.origin().ascii_serialization()
 }
 
 pub trait GetPathBuf {
@@ -84,58 +85,64 @@ where
 }
 
 async fn extract_credential(
+    coordinator_addr: &str,
     user: Option<&String>,
     lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::fs::File>>,
 ) -> std::io::Result<Option<(String, String)>> {
-    match user {
-        // Specify the user, let us try to find the credential for the user
-        Some(user) => {
-            let prefix = format!("{user}:");
-            while let Some(line) = lines.next_line().await? {
-                if line.starts_with(&prefix) {
-                    if let Some((username, token)) = expect_two!(line.splitn(2, ':')) {
-                        return Ok(Some((username.to_owned(), token.to_owned())));
-                    }
-                }
-            }
-            Ok(None)
+    while let Some(line) = lines.next_line().await? {
+        let Ok(credential) = serde_json::from_str::<CachedCredential>(&line) else {
+            continue;
+        };
+        if credential.coordinator_addr != coordinator_addr {
+            continue;
         }
-        // No user specified, just use the first line
-        None => {
-            if let Some(line) = lines.next_line().await? {
-                if let Some((username, token)) = expect_two!(line.splitn(2, ':')) {
-                    return Ok(Some((username.to_owned(), token.to_owned())));
-                }
+        if let Some(user) = user {
+            if credential.username != *user {
+                continue;
             }
-            Ok(None)
         }
+        return Ok(Some((credential.username, credential.token)));
     }
+    Ok(None)
 }
 
 pub(crate) async fn modify_or_append_credential(
     cred_path: &std::path::PathBuf,
-    username: &String,
-    token: &String,
-) -> std::io::Result<()> {
+    coordinator_url: &Url,
+    username: &str,
+    token: &str,
+) -> crate::error::Result<()> {
+    let credential = CachedCredential {
+        coordinator_addr: normalize_coordinator_addr(coordinator_url),
+        username: username.to_owned(),
+        token: token.to_owned(),
+    };
+    let credential_line = serde_json::to_string(&credential)?;
+
     if cred_path.exists() {
         let mut lines = read_lines(cred_path).await?;
         let mut new_lines = Vec::new();
-        let prefix = format!("{username}:");
         let mut found = false;
         while let Some(line) = lines.next_line().await? {
-            if line.starts_with(&prefix) {
-                new_lines.push(format!("{username}:{token}"));
+            let Ok(cached_credential) = serde_json::from_str::<CachedCredential>(&line) else {
+                new_lines.push(line);
+                continue;
+            };
+            if cached_credential.coordinator_addr == credential.coordinator_addr
+                && cached_credential.username == credential.username
+            {
+                new_lines.push(credential_line.clone());
                 found = true;
             } else {
                 new_lines.push(line);
             }
         }
         if !found {
-            new_lines.push(format!("{username}:{token}"));
+            new_lines.push(credential_line);
         }
         tokio::fs::write(cred_path, new_lines.join("\n")).await?;
     } else {
-        tokio::fs::write(cred_path, format!("{username}:{token}")).await?;
+        tokio::fs::write(cred_path, credential_line).await?;
     }
     Ok(())
 }
@@ -149,6 +156,8 @@ pub async fn get_user_credential(
     password: Option<String>,
     retain: bool,
 ) -> crate::error::Result<(String, String)> {
+    let coordinator_addr = normalize_coordinator_addr(&url);
+
     // Try to load credential from file
     let cred_path = cred_path
         .map(|p| p.relative())
@@ -165,7 +174,9 @@ pub async fn get_user_credential(
     // Check if the credential is valid
     if cred_path.exists() {
         if let Ok(mut lines) = read_lines(&cred_path).await {
-            if let Some((username, cred)) = extract_credential(user.as_ref(), &mut lines).await? {
+            if let Some((username, cred)) =
+                extract_credential(&coordinator_addr, user.as_ref(), &mut lines).await?
+            {
                 url.set_path("auth");
                 let resp = client
                     .get(url.as_str())
@@ -217,7 +228,7 @@ pub async fn get_user_credential(
         if let Some(parent) = cred_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        modify_or_append_credential(&cred_path, &req.username, &token).await?;
+        modify_or_append_credential(&cred_path, &url, &req.username, &token).await?;
         Ok((req.username, token))
     } else {
         let resp = resp.json::<ErrorMsg>().await.map_err(RequestError::from)?;
@@ -261,7 +272,7 @@ where
                 if let Some(parent) = cred_path.parent() {
                     tokio::fs::create_dir_all(parent).await?;
                 }
-                modify_or_append_credential(&cred_path, &user_login.username, &token).await?;
+                modify_or_append_credential(&cred_path, url, &user_login.username, &token).await?;
             }
         }
         Ok(token)

@@ -132,8 +132,6 @@ pub struct WorkerConfig {
     #[serde(default)]
     pub(crate) lifetime: WorkerTokenLifetime,
     #[serde(default)]
-    pub(crate) retain: bool,
-    #[serde(default)]
     pub(crate) skip_redis: bool,
 }
 
@@ -197,10 +195,6 @@ pub struct WorkerConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub lifetime: Option<String>,
-    /// Whether to retain the previous login state without refetching the credential
-    #[arg(long)]
-    #[serde(skip_serializing_if = "<&bool>::not")]
-    pub retain: bool,
     /// Whether to skip connecting to Redis
     #[arg(long)]
     #[serde(skip_serializing_if = "<&bool>::not")]
@@ -223,7 +217,6 @@ impl Default for WorkerConfig {
             file_log: false,
             shared_log: false,
             lifetime: WorkerTokenLifetime::Default,
-            retain: false,
             skip_redis: false,
         }
     }

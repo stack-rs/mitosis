@@ -9,12 +9,16 @@ pub struct CreateUserReq {
     pub admin: bool,
 }
 
+fn default_refresh() -> bool {
+    false
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UserLoginReq {
     pub username: String,
     pub md5_password: [u8; 16],
-    #[serde(default)]
-    pub retain: bool,
+    #[serde(default = "default_refresh")]
+    pub refresh: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

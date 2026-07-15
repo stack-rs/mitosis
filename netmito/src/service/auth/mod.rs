@@ -111,24 +111,13 @@ fn fill_user_login_fields(
 pub(crate) fn fill_user_login(
     username: Option<String>,
     password: Option<String>,
+    retain: bool,
 ) -> crate::error::Result<UserLoginReq> {
     let (username, md5_password) = fill_user_login_fields(username, password)?;
     Ok(UserLoginReq {
         username,
         md5_password,
-        retain: true,
-    })
-}
-
-pub(crate) fn fill_user_login_refreshing(
-    username: Option<String>,
-    password: Option<String>,
-) -> crate::error::Result<UserLoginReq> {
-    let (username, md5_password) = fill_user_login_fields(username, password)?;
-    Ok(UserLoginReq {
-        username,
-        md5_password,
-        retain: false,
+        retain,
     })
 }
 

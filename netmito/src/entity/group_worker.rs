@@ -24,14 +24,12 @@ pub enum Relation {
         on_delete = "Restrict"
     )]
     Groups,
-    // When a worker is removed, the group-worker relationship is
-    // no longer active and should be automatically deleted.
     #[sea_orm(
         belongs_to = "super::workers::Entity",
         from = "Column::WorkerId",
         to = "super::workers::Column::Id",
         on_update = "Cascade",
-        on_delete = "Cascade"
+        on_delete = "Restrict"
     )]
     Workers,
 }

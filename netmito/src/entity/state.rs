@@ -469,23 +469,16 @@ pub enum SuiteJobState {
     Executing = 1,
     /// Cleanup hook running
     Cleanup = 2,
-    /// Terminal: job finished successfully, get another suite to execute after
+    /// Terminal: job finished successfully,
+    /// It doesn't matter if the job finished all the available tasks in the suite. As long as
+    /// all hooks completed successfully, the job is marked completed.
     Completed = 3,
     /// Terminal: a hook execution failed. Job terminated, get another suite to execute after.
     Failed = 4,
     /// Terminal: the agent was lost while executing this job.
     Lost = 5,
-    /// Terminal: the job was cancelled by the coordinator. Job gracefully stopped, get another suite to execute after
-    Cancelled = 6,
-    /// Terminal: the job was stopped because the agent is asked to
-    /// gracefully shut down. Job gracefully stopped, then shut down agent
-    Halted = 7,
-    /// Terminal: the job was forcefully stopped. Job force stopped,
-    /// get another suite to execute later
-    Aborted = 8,
-    /// Terminal: the job was stopped because the agent is asked to
-    /// forcefully shut down. Job force stopped, then shut down agent
-    Killed = 9,
+    /// Terminal: job was force stopped, no cleanup
+    Killed = 6,
 }
 
 impl Display for SuiteJobState {
@@ -497,9 +490,6 @@ impl Display for SuiteJobState {
             SuiteJobState::Completed => write!(f, "Completed"),
             SuiteJobState::Failed => write!(f, "Failed"),
             SuiteJobState::Lost => write!(f, "Lost"),
-            SuiteJobState::Cancelled => write!(f, "Cancelled"),
-            SuiteJobState::Halted => write!(f, "Halted"),
-            SuiteJobState::Aborted => write!(f, "Aborted"),
             SuiteJobState::Killed => write!(f, "Killed"),
         }
     }

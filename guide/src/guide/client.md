@@ -31,8 +31,6 @@ mito client -i
 If a user has never logged in or if his/her session has expired, the Client will prompt them to re-input their username and password for authentication.
 Alternatively, they can directly specify their username (`-u`) or password (`-p`) during execution.
 Once authenticated, the Client will retain their credentials in a file for future use.
-Cached credentials are scoped by both the Coordinator address and username, so credentials for the same username on different Coordinators can coexist in the same credential file.
-Credential entries written by previous versions do not contain a Coordinator address and are ignored, so users may need to log in again after upgrading.
 
 We recommend using the interactive mode for most operations, as it provides a more user-friendly experience. It will prompt you something like this:
 

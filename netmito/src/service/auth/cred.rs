@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
+use base64::{engine::general_purpose, Engine as _};
 use figment::value::magic::RelativePathBuf;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use tokio::io::AsyncBufReadExt;
 use url::Url;
 
@@ -12,15 +12,22 @@ use crate::{
     service::auth::fill_user_login,
 };
 
-#[derive(Debug, Deserialize, Serialize)]
-struct CachedCredential {
-    coordinator_addr: String,
-    username: String,
-    token: String,
-}
-
 fn normalize_coordinator_addr(url: &Url) -> String {
     url.origin().ascii_serialization()
+}
+
+fn encode_coordinator_addr(url: &Url) -> String {
+    general_purpose::STANDARD.encode(normalize_coordinator_addr(url))
+}
+
+fn parse_cached_credential(line: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = line.split(':');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(coordinator_addr), Some(username), Some(credential), None) => {
+            Some((coordinator_addr, username, credential))
+        }
+        _ => None,
+    }
 }
 
 pub trait GetPathBuf {
@@ -90,18 +97,19 @@ async fn extract_credential(
     lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::fs::File>>,
 ) -> std::io::Result<Option<(String, String)>> {
     while let Some(line) = lines.next_line().await? {
-        let Ok(credential) = serde_json::from_str::<CachedCredential>(&line) else {
+        let Some((cached_coordinator_addr, username, credential)) = parse_cached_credential(&line)
+        else {
             continue;
         };
-        if credential.coordinator_addr != coordinator_addr {
+        if cached_coordinator_addr != coordinator_addr {
             continue;
         }
         if let Some(user) = user {
-            if credential.username != *user {
+            if username != user.as_str() {
                 continue;
             }
         }
-        return Ok(Some((credential.username, credential.token)));
+        return Ok(Some((username.to_owned(), credential.to_owned())));
     }
     Ok(None)
 }
@@ -112,25 +120,21 @@ pub(crate) async fn modify_or_append_credential(
     username: &str,
     token: &str,
 ) -> crate::error::Result<()> {
-    let credential = CachedCredential {
-        coordinator_addr: normalize_coordinator_addr(coordinator_url),
-        username: username.to_owned(),
-        token: token.to_owned(),
-    };
-    let credential_line = serde_json::to_string(&credential)?;
+    let coordinator_addr = encode_coordinator_addr(coordinator_url);
+    let credential_line = format!("{coordinator_addr}:{username}:{token}");
 
     if cred_path.exists() {
         let mut lines = read_lines(cred_path).await?;
         let mut new_lines = Vec::new();
         let mut found = false;
         while let Some(line) = lines.next_line().await? {
-            let Ok(cached_credential) = serde_json::from_str::<CachedCredential>(&line) else {
+            let Some((cached_coordinator_addr, cached_username, _)) =
+                parse_cached_credential(&line)
+            else {
                 new_lines.push(line);
                 continue;
             };
-            if cached_credential.coordinator_addr == credential.coordinator_addr
-                && cached_credential.username == credential.username
-            {
+            if cached_coordinator_addr == coordinator_addr.as_str() && cached_username == username {
                 new_lines.push(credential_line.clone());
                 found = true;
             } else {
@@ -156,7 +160,7 @@ pub async fn get_user_credential(
     password: Option<String>,
     retain: bool,
 ) -> crate::error::Result<(String, String)> {
-    let coordinator_addr = normalize_coordinator_addr(&url);
+    let coordinator_addr = encode_coordinator_addr(&url);
 
     // Try to load credential from file
     let cred_path = cred_path

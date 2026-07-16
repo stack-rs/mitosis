@@ -290,7 +290,10 @@ impl MitoClient {
 
     pub async fn user_login(&mut self, args: LoginArgs) -> crate::error::Result<()> {
         let req = fill_user_login(args.username, args.password, args.retain)?;
-        self.http_client.user_login(req).await
+        let username = req.username.clone();
+        self.http_client.user_login(req).await?;
+        self.username = username;
+        Ok(())
     }
 
     pub async fn user_auth(&mut self) -> crate::error::Result<String> {

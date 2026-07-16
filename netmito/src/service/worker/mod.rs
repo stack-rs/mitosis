@@ -982,15 +982,12 @@ pub async fn shutdown_workers_by_filter(
                 match req.op {
                     WorkerShutdownOp::Force => {
                         // 1. Reassign tasks assigned to matching workers.
-                        //    The subquery joins group_worker which still exists at this point.
-                        //    runner_uuid holds worker UUIDs, so map the worker ids to uuids.
-                        let runner_uuid_subquery = Query::select()
-                            .column((Worker::Entity, Worker::Column::WorkerId))
-                            .from(Worker::Entity)
-                            .and_where(
-                                Worker::Column::Id.in_subquery(worker_filter_subquery.clone()),
-                            )
-                            .to_owned();
+                        //    runner_uuid holds worker UUIDs not worker row id, modify the
+                        //    worker_filter_subquery to query for UUIDs instead
+                        let mut runner_uuid_subquery = worker_filter_subquery.clone();
+                        runner_uuid_subquery
+                            .clear_selects()
+                            .column((Worker::Entity, Worker::Column::WorkerId));
                         tasks_to_reassign = ActiveTask::Entity::update_many()
                             .col_expr(
                                 ActiveTask::Column::RunnerUuid,

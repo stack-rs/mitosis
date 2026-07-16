@@ -115,13 +115,13 @@ fn fill_user_login_fields(
 pub(crate) fn fill_user_login(
     username: Option<String>,
     password: Option<String>,
-    retain: bool,
+    refresh: bool,
 ) -> crate::error::Result<UserLoginReq> {
     let (username, md5_password) = fill_user_login_fields(username, password)?;
     Ok(UserLoginReq {
         username,
         md5_password,
-        retain,
+        refresh,
     })
 }
 
@@ -129,7 +129,7 @@ pub async fn user_login(
     db: &DatabaseConnection,
     username: &str,
     md5_password: &[u8; 16],
-    retain: bool,
+    refresh: bool,
     ip: SocketAddr,
 ) -> crate::error::Result<String> {
     match User::Entity::find()
@@ -146,10 +146,10 @@ pub async fn user_login(
                 .verify_password(md5_password, &parsed_hash)
                 .is_ok()
             {
-                let sign = if retain {
-                    user.auth_signature.unwrap_or_else(generate_auth_signature)
-                } else {
+                let sign = if refresh {
                     generate_new_auth_signature(user.auth_signature)
+                } else {
+                    user.auth_signature.unwrap_or_else(generate_auth_signature)
                 };
                 let token = generate_token(username, sign)?;
                 let now = TimeDateTimeWithTimeZone::now_utc();

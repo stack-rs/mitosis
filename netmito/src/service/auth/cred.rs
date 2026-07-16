@@ -224,7 +224,7 @@ pub async fn get_user_credential(
     }
     // Local credential not found or invalid, need to login
     tracing::warn!("Local credential not found or invalid, need to login");
-    let req = fill_user_login(user, password, true)?;
+    let req = fill_user_login(user, password, false)?;
     url.set_path("login");
     let resp = client
         .post(url.as_str())

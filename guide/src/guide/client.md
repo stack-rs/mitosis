@@ -127,13 +127,13 @@ auth
 Input `login` to log in with username and password. Login retains previous tokens by default.
 
 ```txt
-login mitosis_admin mitosis_admin
+login <mitosis_username> <mitosis_password>
 ```
 
 Input `login --refresh` to log in with username and password and invalidate previously issued tokens.
 
 ```txt
-login mitosis_admin mitosis_admin --refresh
+login <mitosis_username> <mitosis_password> --refresh
 ```
 
 Input `refresh` to refresh the current valid token and invalidate previous tokens.

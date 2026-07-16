@@ -123,12 +123,9 @@ pub struct ExecSpec {
     pub envs: HashMap<String, String>,
     #[serde(default)]
     pub resources: Vec<RemoteResourceDownload>,
-    /// Execution timeout; runs without a deadline if unset.
-    // TODO: should check if we currently correctly handle the non-set timeout situation on task
-    // submission side (include client and worker) and coordinator logic.
+    /// Execution timeout in seconds. If unset the task runs without a deadline
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(with = "humantime_serde")]
-    pub timeout: Option<std::time::Duration>,
+    pub timeout: Option<i64>,
     #[serde(default)]
     pub terminal_output: bool,
 }
@@ -744,7 +741,7 @@ impl ExecSpec {
             args: args.into_iter().map(Into::into).collect(),
             envs: envs.into_iter().map(Into::into).collect(),
             resources: files.into_iter().collect(),
-            timeout: timeout.into(),
+            timeout: timeout.into().map(|d| d.as_secs() as i64),
             terminal_output,
         }
     }

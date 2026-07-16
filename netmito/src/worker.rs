@@ -878,10 +878,13 @@ async fn execute_task(
         }
     }
 
+    // TODO: Support unlimited exec time when exec_timeout is none
     let exec_timeout = task
         .spec
         .timeout
-        .unwrap_or(std::time::Duration::from_secs(600));
+        .and_then(|t| u64::try_from(t).ok())
+        .unwrap_or(600);
+    let exec_timeout = std::time::Duration::from_secs(exec_timeout);
     task_executor
         .announce_task_state_ex(
             &task.uuid,
@@ -975,7 +978,7 @@ async fn execute_task(
                 .await;
             output.map(TaskResult::Finish)
         },
-        _ = tokio::time::sleep_until(timeout_until) => {
+        _ =  tokio::time::sleep_until(timeout_until) => {
             tracing::debug!("Task execution timeout");
             task_executor
                 .announce_task_state_ex(&task.uuid, TaskExecState::ExecTimeout as i32, 60)

@@ -446,6 +446,13 @@ async fn update_worker_with_transaction(
     ))
 }
 
+#[derive(Debug, FromQueryResult)]
+struct TaskExpiryInfo {
+    state: TaskState,
+    updated_at: TimeDateTimeWithTimeZone,
+    timeout_secs: Option<i64>,
+}
+
 pub async fn heartbeat(worker_id: i64, pool: &InfraPool) -> crate::error::Result<()> {
     // DONE: check if the task is already expired
     // Add retry logic for the update operation
@@ -453,22 +460,29 @@ pub async fn heartbeat(worker_id: i64, pool: &InfraPool) -> crate::error::Result
 
     if let Some(task_id) = worker.assigned_task_id {
         if let Some(task) = ActiveTask::Entity::find_by_id(task_id)
+            .select_only()
+            .column(ActiveTask::Column::State)
+            .column(ActiveTask::Column::UpdatedAt)
+            // A missing timeout yields NULL here, meaning "no deadline".
+            .column_as(
+                Expr::cust(r#"("active_tasks"."spec"->>'timeout')::bigint"#),
+                "timeout_secs",
+            )
+            .into_model::<TaskExpiryInfo>()
             .one(&pool.db)
             .await?
         {
+            // A `None` timeout means the task runs without a deadline, so we skip
+            // the stale-task check entirely for it.
             if task.state == TaskState::Running {
-                // Timeout lives in the exec spec; default to 600s if unset/unparseable.
-                let timeout_secs = serde_json::from_value::<ExecSpec>(task.spec.clone())
-                    .ok()
-                    .and_then(|s| s.timeout)
-                    .map(|t| t.as_secs() as i64)
-                    .unwrap_or(600);
-                // We allow a 60 seconds grace period
-                if TimeDateTimeWithTimeZone::now_utc() - task.updated_at
-                    > time::Duration::seconds(timeout_secs + 60)
-                {
-                    remove_worker(worker, pool).await?;
-                    return Ok(());
+                if let Some(timeout_secs) = task.timeout_secs {
+                    // We allow a 60 seconds grace period
+                    if TimeDateTimeWithTimeZone::now_utc() - task.updated_at
+                        > time::Duration::seconds(timeout_secs + 60)
+                    {
+                        remove_worker(worker, pool).await?;
+                        return Ok(());
+                    }
                 }
             }
         }

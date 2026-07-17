@@ -79,6 +79,8 @@ admin_user = "mitosis_admin"
 admin_password = "mitosis_admin"
 access_token_private_path = "private.pem"
 access_token_public_path = "public.pem"
+# access_token_expires_in applies to user access tokens only. Worker token lifetimes are
+# chosen by the Worker itself, via its own lifetime setting.
 access_token_expires_in = "7d"
 heartbeat_timeout = "600s"
 file_log = false

@@ -12,7 +12,7 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt::MakeWriter, layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use url::Url;
 
-use crate::{error::Error, schema::WorkerTokenLifetime};
+use crate::error::Error;
 
 use super::{coordinator::DEFAULT_COORDINATOR_ADDR, TracingGuard};
 
@@ -129,8 +129,9 @@ pub struct WorkerConfig {
     pub(crate) file_log: bool,
     #[serde(default)]
     pub(crate) shared_log: bool,
-    #[serde(default)]
-    pub(crate) lifetime: WorkerTokenLifetime,
+    /// The lifetime of the worker token. `None` means the token never expires.
+    #[serde(default, with = "humantime_serde")]
+    pub(crate) lifetime: Option<Duration>,
     #[serde(default)]
     pub(crate) skip_redis: bool,
 }
@@ -191,10 +192,13 @@ pub struct WorkerConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "<&bool>::not")]
     pub shared_log: bool,
-    /// The lifetime of the worker token (e.g., 7d, 1year, never)
-    #[arg(long)]
-    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-    pub lifetime: Option<String>,
+    /// The lifetime of the worker token (e.g., 7d, 1year). If not given, the worker token is valid forever
+    #[arg(long, value_parser = humantime_serde::re::humantime::parse_duration)]
+    #[serde(
+        with = "humantime_serde",
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub lifetime: Option<Duration>,
     /// Whether to skip connecting to Redis
     #[arg(long)]
     #[serde(skip_serializing_if = "<&bool>::not")]
@@ -216,7 +220,7 @@ impl Default for WorkerConfig {
             log_path: None,
             file_log: false,
             shared_log: false,
-            lifetime: WorkerTokenLifetime::Default,
+            lifetime: None,
             skip_redis: false,
         }
     }

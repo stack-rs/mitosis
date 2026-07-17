@@ -43,9 +43,10 @@ coordinator_addr = "http://127.0.0.1:5000"
 polling_interval = "3m"
 heartbeat_interval = "5m"
 # lifetime controls the worker JWT token lifetime.
-# Use a duration such as "7d", "1h", or "30m"; use "never" to issue a token without exp.
-# If omitted or set to "default", the coordinator default token lifetime is used.
-lifetime = "7d"
+# Use a duration such as "7d", "1h", or "30m".
+# If not set, the JWT is valid forever.
+# The Coordinator's access_token_expires_in does not apply to worker tokens.
+# lifetime is not set
 # credential_path is not set
 # user is not set
 # password is not set
@@ -122,7 +123,7 @@ Options:
       --file-log
           Enable logging to file
       --lifetime <LIFETIME>
-          The lifetime of the worker token (e.g., 7d, 1year, never)
+          The lifetime of the worker token (e.g., 7d, 1year). If not given, the worker token is valid forever
   -h, --help
           Print help
   -V, --version
@@ -161,6 +162,7 @@ shared_log = true  # Enable shared rolling logs
 - Linux: `$XDG_CACHE_HOME` or `$HOME/.cache/mitosis`
 - macOS: `$HOME/Library/Caches/mitosis`
 - Windows: `{FOLDERID_LocalAppData}\mitosis`
+
 ```
 
 ```

@@ -20,6 +20,8 @@ admin_user = "mitosis_admin"
 admin_password = "mitosis_admin"
 access_token_private_path = "private.pem"
 access_token_public_path = "public.pem"
+# access_token_expires_in applies to user access tokens only. Worker token lifetimes are
+# chosen by the Worker itself, via its own lifetime setting.
 access_token_expires_in = "7d"
 heartbeat_timeout = "600s"
 file_log = false
@@ -30,9 +32,10 @@ coordinator_addr = "http://127.0.0.1:5000"
 polling_interval = "3m"
 heartbeat_interval = "5m"
 # lifetime controls the worker JWT token lifetime.
-# Use a duration such as "7d", "1h", or "30m"; use "never" to issue a token without exp.
-# If omitted or set to "default", the coordinator default token lifetime is used.
-lifetime = "7d"
+# Use a duration such as "7d", "1h", or "30m". If omitted, the token never expires.
+# The Coordinator's access_token_expires_in does not apply to worker tokens. The lifetime of
+# worker token is completely controlled by worker side's settings.
+# lifetime is not set
 # credential_path is not set
 # user is not set
 # password is not set
@@ -48,3 +51,4 @@ file_log = false
 # user = "mitosis_admin"
 # password = "mitosis_admin"
 # refresh is not set, default to false. When true, the client refreshes the current login token and invalidates previous tokens.
+

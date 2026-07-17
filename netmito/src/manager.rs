@@ -139,8 +139,9 @@ impl MitoManager {
             if worker_config.shared_log {
                 cmd.arg("--shared-log");
             }
-            if let Some(lifetime) = &worker_config.lifetime {
-                cmd.arg("--lifetime").arg(lifetime);
+            if let Some(lifetime) = worker_config.lifetime {
+                cmd.arg("--lifetime")
+                    .arg(humantime_serde::re::humantime::format_duration(lifetime).to_string());
             }
             if worker_config.skip_redis {
                 cmd.arg("--skip-redis");

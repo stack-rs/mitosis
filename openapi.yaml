@@ -2872,7 +2872,7 @@ components:
         lifetime:
           type: string
           nullable: true
-          description: Worker JWT token lifetime. Use a duration such as "7d", "1h", or "30m"; use "never" to issue a token without exp; use "default", omit the field, or set it to null to use the coordinator default token lifetime.
+          description: Worker JWT token lifetime. Use a duration such as "7d", "1h", or "30m". Omit the field or set it to null to issue a token that never expires. The coordinator's access_token_expires_in does not apply to worker tokens.
           example: 7d
 
     RegisterWorkerResp:

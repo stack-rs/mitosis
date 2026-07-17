@@ -265,7 +265,7 @@ impl MitoWorker {
             tags: config.tags.clone(),
             labels: config.labels.clone(),
             groups: config.groups.clone(),
-            lifetime: config.lifetime.clone(),
+            lifetime: config.lifetime,
         };
         let resp = http_client
             .post(url.as_str())

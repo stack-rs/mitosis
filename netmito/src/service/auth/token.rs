@@ -5,10 +5,7 @@ use jsonwebtoken::EncodingKey;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::{
-    error::{ApiError, DecodeTokenError},
-    schema::WorkerTokenLifetime,
-};
+use crate::error::{ApiError, DecodeTokenError};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TokenClaims<'a> {
@@ -48,35 +45,26 @@ where
     encode_token(&claims, encoding_key)
 }
 
+/// Generate a worker token expiring after `lifetime`, or one that never expires if it is `None`.
 pub fn generate_worker_token<T>(
     username: T,
     sign: i64,
-    lifetime: WorkerTokenLifetime,
+    lifetime: Option<std::time::Duration>,
 ) -> crate::error::Result<String>
 where
     T: AsRef<str>,
 {
-    let exp = match lifetime {
-        WorkerTokenLifetime::Default => {
-            let token_ttl = crate::config::SERVER_CONFIG
-                .get()
-                .ok_or(crate::error::Error::Custom(
-                    "server config not found".to_string(),
-                ))?
-                .token_expires_in;
-            Some(OffsetDateTime::now_utc() + token_ttl)
-        }
-        WorkerTokenLifetime::Duration(ttl) => {
+    let exp = lifetime
+        .map(|ttl| {
             let token_ttl = time::Duration::try_from(ttl).map_err(|_| {
                 ApiError::InvalidRequest(format!(
                     "Invalid lifetime {}",
                     humantime_serde::re::humantime::format_duration(ttl)
                 ))
             })?;
-            Some(OffsetDateTime::now_utc() + token_ttl)
-        }
-        WorkerTokenLifetime::Never => None,
-    };
+            Ok::<_, ApiError>(OffsetDateTime::now_utc() + token_ttl)
+        })
+        .transpose()?;
     let claims = TokenClaims {
         sub: Cow::from(username.as_ref()),
         exp,
@@ -136,8 +124,7 @@ mod jwt_numeric_date_opt {
     where
         D: Deserializer<'de>,
     {
-        let timestamp = Option::<i64>::deserialize(deserializer)?;
-        timestamp
+        Option::<i64>::deserialize(deserializer)?
             .map(|timestamp| {
                 OffsetDateTime::from_unix_timestamp(timestamp)
                     .map_err(|_| serde::de::Error::custom("invalid Unix timestamp value"))

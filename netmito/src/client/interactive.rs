@@ -89,8 +89,11 @@ pub(crate) fn output_parsed_task_info(info: &ParsedTaskQueryInfo) {
     );
     tracing::info!("Tags: {:?}", info.tags);
     tracing::info!("Labels: {:?}", info.labels);
-    let timeout = std::time::Duration::from_secs(info.timeout as u64);
-    tracing::info!("Timeout {:?} and Priority {}", timeout, info.priority);
+    tracing::info!(
+        "Timeout {:?} and Priority {}",
+        info.spec.timeout,
+        info.priority
+    );
     tracing::info!(
         "Created at {} and Updated at {}",
         info.created_at,
@@ -108,8 +111,8 @@ pub(crate) fn output_parsed_task_info(info: &ParsedTaskQueryInfo) {
     if let Some(downstream_task_uuid) = info.downstream_task_uuid {
         tracing::info!("Downstream Task UUID: {:?}", downstream_task_uuid);
     }
-    if let Some(reporter_uuid) = info.reporter_uuid {
-        tracing::info!("Reporter UUID: {}", reporter_uuid);
+    if let Some(runner_uuid) = info.runner_uuid {
+        tracing::info!("Runner UUID: {}", runner_uuid);
     }
 }
 
@@ -124,8 +127,11 @@ pub(crate) fn output_task_info(info: &TaskQueryInfo) {
     );
     tracing::info!("Tags: {:?}", info.tags);
     tracing::info!("Labels: {:?}", info.labels);
-    let timeout = std::time::Duration::from_secs(info.timeout as u64);
-    tracing::info!("Timeout {:?} and Priority {}", timeout, info.priority);
+    tracing::info!(
+        "Timeout {:?} and Priority {}",
+        info.spec.get("timeout"),
+        info.priority
+    );
     tracing::info!(
         "Created at {} and Updated at {}",
         info.created_at,
@@ -143,8 +149,10 @@ pub(crate) fn output_task_info(info: &TaskQueryInfo) {
     if let Some(downstream_task_uuid) = info.downstream_task_uuid {
         tracing::info!("Downstream Task UUID: {:?}", downstream_task_uuid);
     }
-    if let Some(reporter_uuid) = info.reporter_uuid {
-        tracing::info!("Reporter UUID: {}", reporter_uuid);
+    if let Some(runner_uuid) = info.runner_uuid {
+        tracing::info!("Runner UUID: {}", runner_uuid);
+    } else {
+        tracing::info!("Runner UUID: Unknown")
     }
 }
 

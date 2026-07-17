@@ -9,6 +9,8 @@ use super::content::ArtifactContentType;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
+    // For an artifact that belongs to a task, this is the UUID of the task;
+    // For an artifact that belongs to a hook, this is the hook UUID.
     pub task_id: Uuid,
     pub content_type: ArtifactContentType,
     pub size: i64,

@@ -1,0 +1,68 @@
+//! `SeaORM` Entity for task_suites table
+
+use sea_orm::entity::prelude::*;
+
+use super::state::TaskSuiteState;
+
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
+#[sea_orm(table_name = "task_suites")]
+pub struct Model {
+    #[sea_orm(primary_key)]
+    pub id: i64,
+    #[sea_orm(unique)]
+    pub uuid: Uuid,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub name: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub description: Option<String>,
+    pub group_id: i64,
+    pub creator_id: i64,
+    pub tags: Vec<String>,
+    pub labels: Vec<String>,
+    pub priority: i32,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub worker_schedule: Json,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub exec_hooks: Option<Json>,
+    pub state: TaskSuiteState,
+    pub last_task_submitted_at: Option<TimeDateTimeWithTimeZone>,
+    pub total_tasks: i32,
+    pub incomplete_tasks: i32,
+    pub created_at: TimeDateTimeWithTimeZone,
+    pub updated_at: TimeDateTimeWithTimeZone,
+    pub completed_at: Option<TimeDateTimeWithTimeZone>,
+}
+
+#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+pub enum Relation {
+    #[sea_orm(
+        belongs_to = "super::groups::Entity",
+        from = "Column::GroupId",
+        to = "super::groups::Column::Id",
+        on_update = "Cascade",
+        on_delete = "Restrict"
+    )]
+    Group,
+    #[sea_orm(
+        belongs_to = "super::users::Entity",
+        from = "Column::CreatorId",
+        to = "super::users::Column::Id",
+        on_update = "Cascade",
+        on_delete = "Restrict"
+    )]
+    Users,
+}
+
+impl Related<super::groups::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Group.def()
+    }
+}
+
+impl Related<super::users::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Users.def()
+    }
+}
+
+impl ActiveModelBehavior for ActiveModel {}

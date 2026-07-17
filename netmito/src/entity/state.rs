@@ -295,3 +295,218 @@ impl Display for WorkerState {
         }
     }
 }
+
+#[derive(
+    EnumIter,
+    DeriveActiveEnum,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Copy,
+    Hash,
+    ValueEnum,
+)]
+#[sea_orm(rs_type = "i32", db_type = "Integer")]
+pub enum TaskSuiteState {
+    /// Suite is accepting new tasks
+    Open = 0,
+    /// No new tasks has been added to the suite in a recent time but tasks can still be executed;
+    /// Adding a new task will transit the suite back to `open` state
+    Closed = 1,
+    /// All tasks in the suite have completed
+    Complete = 2,
+    /// Suite has been cancelled
+    Cancelled = 3,
+}
+
+impl Display for TaskSuiteState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TaskSuiteState::Open => write!(f, "Open"),
+            TaskSuiteState::Closed => write!(f, "Closed"),
+            TaskSuiteState::Complete => write!(f, "Complete"),
+            TaskSuiteState::Cancelled => write!(f, "Cancelled"),
+        }
+    }
+}
+
+impl TaskSuiteState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Complete | Self::Cancelled)
+    }
+
+    /// Returns true if the suite can accept new tasks.
+    /// - Open: directly accepts tasks
+    /// - Complete: can accept tasks (will be reopened)
+    /// - Closed: can accept tasks (will be reopened)
+    /// - Cancelled: terminal state, cannot accept tasks
+    pub fn can_accept_tasks(&self) -> bool {
+        !matches!(self, Self::Cancelled)
+    }
+
+    // TODO: this method might be removed as we should do an idempotent update to state
+    /// Returns true if the suite needs to be reopened before accepting tasks.
+    /// This is true for Closed and Complete states.
+    pub fn needs_reopen(&self) -> bool {
+        matches!(self, Self::Closed | Self::Complete)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        matches!(self, Self::Closed | Self::Complete | Self::Cancelled)
+    }
+}
+
+// TODO: should get further check on what states are needed
+/// Runtime phase of an agent.
+#[derive(
+    EnumIter,
+    DeriveActiveEnum,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Copy,
+    ValueEnum,
+)]
+#[sea_orm(rs_type = "i32", db_type = "Integer")]
+pub enum AgentState {
+    /// Agent is idle and available for assignment
+    Idle = 0,
+    /// Agent is provisioning environment for task suite
+    Provisioning = 1,
+    /// Agent is executing tasks from a suite
+    Executing = 2,
+    /// Agent is cleaning up after task suite completion or asked to gracefully shut down/handover
+    Cleaning = 3,
+    /// Agent is offline
+    Offline = 4,
+}
+
+impl Display for AgentState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentState::Idle => write!(f, "Idle"),
+            AgentState::Provisioning => write!(f, "Provisioning"),
+            AgentState::Executing => write!(f, "Executing"),
+            AgentState::Cleaning => write!(f, "Cleaning"),
+            AgentState::Offline => write!(f, "Offline"),
+        }
+    }
+}
+
+impl AgentState {
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Idle)
+    }
+
+    pub fn is_busy(&self) -> bool {
+        matches!(self, Self::Provisioning | Self::Executing | Self::Cleaning)
+    }
+}
+
+/// Lifecycle state of a hook task (provision / cleanup / background).
+/// A hook task is reported on completion, so There is no `Running` state
+#[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
+#[sea_orm(rs_type = "i32", db_type = "Integer")]
+pub enum HookExecState {
+    /// Hook completed successfully
+    Completed = 0,
+    /// Hook failed (the return value of the program is none-zero)
+    Failed = 1,
+    /// Hook was cancelled
+    Cancelled = 2,
+}
+
+impl Display for HookExecState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HookExecState::Completed => write!(f, "Completed"),
+            HookExecState::Failed => write!(f, "Failed"),
+            HookExecState::Cancelled => write!(f, "Cancelled"),
+        }
+    }
+}
+
+/// Lifecycle state of one job: an attempt of an agent running a task suite.
+///
+/// A job that is gracefully stopped will not execute any new task,
+/// will ask tasks still executing to gracefully shut down, and will still
+/// run the cleanup hook and report the hook execution result.
+///
+/// A job that is forcefully stopped will not execute any new task,
+/// will ask tasks still executing to forcefully shut down, and will NOT run
+/// any cleanup hook.
+///
+/// A task's execution result is only accepted while the job is `Executing`
+/// (see `accepts_task_result`); the agent must drain all pending task
+/// reports before the job leaves that state. Reports against any other
+/// state are rejected.
+///
+#[derive(
+    EnumIter,
+    DeriveActiveEnum,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Copy,
+    ValueEnum,
+)]
+#[sea_orm(rs_type = "i32", db_type = "Integer")]
+pub enum SuiteJobState {
+    /// Job accepted, provision hook running
+    Provisioning = 0,
+    /// Tasks being executed
+    Executing = 1,
+    /// Cleanup hook running
+    Cleanup = 2,
+    /// Terminal: job finished successfully,
+    /// It doesn't matter if the job finished all the available tasks in the suite. As long as
+    /// all hooks completed successfully, the job is marked completed.
+    Completed = 3,
+    /// Terminal: a hook execution failed. Job terminated, get another suite to execute after.
+    Failed = 4,
+    /// Terminal: the agent was lost while executing this job.
+    Lost = 5,
+    /// Terminal: job was force stopped, no cleanup
+    Killed = 6,
+}
+
+impl Display for SuiteJobState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SuiteJobState::Provisioning => write!(f, "Provision"),
+            SuiteJobState::Executing => write!(f, "Executing"),
+            SuiteJobState::Cleanup => write!(f, "Cleanup"),
+            SuiteJobState::Completed => write!(f, "Completed"),
+            SuiteJobState::Failed => write!(f, "Failed"),
+            SuiteJobState::Lost => write!(f, "Lost"),
+            SuiteJobState::Killed => write!(f, "Killed"),
+        }
+    }
+}
+
+impl SuiteJobState {
+    /// Whether the job is still running one of its lifecycle phases
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Provisioning | Self::Executing | Self::Cleanup)
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        !self.is_active()
+    }
+
+    /// Whether a task's execution result may be recorded in this job state.
+    pub fn accepts_task_result(&self) -> bool {
+        matches!(self, Self::Executing)
+    }
+}

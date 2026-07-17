@@ -7,6 +7,10 @@ mod m20250910_205347_add_labels_to_workers;
 mod m20250911_025409_add_gin_indices_on_tags;
 mod m20250915_111689_add_tasks_trigger;
 mod m20251031_000001_add_reporter_uuid_to_archived_tasks;
+mod m20260703_000000_create_task_suite_tables;
+mod m20260703_000001_alter_tasks_link_suites;
+mod m20260703_000002_alter_tasks_exec_spec;
+mod m20260703_000003_restrict_group_worker_fk;
 
 pub struct Migrator;
 
@@ -21,6 +25,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20250911_025409_add_gin_indices_on_tags::Migration),
             Box::new(m20250915_111689_add_tasks_trigger::Migration),
             Box::new(m20251031_000001_add_reporter_uuid_to_archived_tasks::Migration),
+            Box::new(m20260703_000000_create_task_suite_tables::Migration),
+            Box::new(m20260703_000001_alter_tasks_link_suites::Migration),
+            Box::new(m20260703_000002_alter_tasks_exec_spec::Migration),
+            Box::new(m20260703_000003_restrict_group_worker_fk::Migration),
         ]
     }
 }

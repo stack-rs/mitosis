@@ -19,14 +19,18 @@ pub struct Model {
     pub created_at: TimeDateTimeWithTimeZone,
     pub updated_at: TimeDateTimeWithTimeZone,
     pub state: TaskState,
-    pub assigned_worker: Option<i64>,
-    pub timeout: i64,
+    pub runner_uuid: Option<Uuid>,
     pub priority: i32,
+    #[sea_orm(column_type = "JsonBinary")]
     pub spec: Json,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub exec_options: Option<Json>,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
     pub result: Option<Json>,
     pub upstream_task_uuid: Option<Uuid>,
     pub downstream_task_uuid: Option<Uuid>,
-    pub reporter_uuid: Option<Uuid>,
+    /// The suite this task belonged to, if any (suite tasks).
+    pub task_suite_id: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -47,6 +51,14 @@ pub enum Relation {
         on_delete = "Restrict"
     )]
     Users,
+    #[sea_orm(
+        belongs_to = "super::task_suites::Entity",
+        from = "Column::TaskSuiteId",
+        to = "super::task_suites::Column::Id",
+        on_update = "Cascade",
+        on_delete = "SetNull"
+    )]
+    TaskSuites,
 }
 
 impl Related<super::groups::Entity> for Entity {
@@ -58,6 +70,12 @@ impl Related<super::groups::Entity> for Entity {
 impl Related<super::users::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Users.def()
+    }
+}
+
+impl Related<super::task_suites::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::TaskSuites.def()
     }
 }
 

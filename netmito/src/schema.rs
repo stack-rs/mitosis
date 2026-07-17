@@ -117,14 +117,24 @@ pub struct RegisterWorkerResp {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TaskSpec {
+pub struct ExecSpec {
     pub args: Vec<String>,
     #[serde(default)]
     pub envs: HashMap<String, String>,
     #[serde(default)]
     pub resources: Vec<RemoteResourceDownload>,
+    /// Execution timeout in seconds. If unset the task runs without a deadline
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<i64>,
     #[serde(default)]
     pub terminal_output: bool,
+}
+
+/// Task-specific execution options (not part of the core `ExecSpec`).
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct TaskExecOptions {
+    /// Watch another task's state before executing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch: Option<(Uuid, TaskExecState)>,
 }
 
@@ -132,10 +142,9 @@ pub struct TaskSpec {
 pub struct WorkerTaskResp {
     pub id: i64,
     pub uuid: Uuid,
-    #[serde(with = "humantime_serde")]
-    pub timeout: std::time::Duration,
     pub upstream_task_uuid: Option<Uuid>,
-    pub spec: TaskSpec,
+    pub spec: ExecSpec,
+    pub exec_options: Option<TaskExecOptions>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -190,10 +199,9 @@ pub struct SubmitTaskReq {
     pub group_name: String,
     pub tags: HashSet<String>,
     pub labels: HashSet<String>,
-    #[serde(with = "humantime_serde")]
-    pub timeout: std::time::Duration,
     pub priority: i32,
-    pub task_spec: TaskSpec,
+    pub spec: ExecSpec,
+    pub exec_options: Option<TaskExecOptions>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -205,10 +213,9 @@ pub struct SubmitTaskResp {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChangeTaskReq {
     pub tags: Option<HashSet<String>>,
-    #[serde(with = "humantime_serde")]
-    pub timeout: Option<std::time::Duration>,
     pub priority: Option<i32>,
-    pub task_spec: Option<TaskSpec>,
+    pub spec: Option<ExecSpec>,
+    pub exec_options: Option<TaskExecOptions>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -254,13 +261,13 @@ pub struct TaskQueryInfo {
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
     pub state: TaskState,
-    pub timeout: i64,
     pub priority: i32,
     pub spec: serde_json::Value,
+    pub exec_options: Option<serde_json::Value>,
     pub result: Option<serde_json::Value>,
     pub upstream_task_uuid: Option<Uuid>,
     pub downstream_task_uuid: Option<Uuid>,
-    pub reporter_uuid: Option<Uuid>,
+    pub runner_uuid: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -274,13 +281,13 @@ pub struct ParsedTaskQueryInfo {
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
     pub state: TaskState,
-    pub timeout: i64,
     pub priority: i32,
-    pub spec: TaskSpec,
+    pub spec: ExecSpec,
+    pub exec_options: Option<TaskExecOptions>,
     pub result: Option<TaskResultSpec>,
     pub upstream_task_uuid: Option<Uuid>,
     pub downstream_task_uuid: Option<Uuid>,
-    pub reporter_uuid: Option<Uuid>,
+    pub runner_uuid: Option<Uuid>,
 }
 
 /// Each field in the query request is optional, and the server will return all tasks if no field is specified.
@@ -295,8 +302,7 @@ pub struct TasksQueryReq {
     pub states: Option<HashSet<TaskState>>,
     pub exit_status: Option<String>,
     pub priority: Option<String>,
-    /// Set reporter_uuid will automatically exclude all non-completed tasks.
-    pub reporter_uuid: Option<Uuid>,
+    pub runner_uuid: Option<Uuid>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
     pub count: bool,
@@ -582,8 +588,10 @@ pub struct ArtifactsDownloadByFilterReq {
     pub states: Option<HashSet<TaskState>>,
     pub exit_status: Option<String>,
     pub priority: Option<String>,
-    /// Set reporter_uuid will automatically exclude all non-completed tasks.
-    pub reporter_uuid: Option<Uuid>,
+    /// Filter tasks by the runner (worker uuid) that executed them.
+    // TODO: before, Set runner_uuid will automatically exclude all non-completed tasks, it won't
+    // now, it will only exclude ready and pending tasks
+    pub runner_uuid: Option<Uuid>,
     pub content_type: ArtifactContentType,
 }
 
@@ -647,8 +655,8 @@ pub struct ArtifactsDeleteByFilterReq {
     pub states: Option<HashSet<TaskState>>,
     pub exit_status: Option<String>,
     pub priority: Option<String>,
-    /// Set reporter_uuid will automatically exclude all non-completed tasks.
-    pub reporter_uuid: Option<Uuid>,
+    /// Filter tasks by the runner (worker uuid) that executed them.
+    pub runner_uuid: Option<Uuid>,
     pub content_type: ArtifactContentType,
 }
 
@@ -713,13 +721,13 @@ pub struct TasksSubmitResp {
     pub results: Vec<Result<SubmitTaskResp, crate::error::ErrorMsg>>,
 }
 
-impl TaskSpec {
-    pub fn new<T, I, P, Q, V, U>(
+impl ExecSpec {
+    pub fn new<T, I, P, Q, V, D>(
         args: I,
         envs: P,
         files: V,
+        timeout: D,
         terminal_output: bool,
-        watch: U,
     ) -> Self
     where
         I: IntoIterator<Item = T>,
@@ -727,14 +735,14 @@ impl TaskSpec {
         P: IntoIterator<Item = Q>,
         Q: Into<(String, String)>,
         V: IntoIterator<Item = RemoteResourceDownload>,
-        U: Into<Option<(Uuid, TaskExecState)>>,
+        D: Into<Option<std::time::Duration>>,
     {
         Self {
             args: args.into_iter().map(Into::into).collect(),
             envs: envs.into_iter().map(Into::into).collect(),
             resources: files.into_iter().collect(),
+            timeout: timeout.into().map(|d| d.as_secs() as i64),
             terminal_output,
-            watch: watch.into(),
         }
     }
 }

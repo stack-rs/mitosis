@@ -124,8 +124,7 @@ mod jwt_numeric_date_opt {
     where
         D: Deserializer<'de>,
     {
-        let timestamp = Option::<i64>::deserialize(deserializer)?;
-        timestamp
+        Option::<i64>::deserialize(deserializer)?
             .map(|timestamp| {
                 OffsetDateTime::from_unix_timestamp(timestamp)
                     .map_err(|_| serde::de::Error::custom("invalid Unix timestamp value"))

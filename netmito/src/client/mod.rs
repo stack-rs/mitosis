@@ -40,9 +40,9 @@ impl MitoClient {
             Ok(config) => match Self::setup(config).await {
                 Ok(mut client) => {
                     if let Some(cmd) = cli.command.take() {
-                        if !client.handle_command(cmd).await {
-                            return;
-                        }
+                        // We ignore the return value here, the user can still re-login in interactive mode even if they called revoke
+                        // in this subcommand.
+                        client.handle_command(cmd).await;
                     }
                     if cli.interactive {
                         let username = client.username.as_str();

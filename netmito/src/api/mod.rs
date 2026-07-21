@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod groups;
+pub mod suites;
 pub mod tasks;
 pub mod users;
 pub mod workers;
@@ -35,70 +36,45 @@ use crate::{
 };
 
 pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
-    #[cfg(not(feature = "debugging"))]
-    {
-        Router::new()
-            .route(
-                "/auth",
-                get(users::user_auth).layer(middleware::from_fn_with_state(
-                    st.clone(),
-                    user_auth_with_name_middleware,
-                )),
-            )
-            .route(
-                "/health",
-                get(|| async { (StatusCode::OK, Json(json!({"status": "ok"}))) }),
-            )
-            .route("/login", post(users::user_login))
-            .route(
-                "/redis",
-                get(query_redis_connection_info).layer(middleware::from_fn_with_state(
-                    st.clone(),
-                    user_auth_middleware,
-                )),
-            )
-            .nest("/users", users::users_router(st.clone()))
-            .nest("/admin", admin::admin_router(st.clone(), cancel_token))
-            .nest("/groups", groups::groups_router(st.clone()))
-            .nest("/workers", workers::workers_router(st.clone()))
-            .nest("/tasks", tasks::tasks_router(st.clone()))
-            .with_state(st)
-            .layer(CorsLayer::permissive())
-            .layer(CatchPanicLayer::new())
-    }
+    #[cfg_attr(not(feature = "debugging"), allow(unused_mut))]
+    let mut router = Router::new()
+        .route(
+            "/auth",
+            get(users::user_auth).layer(middleware::from_fn_with_state(
+                st.clone(),
+                user_auth_with_name_middleware,
+            )),
+        )
+        .route(
+            "/health",
+            get(|| async { (StatusCode::OK, Json(json!({"status": "ok"}))) }),
+        )
+        .route("/login", post(users::user_login))
+        .route(
+            "/redis",
+            get(query_redis_connection_info).layer(middleware::from_fn_with_state(
+                st.clone(),
+                user_auth_middleware,
+            )),
+        )
+        .nest("/users", users::users_router(st.clone()))
+        .nest("/admin", admin::admin_router(st.clone(), cancel_token))
+        .nest("/groups", groups::groups_router(st.clone()))
+        .nest("/workers", workers::workers_router(st.clone()))
+        .nest("/tasks", tasks::tasks_router(st.clone()))
+        .nest("/suites", suites::suites_router(st.clone()))
+        .with_state(st)
+        .layer(CorsLayer::permissive())
+        .layer(CatchPanicLayer::new());
+
     #[cfg(feature = "debugging")]
     {
-        Router::new()
-            .route(
-                "/auth",
-                get(users::user_auth).layer(middleware::from_fn_with_state(
-                    st.clone(),
-                    user_auth_with_name_middleware,
-                )),
-            )
-            .route(
-                "/health",
-                get(|| async { (StatusCode::OK, Json(json!({"status": "ok"}))) }),
-            )
-            .route("/login", post(users::user_login))
-            .route(
-                "/redis",
-                get(query_redis_connection_info).layer(middleware::from_fn_with_state(
-                    st.clone(),
-                    user_auth_middleware,
-                )),
-            )
-            .nest("/users", users::users_router(st.clone()))
-            .nest("/admin", admin::admin_router(st.clone(), cancel_token))
-            .nest("/groups", groups::groups_router(st.clone()))
-            .nest("/workers", workers::workers_router(st.clone()))
-            .nest("/tasks", tasks::tasks_router(st.clone()))
-            .with_state(st)
-            .layer(CorsLayer::permissive())
-            .layer(CatchPanicLayer::new())
+        router = router
             .layer(middleware::from_fn(print_request_addr))
-            .layer(middleware::from_fn(print_request_response))
+            .layer(middleware::from_fn(print_request_response));
     }
+
+    router
 }
 
 pub async fn query_redis_connection_info(

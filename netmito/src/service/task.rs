@@ -20,8 +20,8 @@ use crate::{config::InfraPool, schema::ExecSpec};
 use crate::{
     entity::{
         active_tasks as ActiveTasks, archived_tasks as ArchivedTasks, artifacts as Artifact,
-        group_worker as GroupWorker, groups as Group, user_group as UserGroup, users as User,
-        workers as Worker,
+        group_worker as GroupWorker, groups as Group, task_suites as TaskSuites,
+        user_group as UserGroup, users as User, workers as Worker,
     },
     error::Error,
 };
@@ -49,6 +49,7 @@ pub async fn user_submit_task(
     creator_id: i64,
     SubmitTaskReq {
         group_name,
+        suite_uuid,
         tags,
         labels,
         priority,
@@ -56,9 +57,128 @@ pub async fn user_submit_task(
         exec_options,
     }: SubmitTaskReq,
 ) -> crate::error::Result<SubmitTaskResp> {
+    check_exec_spec(&spec)?;
+    let now = TimeDateTimeWithTimeZone::now_utc();
+    let spec_json = serde_json::to_value(spec)?;
+    let exec_options = exec_options.map(serde_json::to_value).transpose()?;
+
+    // Suite-bound submission: assign the task to the suite, bump its counters and reopen
+    // it if needed.
+    if let Some(suite_uuid) = suite_uuid {
+        let labels = Vec::from_iter(labels);
+        let task = pool
+            .db
+            .transaction::<_, ActiveTasks::Model, crate::error::Error>(|txn| {
+                Box::pin(async move {
+                    // Bump the suite counters and stamp the last-submission time.
+                    let suite = TaskSuites::Entity::update_many()
+                        .col_expr(
+                            TaskSuites::Column::TotalTasks,
+                            Expr::col(TaskSuites::Column::TotalTasks).add(1),
+                        )
+                        .col_expr(
+                            TaskSuites::Column::IncompleteTasks,
+                            Expr::col(TaskSuites::Column::IncompleteTasks).add(1),
+                        )
+                        .col_expr(TaskSuites::Column::LastTaskSubmittedAt, Expr::value(now))
+                        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+                        .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
+                        .exec_with_returning(txn)
+                        .await?;
+                    let suite = suite.into_iter().next().ok_or(Error::ApiError(
+                        crate::error::ApiError::NotFound(format!(
+                            "Task suite with uuid {suite_uuid} not found"
+                        )),
+                    ))?;
+                    // A cancelled suite cannot accept new tasks.
+                    if !suite.state.can_accept_tasks() {
+                        return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                            format!(
+                                "Suite is in {} state and cannot accept new tasks",
+                                suite.state
+                            ),
+                        )));
+                    }
+                    // Reopen a Closed/Complete suite on new submission.
+                    if suite.state.needs_reopen() {
+                        TaskSuites::Entity::update_many()
+                            .col_expr(
+                                TaskSuites::Column::State,
+                                Expr::value(crate::entity::state::TaskSuiteState::Open),
+                            )
+                            .col_expr(
+                                TaskSuites::Column::CompletedAt,
+                                Expr::value(None::<TimeDateTimeWithTimeZone>),
+                            )
+                            .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+                            .filter(TaskSuites::Column::Id.eq(suite.id))
+                            .exec(txn)
+                            .await?;
+                    }
+                    // Permission check: the user must have Write/Admin in the suite's group.
+                    UserGroup::Entity::find()
+                        .filter(UserGroup::Column::UserId.eq(creator_id))
+                        .filter(UserGroup::Column::GroupId.eq(suite.group_id))
+                        .one(txn)
+                        .await?
+                        .and_then(|ug| match ug.role {
+                            UserGroupRole::Admin | UserGroupRole::Write => Some(()),
+                            _ => None,
+                        })
+                        .ok_or(Error::AuthError(crate::error::AuthError::PermissionDenied))?;
+                    // Allocate the task id from the suite's group.
+                    let group = Group::Entity::update_many()
+                        .col_expr(
+                            Group::Column::TaskCount,
+                            Expr::col(Group::Column::TaskCount).add(1),
+                        )
+                        .col_expr(Group::Column::UpdatedAt, Expr::value(now))
+                        .filter(Group::Column::Id.eq(suite.group_id))
+                        .exec_with_returning(txn)
+                        .await?;
+                    let group = group.into_iter().next().ok_or(Error::ApiError(
+                        crate::error::ApiError::NotFound(format!(
+                            "Suite group (id={})",
+                            suite.group_id
+                        )),
+                    ))?;
+                    // Tags are inherited from the suite so agent tag-matching applies.
+                    let task = ActiveTasks::ActiveModel {
+                        creator_id: Set(creator_id),
+                        group_id: Set(group.id),
+                        task_id: Set(group.task_count),
+                        uuid: Set(Uuid::new_v4()),
+                        tags: Set(suite.tags.clone()),
+                        labels: Set(labels),
+                        created_at: Set(now),
+                        updated_at: Set(now),
+                        state: Set(crate::entity::state::TaskState::Ready),
+                        runner_uuid: Set(None),
+                        priority: Set(priority),
+                        spec: Set(spec_json),
+                        exec_options: Set(exec_options),
+                        result: Set(None),
+                        task_suite_id: Set(Some(suite.id)),
+                        ..Default::default()
+                    };
+                    let task = task.insert(txn).await?;
+                    Ok(task)
+                })
+            })
+            .await?;
+        // TODO: once the suite task dispatcher + agent-notify land, enqueue this task on the
+        // suite's in-memory buffer and notify assigned agents when the suite goes from 0 -> 1
+        // incomplete tasks. For now the task simply waits in `Ready` state.
+        return Ok(SubmitTaskResp {
+            task_id: task.task_id,
+            uuid: task.uuid,
+            suite_uuid: Some(suite_uuid),
+        });
+    }
+
+    // Non-suite submission: dispatch to matching workers.
     let tags = Vec::from_iter(tags);
     let labels = Vec::from_iter(labels);
-    let now = TimeDateTimeWithTimeZone::now_utc();
     let group = Group::Entity::update_many()
         .col_expr(
             Group::Column::TaskCount,
@@ -77,9 +197,6 @@ pub async fn user_submit_task(
     let group_id = group.id;
     let task_id = group.task_count;
     let uuid = Uuid::new_v4();
-    check_exec_spec(&spec)?;
-    let spec_json = serde_json::to_value(spec)?;
-    let exec_options = exec_options.map(serde_json::to_value).transpose()?;
     let task = ActiveTasks::ActiveModel {
         creator_id: Set(creator_id),
         group_id: Set(group_id),
@@ -133,6 +250,7 @@ pub async fn user_submit_task(
         Ok(SubmitTaskResp {
             task_id: task.task_id,
             uuid: task.uuid,
+            suite_uuid,
         })
     }
 }
@@ -143,6 +261,12 @@ pub async fn worker_submit_pending_task(
     upstream_task_uuid: Uuid,
     SubmitTaskReq {
         group_name,
+        // A worker-submitted downstream task is not assigned to a suite in this slice.
+        // TODO: to support suite assignment here, resolve these first:
+        // - Does a Pending task count toward `incomplete_tasks`, or only once triggered to Ready?
+        // - Should the group and tags come from the suite (like `user_submit_task`) instead of the request?
+        // - Does the suite-group Write/Admin permission check apply to this worker `creator_id`?
+        suite_uuid: _,
         tags,
         labels,
         priority,
@@ -196,6 +320,7 @@ pub async fn worker_submit_pending_task(
     Ok(SubmitTaskResp {
         task_id: task.task_id,
         uuid: task.uuid,
+        suite_uuid: None,
     })
 }
 
@@ -314,6 +439,12 @@ pub async fn user_change_task(
             })
         })
         .await?;
+    // Suite-bound tasks never live in the worker task queues, so there is nothing to
+    // re-dispatch after a change.
+    // TODO: notify change to agents if this task belongs to a task suite
+    if task.task_suite_id.is_some() {
+        return Ok(());
+    }
     let builder = pool.db.get_database_backend();
     let tasks_stmt = Query::select()
         .column((Worker::Entity, ActiveTasks::Column::Id))

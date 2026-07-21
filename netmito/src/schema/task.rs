@@ -45,6 +45,9 @@ pub struct ReportTaskResp {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SubmitTaskReq {
     pub group_name: String,
+    /// Optional suite UUID to assign the task to
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suite_uuid: Option<Uuid>,
     pub tags: HashSet<String>,
     pub labels: HashSet<String>,
     pub priority: i32,
@@ -56,6 +59,9 @@ pub struct SubmitTaskReq {
 pub struct SubmitTaskResp {
     pub task_id: i64,
     pub uuid: Uuid,
+    /// Suite UUID (echoed back if provided in the request)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suite_uuid: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

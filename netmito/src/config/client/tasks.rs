@@ -49,6 +49,10 @@ pub struct SubmitTaskArgs {
     /// The name of the group this task is submitted to
     #[arg(short = 'g', long = "group")]
     pub group_name: Option<String>,
+    /// The UUID of the task suite to submit this task to. When set, the task is executed
+    /// by the suite's agents instead of traditional workers, and inherits the suite's tags.
+    #[arg(long = "suite")]
+    pub suite_uuid: Option<Uuid>,
     /// The tags of the task, used to filter workers to execute the task
     #[arg(short, long, num_args = 0.., value_delimiter = ',')]
     pub tags: Vec<String>,

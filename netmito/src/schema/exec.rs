@@ -27,6 +27,20 @@ pub struct TaskExecOptions {
     pub watch: Option<(Uuid, TaskExecState)>,
 }
 
+/// Execution hooks for a task suite
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ExecHooks {
+    /// Environment preparation hook (runs before workers start)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<ExecSpec>,
+    /// Environment cleanup hook (runs after suite completes)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<ExecSpec>,
+    /// Background process hook (runs alongside workers)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<ExecSpec>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RemoteResourceDownloadResp {
     pub url: String,

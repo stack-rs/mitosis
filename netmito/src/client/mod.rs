@@ -1955,6 +1955,7 @@ impl MitoClient {
         let exec_options = args.watch.map(|w| TaskExecOptions { watch: Some(w) });
         let mut req = SubmitTaskReq {
             group_name: args.group_name.unwrap_or(self.username.clone()),
+            suite_uuid: args.suite_uuid,
             tags: args.tags.into_iter().collect(),
             labels: args.labels.into_iter().collect(),
             priority: args.priority,

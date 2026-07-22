@@ -179,6 +179,7 @@ pub async fn get_user_credential(
     mut url: Url,
     user: Option<String>,
     password: Option<String>,
+    refresh: bool,
 ) -> crate::error::Result<(String, String)> {
     // Try to load credential from file
     let cred_path = cred_path
@@ -197,34 +198,62 @@ pub async fn get_user_credential(
     if cred_path.exists() {
         if let Ok(mut lines) = read_lines(&cred_path).await {
             if let Some((username, cred)) = extract_credential(user.as_ref(), &mut lines).await? {
-                url.set_path("auth");
-                let resp = client
-                    .get(url.as_str())
-                    .bearer_auth(&cred)
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        if e.is_request() && e.is_connect() {
-                            url.set_path("");
-                            RequestError::ConnectionError(url.to_string())
-                        } else {
-                            e.into()
-                        }
-                    })?;
-                if resp.status().is_success() {
-                    let resp_name = resp.text().await.map_err(RequestError::from)?;
-                    if resp_name == username {
-                        return Ok((username, cred));
+                if refresh {
+                    url.set_path("refresh");
+                    let resp = client
+                        .post(url.as_str())
+                        .bearer_auth(&cred)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            if e.is_request() && e.is_connect() {
+                                url.set_path("");
+                                RequestError::ConnectionError(url.to_string())
+                            } else {
+                                e.into()
+                            }
+                        })?;
+                    if resp.status().is_success() {
+                        let resp = resp
+                            .json::<crate::schema::UserLoginResp>()
+                            .await
+                            .map_err(RequestError::from)?;
+                        let token = resp.token;
+                        modify_or_append_credential(&cred_path, &username, &token).await?;
+                        return Ok((username, token));
+                    } else if resp.status().is_server_error() {
+                        return Err(ApiError::InternalServerError.into());
                     }
-                } else if resp.status().is_server_error() {
-                    return Err(ApiError::InternalServerError.into());
+                } else {
+                    url.set_path("auth");
+                    let resp = client
+                        .get(url.as_str())
+                        .bearer_auth(&cred)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            if e.is_request() && e.is_connect() {
+                                url.set_path("");
+                                RequestError::ConnectionError(url.to_string())
+                            } else {
+                                e.into()
+                            }
+                        })?;
+                    if resp.status().is_success() {
+                        let resp_name = resp.text().await.map_err(RequestError::from)?;
+                        if resp_name == username {
+                            return Ok((username, cred));
+                        }
+                    } else if resp.status().is_server_error() {
+                        return Err(ApiError::InternalServerError.into());
+                    }
                 }
             }
         }
     }
     // Local credential not found or invalid, need to login
     tracing::warn!("Local credential not found or invalid, need to login");
-    let req = fill_user_login(user, password, false)?;
+    let req = fill_user_login(user, password, refresh)?;
     url.set_path("login");
     let resp = client
         .post(url.as_str())

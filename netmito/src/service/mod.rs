@@ -6,6 +6,8 @@ pub mod task;
 pub mod user;
 pub mod worker;
 
+mod suite_agent;
+
 pub fn name_validator(name: &str) -> bool {
     let l = name.len();
     l > 0

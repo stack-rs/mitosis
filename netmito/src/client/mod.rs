@@ -1,4 +1,4 @@
-use std::{io::Write, process::Stdio};
+use std::{collections::HashMap, io::Write, process::Stdio};
 
 use clap_repl::ReadCommandOutput;
 use http::MitoHttpClient;
@@ -824,36 +824,32 @@ impl MitoClient {
         self.http_client.close_task_suite(args.uuid).await
     }
 
-    pub async fn suites_cancel(
-        &mut self,
-        args: CancelSuiteArgs,
-    ) -> crate::error::Result<CancelSuiteResp> {
+    pub async fn suites_cancel(&mut self, args: CancelSuiteArgs) -> crate::error::Result<()> {
         self.http_client
             .cancel_task_suite(args.uuid, args.force)
             .await
     }
 
-    pub async fn suites_set_agent(
+    /// Apply a single-agent selection override, reporting the per-agent outcome. Backed
+    /// by the batch endpoint with a one-entry request.
+    async fn suites_select_agent(
         &mut self,
         args: SuiteAgentArgs,
-        include: bool,
-    ) -> crate::error::Result<SuiteAgentResp> {
-        let req = SuiteAgentReq {
-            agent_uuid: args.agent,
-        };
-        self.http_client
-            .set_suite_agent(args.uuid, include, req)
-            .await
-    }
-
-    pub async fn suites_reset_agent(
-        &mut self,
-        args: SuiteAgentArgs,
-    ) -> crate::error::Result<ResetSuiteAgentResp> {
-        let req = SuiteAgentReq {
-            agent_uuid: args.agent,
-        };
-        self.http_client.reset_suite_agent(args.uuid, req).await
+        action: SuiteAgentSelectionAction,
+    ) {
+        let (suite, agent) = (args.uuid, args.agent);
+        let selection = HashMap::from([(agent, action)]);
+        match self.http_client.select_suite_agents(suite, selection).await {
+            Ok(resp) => match resp.failed.get(&agent) {
+                Some(err) => {
+                    tracing::error!(
+                        "Failed to apply {action:?} to agent {agent} on suite {suite}: {err:?}"
+                    )
+                }
+                None => tracing::info!("Applied {action:?} to agent {agent} on suite {suite}"),
+            },
+            Err(e) => tracing::error!("{}", e),
+        }
     }
 
     pub async fn tasks_batch_cancel(
@@ -2016,9 +2012,16 @@ impl MitoClient {
                             if !counted {
                                 for suite in resp.suites {
                                     if verbose {
-                                        output_suite_list_info(&suite);
+                                        output_suite_info(&suite);
                                     } else {
-                                        tracing::info!("{} ({})", suite.uuid, suite.state);
+                                        tracing::info!(
+                                            "{}, {} ({}), Tasks (incomplete/total): {} / {}",
+                                            suite.uuid,
+                                            suite.name.unwrap_or("[no name]".to_string()),
+                                            suite.state,
+                                            suite.incomplete_tasks,
+                                            suite.total_tasks
+                                        );
                                     }
                                 }
                             }
@@ -2030,7 +2033,7 @@ impl MitoClient {
                 }
                 SuitesCommands::Get(args) => match self.suites_get(args).await {
                     Ok(resp) => {
-                        output_parsed_suite_info(&resp.info, &resp.assigned_agents);
+                        output_parsed_suite_info(&resp.info, &resp.eligible_agents);
                     }
                     Err(e) => {
                         tracing::error!("{}", e);
@@ -2045,58 +2048,25 @@ impl MitoClient {
                     }
                 },
                 SuitesCommands::Cancel(args) => match self.suites_cancel(args).await {
-                    Ok(resp) => {
-                        tracing::info!(
-                            "Suite cancelled; {} tasks cancelled",
-                            resp.cancelled_task_count
-                        );
+                    Ok(_) => {
+                        tracing::info!("Suite cancelled");
                     }
                     Err(e) => {
                         tracing::error!("{}", e);
                     }
                 },
                 SuitesCommands::IncludeAgent(args) => {
-                    match self.suites_set_agent(args, true).await {
-                        Ok(resp) => {
-                            tracing::info!(
-                                "Agent {} set to {:?} on suite {}",
-                                resp.agent_uuid,
-                                resp.selection,
-                                resp.suite_uuid
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!("{}", e);
-                        }
-                    }
+                    self.suites_select_agent(args, SuiteAgentSelectionAction::Include)
+                        .await;
                 }
                 SuitesCommands::ExcludeAgent(args) => {
-                    match self.suites_set_agent(args, false).await {
-                        Ok(resp) => {
-                            tracing::info!(
-                                "Agent {} set to {:?} on suite {}",
-                                resp.agent_uuid,
-                                resp.selection,
-                                resp.suite_uuid
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!("{}", e);
-                        }
-                    }
+                    self.suites_select_agent(args, SuiteAgentSelectionAction::Exclude)
+                        .await;
                 }
-                SuitesCommands::ResetAgent(args) => match self.suites_reset_agent(args).await {
-                    Ok(resp) => {
-                        if resp.reset {
-                            tracing::info!("Reset the agent to the tag-match default");
-                        } else {
-                            tracing::info!("No manual override to reset");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("{}", e);
-                    }
-                },
+                SuitesCommands::ResetAgent(args) => {
+                    self.suites_select_agent(args, SuiteAgentSelectionAction::Match)
+                        .await;
+                }
             },
             ClientCommand::Quit => {
                 return false;

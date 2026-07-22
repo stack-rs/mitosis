@@ -1,23 +1,28 @@
+use std::collections::HashMap;
+
 use sea_orm::sea_query::extension::postgres::PgExpr;
 use sea_orm::sea_query::{Alias, PgFunc, Query};
 use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, Set, TransactionTrait};
 use uuid::Uuid;
 
+use super::suite_agent::{
+    apply_suite_agent_selection, authorize_suite, resolve_agent, SelectionItemError,
+};
 use crate::config::InfraPool;
 use crate::entity::role::UserGroupRole;
 use crate::entity::state::{TaskState, TaskSuiteState};
 use crate::entity::task_suite_agent::SuiteAgentSelectionType;
 use crate::entity::{
-    active_tasks as ActiveTasks, agents as Agent, archived_tasks as ArchivedTasks,
-    group_agent as GroupAgent, groups as Group, task_suite_agent as TaskSuiteAgent,
-    task_suites as TaskSuites, user_group as UserGroup, users as User,
+    active_tasks as ActiveTasks, agents as Agent, archived_tasks as ArchivedTasks, groups as Group,
+    task_suite_agent as TaskSuiteAgent, task_suites as TaskSuites, user_group as UserGroup,
+    users as User,
 };
 use crate::error::{ApiError, AuthError, Error, Result};
 use crate::schema::{
-    CancelSuiteResp, CancelTaskSuiteOp, CountQuery, CreateTaskSuiteReq, CreateTaskSuiteResp,
-    ExecHooks, ParsedTaskSuiteInfo, ResetSuiteAgentResp, SuiteAgentResp, TaskResultMessage,
-    TaskResultSpec, TaskSuiteInfo, TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp,
-    WorkerSchedulePlan,
+    CancelTaskSuiteOp, CountQuery, CreateTaskSuiteReq, CreateTaskSuiteResp, ExecHooks,
+    ParsedTaskSuiteInfo, SuiteAgentSelectionError, SuiteAgentSelectionReq, SuiteAgentSelectionResp,
+    TaskResultMessage, TaskResultSpec, TaskSuiteInfo, TaskSuiteQueryResp, TaskSuitesQueryReq,
+    TaskSuitesQueryResp, WorkerSchedulePlan,
 };
 use crate::service::task::{parse_operators_with_number, OperatorWithNumber};
 
@@ -501,7 +506,7 @@ pub async fn user_get_task_suite_by_uuid(
         )
         .to_owned();
 
-    let assigned_agents = AgentUuidResult::find_by_statement(builder.build(&agent_stmt))
+    let eligible_agents = AgentUuidResult::find_by_statement(builder.build(&agent_stmt))
         .all(&pool.db)
         .await?
         .into_iter()
@@ -531,7 +536,7 @@ pub async fn user_get_task_suite_by_uuid(
             updated_at: suite.updated_at,
             completed_at: suite.completed_at,
         },
-        assigned_agents,
+        eligible_agents,
     })
 }
 
@@ -615,11 +620,10 @@ pub async fn user_cancel_task_suite(
     pool: &InfraPool,
     suite_uuid: Uuid,
     _op: CancelTaskSuiteOp,
-) -> Result<CancelSuiteResp> {
+) -> Result<()> {
     let now = TimeDateTimeWithTimeZone::now_utc();
 
-    let cancelled_count = pool
-        .db
+    pool.db
         .transaction::<_, u64, Error>(|txn| {
             Box::pin(async move {
                 let suite = TaskSuites::Entity::find()
@@ -741,163 +745,71 @@ pub async fn user_cancel_task_suite(
     // Force, push per-agent TasksCancelled built from `_running_signals` above), then
     // drop the suite's in-memory task buffer in the dispatcher.
 
-    Ok(CancelSuiteResp {
-        cancelled_task_count: cancelled_count,
-    })
+    Ok(())
 }
 
-/// Resolve a suite by uuid and authorize the caller (Write/Admin in its group), then
-/// resolve an agent by uuid and require the suite's group to have write access to it.
-/// Shared by the manual include/exclude/remove paths.
-async fn resolve_suite_and_agent<C>(
-    txn: &C,
-    user_id: i64,
-    suite_uuid: Uuid,
-    agent_uuid: Uuid,
-) -> Result<(TaskSuites::Model, Agent::Model)>
-where
-    C: ConnectionTrait,
-{
-    let suite = TaskSuites::Entity::find()
-        .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
-        .one(txn)
-        .await?
-        .ok_or(Error::ApiError(ApiError::NotFound(format!(
-            "Task suite with uuid {suite_uuid} not found"
-        ))))?;
-
-    UserGroup::Entity::find()
-        .filter(UserGroup::Column::UserId.eq(user_id))
-        .filter(UserGroup::Column::GroupId.eq(suite.group_id))
-        .one(txn)
-        .await?
-        .and_then(|ug| (ug.role >= UserGroupRole::Write).then_some(()))
-        .ok_or(Error::AuthError(AuthError::PermissionDenied))?;
-
-    let agent = Agent::Entity::find()
-        .filter(Agent::Column::Uuid.eq(agent_uuid))
-        .one(txn)
-        .await?
-        .ok_or(Error::ApiError(ApiError::NotFound(format!(
-            "Agent with uuid {agent_uuid} not found"
-        ))))?;
-
-    Ok((suite, agent))
-}
-
-/// Set a manual agent override on a suite: `UserIncluded` pins an agent to the suite
-/// even if it doesn't tag-match; `UserExcluded` blocks an agent even if it does.
-///
-/// Requires Write/Admin in the suite's group, and the group must have write access to
-/// the agent. Because `(task_suite_id, agent_id)` is unique, an agent that already has
-/// the opposite override is switched (upsert), not duplicated.
-pub async fn user_set_suite_agent(
+/// Batch-apply agent-selection overrides for a single suite. The suite is resolved once
+/// (requiring the caller's Write role on its group); each agent is then resolved and
+/// applied independently. Per-agent failures are collected into the response rather than
+/// aborting the batch; only genuine DB errors roll the whole transaction back.
+pub async fn user_add_agents_to_suite(
     user_id: i64,
     pool: &InfraPool,
     suite_uuid: Uuid,
-    agent_uuid: Uuid,
-    selection: SuiteAgentSelectionType,
-) -> Result<SuiteAgentResp> {
+    req: SuiteAgentSelectionReq,
+) -> Result<SuiteAgentSelectionResp> {
     let now = TimeDateTimeWithTimeZone::now_utc();
 
-    pool.db
-        .transaction::<_, (), Error>(|txn| {
-            Box::pin(async move {
-                let (suite, agent) =
-                    resolve_suite_and_agent(txn, user_id, suite_uuid, agent_uuid).await?;
-
-                // The suite's group must have write access to the agent.
-                let has_access = GroupAgent::Entity::find()
-                    .filter(GroupAgent::Column::GroupId.eq(suite.group_id))
-                    .filter(GroupAgent::Column::AgentId.eq(agent.id))
-                    .one(txn)
-                    .await?
-                    .map(|ga| ga.role.has_write_access())
-                    .unwrap_or(false);
-                if !has_access {
-                    return Err(Error::ApiError(ApiError::InvalidRequest(format!(
-                        "Group does not have write access to agent {agent_uuid}"
-                    ))));
-                }
-
-                // Upsert: switch an existing (opposite) override rather than insert a
-                // duplicate, since (task_suite_id, agent_id) is unique.
-                match TaskSuiteAgent::Entity::find()
-                    .filter(TaskSuiteAgent::Column::TaskSuiteId.eq(suite.id))
-                    .filter(TaskSuiteAgent::Column::AgentId.eq(agent.id))
-                    .one(txn)
-                    .await?
-                {
-                    Some(existing) if existing.selection_type == selection => {
-                        // Already in the desired state.
-                    }
-                    Some(existing) => {
-                        let mut am: TaskSuiteAgent::ActiveModel = existing.into();
-                        am.selection_type = Set(selection);
-                        am.creator_id = Set(Some(user_id));
-                        am.updated_at = Set(now);
-                        am.update(txn).await?;
-                    }
-                    None => {
-                        let am = TaskSuiteAgent::ActiveModel {
-                            task_suite_id: Set(suite.id),
-                            agent_id: Set(agent.id),
-                            selection_type: Set(selection),
-                            creator_id: Set(Some(user_id)),
-                            created_at: Set(now),
-                            updated_at: Set(now),
-                            ..Default::default()
-                        };
-                        am.insert(txn).await?;
-                    }
-                }
-
-                Ok(())
-            })
-        })
-        .await?;
-
-    // TODO: the manual override just changed the effective agent set. Once
-    // the scheduler exists, trigger a recompute for this suite so a newly-included agent
-    // picks it up (and an excluded one drops/stops it) instead of waiting for the next tick.
-
-    Ok(SuiteAgentResp {
-        suite_uuid,
-        agent_uuid,
-        selection,
-    })
-}
-
-/// Reset an agent to the tag-match default, clearing any manual override (include or
-/// exclude) on a suite. Idempotent. Requires Write/Admin in the suite's group.
-pub async fn user_reset_suite_agent(
-    user_id: i64,
-    pool: &InfraPool,
-    suite_uuid: Uuid,
-    agent_uuid: Uuid,
-) -> Result<ResetSuiteAgentResp> {
-    let reset = pool
+    let failed = pool
         .db
-        .transaction::<_, bool, Error>(|txn| {
+        .transaction::<_, HashMap<Uuid, SuiteAgentSelectionError>, Error>(|txn| {
             Box::pin(async move {
-                let (suite, agent) =
-                    resolve_suite_and_agent(txn, user_id, suite_uuid, agent_uuid).await?;
+                // The suite is fixed for the whole batch, so a suite-level failure is request-level
+                let suite = match authorize_suite(txn, user_id, suite_uuid).await {
+                    Ok(suite) => suite,
+                    Err(SelectionItemError::Item(SuiteAgentSelectionError::SuiteNotFound)) => {
+                        return Err(Error::ApiError(ApiError::NotFound(format!(
+                            "Task suite with uuid {suite_uuid} not found"
+                        ))));
+                    }
+                    Err(SelectionItemError::Item(
+                        SuiteAgentSelectionError::NoWriteAccessOnSuite,
+                    )) => {
+                        return Err(Error::AuthError(AuthError::PermissionDenied));
+                    }
+                    Err(SelectionItemError::Item(_)) => {
+                        // The rest two failure should not happen here
+                        return Err(Error::ApiError(ApiError::InternalServerError));
+                    }
+                    Err(SelectionItemError::Fatal(e)) => return Err(e),
+                };
 
-                let res = TaskSuiteAgent::Entity::delete_many()
-                    .filter(TaskSuiteAgent::Column::TaskSuiteId.eq(suite.id))
-                    .filter(TaskSuiteAgent::Column::AgentId.eq(agent.id))
-                    .exec(txn)
-                    .await?;
+                let mut failed = HashMap::new();
+                for (agent_uuid, action) in req.selection {
+                    let outcome = async {
+                        let agent = resolve_agent(txn, agent_uuid).await?;
+                        apply_suite_agent_selection(txn, user_id, &suite, &agent, action, now).await
+                    }
+                    .await;
+                    match outcome {
+                        Ok(()) => {}
+                        Err(SelectionItemError::Item(e)) => {
+                            failed.insert(agent_uuid, e);
+                        }
+                        Err(SelectionItemError::Fatal(e)) => {
+                            // Some db error occurred, roll back and error
+                            return Err(e);
+                        }
+                    }
+                }
 
-                Ok(res.rows_affected > 0)
+                Ok(failed)
             })
         })
         .await?;
 
-    if reset {
-        // TODO: clearing an override changes the effective agent set; trigger a
-        // scheduler recompute for this suite once that layer exists.
-    }
+    // TODO: the manual overrides just changed the effective agent set. Once the
+    // scheduler exists, trigger a recompute for this suite.
 
-    Ok(ResetSuiteAgentResp { reset })
+    Ok(SuiteAgentSelectionResp { failed })
 }

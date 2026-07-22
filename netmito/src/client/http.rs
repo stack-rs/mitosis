@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use figment::value::magic::RelativePathBuf;
@@ -1394,7 +1395,7 @@ impl MitoHttpClient {
         &mut self,
         uuid: Uuid,
         force: bool,
-    ) -> crate::error::Result<CancelSuiteResp> {
+    ) -> crate::error::Result<()> {
         self.url.set_path(&format!("suites/{uuid}"));
         if force {
             self.url.set_query(Some("op=force"));
@@ -1409,61 +1410,32 @@ impl MitoHttpClient {
         // Clear the query so it does not leak into later requests reusing self.url.
         self.url.set_query(None);
         if resp.status().is_success() {
-            let resp = resp
-                .json::<CancelSuiteResp>()
-                .await
-                .map_err(RequestError::from)?;
-            Ok(resp)
+            Ok(())
         } else {
             Err(get_error_from_resp(resp).await.into())
         }
     }
 
-    /// Include (`include == true`) or exclude an agent on a suite.
-    pub async fn set_suite_agent(
+    /// Batch-set agent selection overrides on a suite. Each entry pins (`Include`),
+    /// blocks (`Exclude`), or clears the override for (`Match`) one agent.
+    pub async fn select_suite_agents(
         &mut self,
         uuid: Uuid,
-        include: bool,
-        req: SuiteAgentReq,
-    ) -> crate::error::Result<SuiteAgentResp> {
-        let op = if include { "include" } else { "exclude" };
-        self.url.set_path(&format!("suites/{uuid}/agents/{op}"));
+        selection: HashMap<Uuid, SuiteAgentSelectionAction>,
+    ) -> crate::error::Result<SuiteAgentSelectionResp> {
+        self.url
+            .set_path(&format!("suites/{uuid}/agents/selection"));
         let resp = self
             .http_client
             .post(self.url.as_str())
             .bearer_auth(&self.credential)
-            .json(&req)
+            .json(&SuiteAgentSelectionReq { selection })
             .send()
             .await
             .map_err(map_reqwest_err)?;
         if resp.status().is_success() {
             let resp = resp
-                .json::<SuiteAgentResp>()
-                .await
-                .map_err(RequestError::from)?;
-            Ok(resp)
-        } else {
-            Err(get_error_from_resp(resp).await.into())
-        }
-    }
-
-    pub async fn reset_suite_agent(
-        &mut self,
-        uuid: Uuid,
-        req: SuiteAgentReq,
-    ) -> crate::error::Result<ResetSuiteAgentResp> {
-        self.url.set_path(&format!("suites/{uuid}/agents/reset"));
-        let resp = self
-            .http_client
-            .post(self.url.as_str())
-            .bearer_auth(&self.credential)
-            .json(&req)
-            .send()
-            .await
-            .map_err(map_reqwest_err)?;
-        if resp.status().is_success() {
-            let resp = resp
-                .json::<ResetSuiteAgentResp>()
+                .json::<SuiteAgentSelectionResp>()
                 .await
                 .map_err(RequestError::from)?;
             Ok(resp)

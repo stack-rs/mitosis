@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use sea_orm::FromQueryResult;
 use serde::{Deserialize, Serialize};
@@ -73,16 +73,16 @@ fn default_prefetch_count() -> u32 {
 }
 
 /// CPU core binding configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CpuBinding {
-    /// List of CPU core IDs to bind to
+    /// List of CPU core IDs to bind to, an empty vectors means using all cores
     pub cores: Vec<usize>,
     /// Binding strategy
     pub strategy: CpuBindingStrategy,
 }
 
 /// CPU binding strategies
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub enum CpuBindingStrategy {
     /// Distribute workers across cores in round-robin fashion
@@ -90,6 +90,7 @@ pub enum CpuBindingStrategy {
     /// Each worker gets exclusive access to dedicated core(s)
     Exclusive,
     /// All workers share all specified cores
+    #[default]
     Shared,
 }
 
@@ -175,7 +176,7 @@ pub struct ParsedTaskSuiteInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSuiteQueryResp {
     pub info: ParsedTaskSuiteInfo,
-    pub assigned_agents: Vec<Uuid>,
+    pub eligible_agents: Vec<Uuid>,
 }
 
 /// Query parameter for `DELETE /suites/{uuid}` selecting the cancellation mode
@@ -194,33 +195,58 @@ pub enum CancelTaskSuiteOp {
     Force,
 }
 
-/// Response after cancelling a suite
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CancelSuiteResp {
-    /// Number of tasks that were cancelled
-    pub cancelled_task_count: u64,
+/// One entry's desired outcome in a batch agent-selection request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuiteAgentSelectionAction {
+    /// Pin the agent to the suite even if it does not tag-match (manual include).
+    Include,
+    /// Block the agent from the suite even if it tag-matches (manual exclude).
+    Exclude,
+    /// Clear any manual override, falling back to tag-matching.
+    Match,
 }
 
-/// Request body for the manual include / exclude / remove agent endpoints.
-///
-/// A single agent per request — these are manual operations, not batch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SuiteAgentReq {
-    /// The agent (by uuid) to include, exclude, or remove the override for.
-    pub agent_uuid: Uuid,
+impl SuiteAgentSelectionAction {
+    /// The persisted selection type this action maps to, or `None` for `Match`
+    /// (which clears the override).
+    pub fn selection_type(
+        self,
+    ) -> Option<crate::entity::task_suite_agent::SuiteAgentSelectionType> {
+        use crate::entity::task_suite_agent::SuiteAgentSelectionType::{
+            UserExcluded, UserIncluded,
+        };
+        match self {
+            Self::Include => Some(UserIncluded),
+            Self::Exclude => Some(UserExcluded),
+            Self::Match => None,
+        }
+    }
 }
 
-/// Response for the include / exclude endpoints: the override now in effect.
+/// Batch request to set agent-selection overrides. Keyed by the "other" entity's UUID
+/// (agent UUIDs for a fixed suite; suite UUIDs for a fixed agent in the reverse endpoint).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SuiteAgentResp {
-    pub suite_uuid: Uuid,
-    pub agent_uuid: Uuid,
-    pub selection: crate::entity::task_suite_agent::SuiteAgentSelectionType,
+pub struct SuiteAgentSelectionReq {
+    pub selection: HashMap<Uuid, SuiteAgentSelectionAction>,
 }
 
-/// Response for the reset-override endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResetSuiteAgentResp {
-    /// Whether a manual override existed and was cleared (false = nothing to reset).
-    pub reset: bool,
+#[serde(rename_all = "snake_case")]
+pub enum SuiteAgentSelectionError {
+    /// No agent exists with this UUID. (For use in batch adding multiple agents to one suite)
+    AgentNotFound,
+    /// The suite's group has no write access to the agent.
+    NoWriteAccessOnAgent,
+    /// No suite exists with this UUID, (For use in batch adding one agent to multiple suites)
+    SuiteNotFound,
+    /// The user's group has no write access to the suite
+    NoWriteAccessOnSuite,
+}
+
+/// Batch response: entries that could not be applied, keyed by the same UUID as the
+/// request. An empty map means every entry succeeded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuiteAgentSelectionResp {
+    pub failed: HashMap<Uuid, SuiteAgentSelectionError>,
 }

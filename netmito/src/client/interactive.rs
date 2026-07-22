@@ -229,7 +229,7 @@ pub(crate) fn output_group_info(info: &GroupQueryInfo) {
     }
 }
 
-pub(crate) fn output_suite_list_info(info: &TaskSuiteInfo) {
+pub(crate) fn output_suite_info(info: &TaskSuiteInfo) {
     tracing::info!("Suite UUID: {}", info.uuid);
     if let Some(ref name) = info.name {
         tracing::info!("Name: {}", name);

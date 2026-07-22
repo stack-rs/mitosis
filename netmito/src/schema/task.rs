@@ -59,9 +59,6 @@ pub struct SubmitTaskReq {
 pub struct SubmitTaskResp {
     pub task_id: i64,
     pub uuid: Uuid,
-    /// Suite UUID (echoed back if provided in the request)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub suite_uuid: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

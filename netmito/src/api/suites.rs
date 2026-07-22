@@ -12,7 +12,7 @@ use crate::{
     error::ApiError,
     schema::{
         CancelSuiteResp, CancelTaskSuiteParam, CreateTaskSuiteReq, CreateTaskSuiteResp,
-        RemoveSuiteAgentResp, SuiteAgentReq, SuiteAgentResp, TaskSuiteQueryResp, TaskSuitesQueryReq,
+        ResetSuiteAgentResp, SuiteAgentReq, SuiteAgentResp, TaskSuiteQueryResp, TaskSuitesQueryReq,
         TaskSuitesQueryResp,
     },
     service::{
@@ -29,7 +29,7 @@ pub fn suites_router(st: InfraPool) -> Router<InfraPool> {
         .route("/{uuid}/close", post(close_suite))
         .route("/{uuid}/agents/include", post(include_suite_agents))
         .route("/{uuid}/agents/exclude", post(exclude_suite_agents))
-        .route("/{uuid}/agents/remove", post(remove_suite_agents))
+        .route("/{uuid}/agents/reset", post(reset_suite_agent))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -142,13 +142,13 @@ pub async fn exclude_suite_agents(
     Ok(Json(resp))
 }
 
-pub async fn remove_suite_agents(
+pub async fn reset_suite_agent(
     Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
     Path(uuid): Path<Uuid>,
     Json(req): Json<SuiteAgentReq>,
-) -> Result<Json<RemoveSuiteAgentResp>, ApiError> {
-    let resp = service::suite::user_remove_suite_agent(u.id, &pool, uuid, req.agent_uuid)
+) -> Result<Json<ResetSuiteAgentResp>, ApiError> {
+    let resp = service::suite::user_reset_suite_agent(u.id, &pool, uuid, req.agent_uuid)
         .await
         .map_err(map_service_error)?;
     Ok(Json(resp))

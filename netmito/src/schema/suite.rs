@@ -218,9 +218,9 @@ pub struct SuiteAgentResp {
     pub selection: crate::entity::task_suite_agent::SuiteAgentSelectionType,
 }
 
-/// Response for the remove-override endpoint.
+/// Response for the reset-override endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoveSuiteAgentResp {
-    /// Whether an override existed and was removed (false = nothing to remove).
-    pub removed: bool,
+pub struct ResetSuiteAgentResp {
+    /// Whether a manual override existed and was cleared (false = nothing to reset).
+    pub reset: bool,
 }

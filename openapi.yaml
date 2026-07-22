@@ -1823,11 +1823,11 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
-  /suites/{uuid}/agents/remove:
+  /suites/{uuid}/agents/reset:
     post:
-      summary: Remove an agent override from a suite
-      description: Remove a manual include/exclude override for an agent, reverting it to the tag-match default. Idempotent.
-      operationId: removeSuiteAgent
+      summary: Reset an agent to the tag-match default
+      description: Clear a manual include/exclude override for an agent, reverting it to the tag-match default. Idempotent.
+      operationId: resetSuiteAgent
       tags:
         - Suites
       security:
@@ -1847,11 +1847,11 @@ paths:
               $ref: "#/components/schemas/SuiteAgentReq"
       responses:
         "200":
-          description: Override removed (or nothing to remove)
+          description: Override cleared (or nothing to reset)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RemoveSuiteAgentResp"
+                $ref: "#/components/schemas/ResetSuiteAgentResp"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -4659,14 +4659,14 @@ components:
         selection:
           $ref: "#/components/schemas/SuiteAgentSelectionType"
 
-    RemoveSuiteAgentResp:
+    ResetSuiteAgentResp:
       type: object
       required:
-        - removed
+        - reset
       properties:
-        removed:
+        reset:
           type: boolean
-          description: Whether an override existed and was removed (false = nothing to remove)
+          description: Whether a manual override existed and was cleared (false = nothing to reset)
 
 security:
   - bearerAuth: []

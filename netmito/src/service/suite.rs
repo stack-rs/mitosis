@@ -15,7 +15,7 @@ use crate::entity::{
 use crate::error::{ApiError, AuthError, Error, Result};
 use crate::schema::{
     CancelSuiteResp, CancelTaskSuiteOp, CountQuery, CreateTaskSuiteReq, CreateTaskSuiteResp,
-    ExecHooks, ParsedTaskSuiteInfo, RemoveSuiteAgentResp, SuiteAgentResp, TaskResultMessage,
+    ExecHooks, ParsedTaskSuiteInfo, ResetSuiteAgentResp, SuiteAgentResp, TaskResultMessage,
     TaskResultSpec, TaskSuiteInfo, TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp,
     WorkerSchedulePlan,
 };
@@ -868,15 +868,15 @@ pub async fn user_set_suite_agent(
     })
 }
 
-/// Remove any manual override (include or exclude) for an agent on a suite, reverting it
-/// to the tag-match default. Idempotent. Requires Write/Admin in the suite's group.
-pub async fn user_remove_suite_agent(
+/// Reset an agent to the tag-match default, clearing any manual override (include or
+/// exclude) on a suite. Idempotent. Requires Write/Admin in the suite's group.
+pub async fn user_reset_suite_agent(
     user_id: i64,
     pool: &InfraPool,
     suite_uuid: Uuid,
     agent_uuid: Uuid,
-) -> Result<RemoveSuiteAgentResp> {
-    let removed = pool
+) -> Result<ResetSuiteAgentResp> {
+    let reset = pool
         .db
         .transaction::<_, bool, Error>(|txn| {
             Box::pin(async move {
@@ -894,10 +894,10 @@ pub async fn user_remove_suite_agent(
         })
         .await?;
 
-    if removed {
-        // TODO: removing an override changes the effective agent set; trigger a
+    if reset {
+        // TODO: clearing an override changes the effective agent set; trigger a
         // scheduler recompute for this suite once that layer exists.
     }
 
-    Ok(RemoveSuiteAgentResp { removed })
+    Ok(ResetSuiteAgentResp { reset })
 }

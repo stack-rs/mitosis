@@ -799,6 +799,63 @@ impl MitoClient {
         self.http_client.cancel_task_by_uuid(uuid).await
     }
 
+    pub async fn suites_create(
+        &mut self,
+        args: CreateSuiteArgs,
+    ) -> crate::error::Result<CreateTaskSuiteResp> {
+        self.http_client.create_task_suite(args.into()).await
+    }
+
+    pub async fn suites_query(
+        &mut self,
+        args: QuerySuitesArgs,
+    ) -> crate::error::Result<TaskSuitesQueryResp> {
+        self.http_client.query_task_suites(args.into()).await
+    }
+
+    pub async fn suites_get(
+        &mut self,
+        args: GetSuiteArgs,
+    ) -> crate::error::Result<TaskSuiteQueryResp> {
+        self.http_client.get_task_suite(args.uuid).await
+    }
+
+    pub async fn suites_close(&mut self, args: GetSuiteArgs) -> crate::error::Result<()> {
+        self.http_client.close_task_suite(args.uuid).await
+    }
+
+    pub async fn suites_cancel(
+        &mut self,
+        args: CancelSuiteArgs,
+    ) -> crate::error::Result<CancelSuiteResp> {
+        self.http_client
+            .cancel_task_suite(args.uuid, args.force)
+            .await
+    }
+
+    pub async fn suites_set_agent(
+        &mut self,
+        args: SuiteAgentArgs,
+        include: bool,
+    ) -> crate::error::Result<SuiteAgentResp> {
+        let req = SuiteAgentReq {
+            agent_uuid: args.agent,
+        };
+        self.http_client
+            .set_suite_agent(args.uuid, include, req)
+            .await
+    }
+
+    pub async fn suites_reset_agent(
+        &mut self,
+        args: SuiteAgentArgs,
+    ) -> crate::error::Result<ResetSuiteAgentResp> {
+        let req = SuiteAgentReq {
+            agent_uuid: args.agent,
+        };
+        self.http_client.reset_suite_agent(args.uuid, req).await
+    }
+
     pub async fn tasks_batch_cancel(
         &mut self,
         args: CancelTasksArgs,
@@ -1934,6 +1991,110 @@ impl MitoClient {
                                 tracing::error!("{}", e);
                             }
                         }
+                    }
+                },
+            },
+            ClientCommand::Suites(args) => match args.command {
+                SuitesCommands::Create(args) => match self.suites_create(args).await {
+                    Ok(resp) => {
+                        tracing::info!("Suite created with uuid {}", resp.uuid);
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                SuitesCommands::Query(args) => {
+                    let verbose = args.verbose;
+                    let counted = args.count;
+                    match self.suites_query(args).await {
+                        Ok(resp) => {
+                            tracing::info!(
+                                "Found {} suites in group {}",
+                                resp.count,
+                                resp.group_name
+                            );
+                            if !counted {
+                                for suite in resp.suites {
+                                    if verbose {
+                                        output_suite_list_info(&suite);
+                                    } else {
+                                        tracing::info!("{} ({})", suite.uuid, suite.state);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    }
+                }
+                SuitesCommands::Get(args) => match self.suites_get(args).await {
+                    Ok(resp) => {
+                        output_parsed_suite_info(&resp.info, &resp.assigned_agents);
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                SuitesCommands::Close(args) => match self.suites_close(args).await {
+                    Ok(_) => {
+                        tracing::info!("Suite closed successfully");
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                SuitesCommands::Cancel(args) => match self.suites_cancel(args).await {
+                    Ok(resp) => {
+                        tracing::info!(
+                            "Suite cancelled; {} tasks cancelled",
+                            resp.cancelled_task_count
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                SuitesCommands::IncludeAgent(args) => {
+                    match self.suites_set_agent(args, true).await {
+                        Ok(resp) => {
+                            tracing::info!(
+                                "Agent {} set to {:?} on suite {}",
+                                resp.agent_uuid,
+                                resp.selection,
+                                resp.suite_uuid
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    }
+                }
+                SuitesCommands::ExcludeAgent(args) => {
+                    match self.suites_set_agent(args, false).await {
+                        Ok(resp) => {
+                            tracing::info!(
+                                "Agent {} set to {:?} on suite {}",
+                                resp.agent_uuid,
+                                resp.selection,
+                                resp.suite_uuid
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    }
+                }
+                SuitesCommands::ResetAgent(args) => match self.suites_reset_agent(args).await {
+                    Ok(resp) => {
+                        if resp.reset {
+                            tracing::info!("Reset the agent to the tag-match default");
+                        } else {
+                            tracing::info!("No manual override to reset");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
                     }
                 },
             },

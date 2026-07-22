@@ -1,7 +1,11 @@
 use std::collections::HashSet;
 
+use sea_orm::FromQueryResult;
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use uuid::Uuid;
+
+use crate::entity::state::TaskSuiteState;
 
 use super::exec::ExecHooks;
 
@@ -87,4 +91,112 @@ pub enum CpuBindingStrategy {
     Exclusive,
     /// All workers share all specified cores
     Shared,
+}
+
+/// Filter for querying task suites
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSuitesQueryReq {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub creator_usernames: Option<HashSet<String>>,
+    pub group_name: Option<String>,
+    pub tags: Option<HashSet<String>>,
+    pub labels: Option<HashSet<String>>,
+    pub states: Option<HashSet<TaskSuiteState>>,
+    pub priority: Option<String>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+    pub count: bool,
+}
+
+/// Suite information with raw JSON worker_schedule/exec_hooks, straight from a DB query
+#[derive(Debug, Clone, Serialize, Deserialize, FromQueryResult)]
+pub struct TaskSuiteInfo {
+    pub uuid: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub group_name: String,
+    pub creator_username: String,
+    pub tags: Vec<String>,
+    pub labels: Vec<String>,
+    pub priority: i32,
+    pub worker_schedule: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec_hooks: Option<serde_json::Value>,
+    pub state: TaskSuiteState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_task_submitted_at: Option<OffsetDateTime>,
+    pub total_tasks: i32,
+    pub incomplete_tasks: i32,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<OffsetDateTime>,
+}
+
+/// Response for suite query
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSuitesQueryResp {
+    pub count: u64,
+    pub suites: Vec<TaskSuiteInfo>,
+    pub group_name: String,
+}
+
+/// Suite information with parsed (typed) worker_schedule/exec_hooks, for detail views
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParsedTaskSuiteInfo {
+    pub uuid: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub group_name: String,
+    pub creator_username: String,
+    pub tags: Vec<String>,
+    pub labels: Vec<String>,
+    pub priority: i32,
+    pub worker_schedule: WorkerSchedulePlan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec_hooks: Option<ExecHooks>,
+    pub state: TaskSuiteState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_task_submitted_at: Option<OffsetDateTime>,
+    pub total_tasks: i32,
+    pub incomplete_tasks: i32,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<OffsetDateTime>,
+}
+
+/// Detailed suite response: the suite plus the UUIDs of its assigned agents
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSuiteQueryResp {
+    pub info: ParsedTaskSuiteInfo,
+    pub assigned_agents: Vec<Uuid>,
+}
+
+/// Query parameter for `DELETE /suites/{uuid}` selecting the cancellation mode
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CancelTaskSuiteParam {
+    pub op: Option<CancelTaskSuiteOp>,
+}
+
+/// Cancellation mode for a suite
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub enum CancelTaskSuiteOp {
+    #[default]
+    #[serde(alias = "graceful")]
+    Graceful,
+    #[serde(alias = "force")]
+    Force,
+}
+
+/// Response after cancelling a suite
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelSuiteResp {
+    /// Number of tasks that were cancelled
+    pub cancelled_task_count: u64,
 }

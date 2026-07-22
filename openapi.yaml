@@ -1586,6 +1586,279 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /suites:
+    post:
+      summary: Create task suite
+      description: Create a new task suite in the Open state
+      operationId: createTaskSuite
+      tags:
+        - Suites
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTaskSuiteReq"
+      responses:
+        "200":
+          description: Suite created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateTaskSuiteResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /suites/query:
+    post:
+      summary: Query task suites
+      description: List task suites with optional filtering, scoped to a group the caller can read
+      operationId: queryTaskSuites
+      tags:
+        - Suites
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskSuitesQueryReq"
+      responses:
+        "200":
+          description: List of task suites
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskSuitesQueryResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /suites/{uuid}:
+    get:
+      summary: Get task suite
+      description: Get detailed information about a task suite, including its manually-included agents
+      operationId: getTaskSuite
+      tags:
+        - Suites
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Task suite details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskSuiteQueryResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      summary: Cancel task suite
+      description: Cancel a task suite (terminal). Archives all non-terminal tasks of the suite as Cancelled.
+      operationId: cancelTaskSuite
+      tags:
+        - Suites
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: op
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - graceful
+              - force
+          description: |
+            Cancellation mode:
+            - graceful (default): running agents run cleanup before the job ends
+            - force: running agents are killed without cleanup
+      responses:
+        "200":
+          description: Suite cancelled successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CancelSuiteResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /suites/{uuid}/close:
+    post:
+      summary: Close task suite
+      description: Mark a suite Closed (an idle marker; it still accepts and runs tasks, and a new task reopens it)
+      operationId: closeTaskSuite
+      tags:
+        - Suites
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Suite closed successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /suites/{uuid}/agents/include:
+    post:
+      summary: Include an agent in a suite
+      description: Manually pin an agent to the suite even if it does not tag-match. Upserts any existing opposite override.
+      operationId: includeSuiteAgent
+      tags:
+        - Suites
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SuiteAgentReq"
+      responses:
+        "200":
+          description: Override applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuiteAgentResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /suites/{uuid}/agents/exclude:
+    post:
+      summary: Exclude an agent from a suite
+      description: Manually block an agent from the suite even if it tag-matches. Upserts any existing opposite override.
+      operationId: excludeSuiteAgent
+      tags:
+        - Suites
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SuiteAgentReq"
+      responses:
+        "200":
+          description: Override applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuiteAgentResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /suites/{uuid}/agents/remove:
+    post:
+      summary: Remove an agent override from a suite
+      description: Remove a manual include/exclude override for an agent, reverting it to the tag-match default. Idempotent.
+      operationId: removeSuiteAgent
+      tags:
+        - Suites
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SuiteAgentReq"
+      responses:
+        "200":
+          description: Override removed (or nothing to remove)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemoveSuiteAgentResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /admin/users:
     post:
       summary: Create user (Admin)
@@ -3978,6 +4251,423 @@ components:
             $ref: "#/components/schemas/TaskSubmitResult"
           description: List of individual task submission results (each is either Ok or Err)
 
+    TaskSuiteState:
+      type: string
+      enum:
+        - Open
+        - Closed
+        - Complete
+        - Cancelled
+      description: |
+        Task suite lifecycle state:
+        - Open: accepting and running tasks
+        - Closed: idle marker; still accepts/runs tasks, a new task reopens it
+        - Complete: no incomplete tasks remain; a new task reopens it
+        - Cancelled: terminal; cannot accept tasks
+
+    SuiteAgentSelectionType:
+      type: string
+      enum:
+        - UserIncluded
+        - UserExcluded
+      description: |
+        Manual agent override on a suite:
+        - UserIncluded: pin the agent to the suite even if it does not tag-match
+        - UserExcluded: block the agent even if it tag-matches
+
+    CpuBindingStrategy:
+      type: string
+      enum:
+        - RoundRobin
+        - Exclusive
+        - Shared
+      description: How workers are bound to the specified CPU cores
+
+    CpuBinding:
+      type: object
+      required:
+        - cores
+        - strategy
+      properties:
+        cores:
+          type: array
+          items:
+            type: integer
+            format: uint
+          description: CPU core ids to bind to
+          example:
+            - 0
+            - 1
+        strategy:
+          $ref: "#/components/schemas/CpuBindingStrategy"
+
+    WorkerSchedulePlan:
+      type: object
+      description: Worker allocation plan for a suite, tagged by `type`
+      required:
+        - type
+        - worker_count
+      properties:
+        type:
+          type: string
+          enum:
+            - FixedWorkers
+          description: Scheduling policy discriminator
+        worker_count:
+          type: integer
+          format: uint32
+          minimum: 1
+          maximum: 256
+          description: Number of workers to spawn
+          example: 8
+        cpu_binding:
+          $ref: "#/components/schemas/CpuBinding"
+        task_prefetch_count:
+          type: integer
+          format: uint32
+          default: 16
+          description: How many tasks each worker prefetches locally
+          example: 16
+
+    ExecHooks:
+      type: object
+      description: Suite lifecycle hooks; each entry is an execution spec (ExecSpec) run at a phase
+      properties:
+        provision:
+          type: object
+          description: Hook run before workers start
+        cleanup:
+          type: object
+          description: Hook run after the suite completes
+        background:
+          type: object
+          description: Hook run alongside workers
+
+    CreateTaskSuiteReq:
+      type: object
+      required:
+        - group_name
+        - worker_schedule
+      properties:
+        name:
+          type: string
+          nullable: true
+          description: Optional human-readable name (non-unique; if present, must not be blank)
+          example: nightly-eval
+        description:
+          type: string
+          nullable: true
+          description: Optional description
+        group_name:
+          type: string
+          description: Group that owns the suite (caller needs Write/Admin in it)
+          example: research-team
+        tags:
+          type: array
+          items:
+            type: string
+          description: Tags for agent matching
+          example:
+            - linux
+            - cuda:11
+        labels:
+          type: array
+          items:
+            type: string
+          description: Labels for querying/filtering
+          example:
+            - project:cauldron
+        priority:
+          type: integer
+          format: int32
+          default: 0
+          description: Suite scheduling priority (higher = more important)
+        worker_schedule:
+          $ref: "#/components/schemas/WorkerSchedulePlan"
+        exec_hooks:
+          $ref: "#/components/schemas/ExecHooks"
+
+    CreateTaskSuiteResp:
+      type: object
+      required:
+        - uuid
+      properties:
+        uuid:
+          type: string
+          format: uuid
+          description: Unique UUID of the created suite
+
+    TaskSuitesQueryReq:
+      type: object
+      properties:
+        name:
+          type: string
+          nullable: true
+          description: Filter by exact suite name
+        description:
+          type: string
+          nullable: true
+          description: Filter by description substring
+        creator_usernames:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by suite creators
+        group_name:
+          type: string
+          nullable: true
+          description: Filter by group name (defaults to the caller's username when omitted)
+        tags:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by suite tags
+        labels:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Filter by suite labels
+        states:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskSuiteState"
+          nullable: true
+          description: Filter by suite states
+        priority:
+          type: string
+          nullable: true
+          description: Filter by priority (e.g. ">5", "<=10")
+          example: ">5"
+        limit:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Maximum number of results
+        offset:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Offset for pagination
+        count:
+          type: boolean
+          default: false
+          description: When true, return only the total match count (suites is empty)
+
+    TaskSuiteInfo:
+      type: object
+      required:
+        - uuid
+        - group_name
+        - creator_username
+        - tags
+        - labels
+        - priority
+        - worker_schedule
+        - state
+        - total_tasks
+        - incomplete_tasks
+        - created_at
+        - updated_at
+      properties:
+        uuid:
+          type: string
+          format: uuid
+        name:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        group_name:
+          type: string
+        creator_username:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        labels:
+          type: array
+          items:
+            type: string
+        priority:
+          type: integer
+          format: int32
+        worker_schedule:
+          $ref: "#/components/schemas/WorkerSchedulePlan"
+        exec_hooks:
+          $ref: "#/components/schemas/ExecHooks"
+        state:
+          $ref: "#/components/schemas/TaskSuiteState"
+        last_task_submitted_at:
+          type: string
+          format: date-time
+          nullable: true
+        total_tasks:
+          type: integer
+          format: int32
+        incomplete_tasks:
+          type: integer
+          format: int32
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    TaskSuitesQueryResp:
+      type: object
+      required:
+        - count
+        - suites
+        - group_name
+      properties:
+        count:
+          type: integer
+          format: uint64
+          description: Total match count (count mode), otherwise the number of suites on this page
+        suites:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskSuiteInfo"
+        group_name:
+          type: string
+
+    ParsedTaskSuiteInfo:
+      type: object
+      required:
+        - uuid
+        - group_name
+        - creator_username
+        - tags
+        - labels
+        - priority
+        - worker_schedule
+        - state
+        - total_tasks
+        - incomplete_tasks
+        - created_at
+        - updated_at
+      properties:
+        uuid:
+          type: string
+          format: uuid
+        name:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        group_name:
+          type: string
+        creator_username:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        labels:
+          type: array
+          items:
+            type: string
+        priority:
+          type: integer
+          format: int32
+        worker_schedule:
+          $ref: "#/components/schemas/WorkerSchedulePlan"
+        exec_hooks:
+          $ref: "#/components/schemas/ExecHooks"
+        state:
+          $ref: "#/components/schemas/TaskSuiteState"
+        last_task_submitted_at:
+          type: string
+          format: date-time
+          nullable: true
+        total_tasks:
+          type: integer
+          format: int32
+        incomplete_tasks:
+          type: integer
+          format: int32
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    TaskSuiteQueryResp:
+      type: object
+      required:
+        - info
+        - assigned_agents
+      properties:
+        info:
+          $ref: "#/components/schemas/ParsedTaskSuiteInfo"
+        assigned_agents:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: UUIDs of the manually-included agents (tag-matched agents are computed in-memory and not listed here)
+
+    CancelSuiteResp:
+      type: object
+      required:
+        - cancelled_task_count
+      properties:
+        cancelled_task_count:
+          type: integer
+          format: uint64
+          description: Number of tasks that were cancelled
+
+    SuiteAgentReq:
+      type: object
+      required:
+        - agent_uuid
+      properties:
+        agent_uuid:
+          type: string
+          format: uuid
+          description: The agent to include, exclude, or remove the override for
+
+    SuiteAgentResp:
+      type: object
+      required:
+        - suite_uuid
+        - agent_uuid
+        - selection
+      properties:
+        suite_uuid:
+          type: string
+          format: uuid
+        agent_uuid:
+          type: string
+          format: uuid
+        selection:
+          $ref: "#/components/schemas/SuiteAgentSelectionType"
+
+    RemoveSuiteAgentResp:
+      type: object
+      required:
+        - removed
+      properties:
+        removed:
+          type: boolean
+          description: Whether an override existed and was removed (false = nothing to remove)
+
 security:
   - bearerAuth: []
 
@@ -3992,6 +4682,8 @@ tags:
     description: Worker registration and management
   - name: Tasks
     description: Task submission and monitoring
+  - name: Suites
+    description: Task suite lifecycle and manual agent assignment
   - name: Admin
     description: Administrative operations
   - name: Health

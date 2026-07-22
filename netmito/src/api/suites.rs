@@ -8,10 +8,12 @@ use uuid::Uuid;
 
 use crate::{
     config::InfraPool,
+    entity::task_suite_agent::SuiteAgentSelectionType,
     error::ApiError,
     schema::{
         CancelSuiteResp, CancelTaskSuiteParam, CreateTaskSuiteReq, CreateTaskSuiteResp,
-        TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp,
+        RemoveSuiteAgentResp, SuiteAgentReq, SuiteAgentResp, TaskSuiteQueryResp, TaskSuitesQueryReq,
+        TaskSuitesQueryResp,
     },
     service::{
         self,
@@ -25,6 +27,9 @@ pub fn suites_router(st: InfraPool) -> Router<InfraPool> {
         .route("/query", post(query_suites))
         .route("/{uuid}", get(get_suite_details).delete(cancel_suite))
         .route("/{uuid}/close", post(close_suite))
+        .route("/{uuid}/agents/include", post(include_suite_agents))
+        .route("/{uuid}/agents/exclude", post(exclude_suite_agents))
+        .route("/{uuid}/agents/remove", post(remove_suite_agents))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -98,5 +103,53 @@ pub async fn cancel_suite(
         service::suite::user_cancel_task_suite(u.id, &pool, uuid, param.op.unwrap_or_default())
             .await
             .map_err(map_service_error)?;
+    Ok(Json(resp))
+}
+
+pub async fn include_suite_agents(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<SuiteAgentReq>,
+) -> Result<Json<SuiteAgentResp>, ApiError> {
+    let resp = service::suite::user_set_suite_agent(
+        u.id,
+        &pool,
+        uuid,
+        req.agent_uuid,
+        SuiteAgentSelectionType::UserIncluded,
+    )
+    .await
+    .map_err(map_service_error)?;
+    Ok(Json(resp))
+}
+
+pub async fn exclude_suite_agents(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<SuiteAgentReq>,
+) -> Result<Json<SuiteAgentResp>, ApiError> {
+    let resp = service::suite::user_set_suite_agent(
+        u.id,
+        &pool,
+        uuid,
+        req.agent_uuid,
+        SuiteAgentSelectionType::UserExcluded,
+    )
+    .await
+    .map_err(map_service_error)?;
+    Ok(Json(resp))
+}
+
+pub async fn remove_suite_agents(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<SuiteAgentReq>,
+) -> Result<Json<RemoveSuiteAgentResp>, ApiError> {
+    let resp = service::suite::user_remove_suite_agent(u.id, &pool, uuid, req.agent_uuid)
+        .await
+        .map_err(map_service_error)?;
     Ok(Json(resp))
 }

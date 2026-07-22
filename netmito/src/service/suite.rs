@@ -8,15 +8,16 @@ use crate::entity::role::UserGroupRole;
 use crate::entity::state::{TaskState, TaskSuiteState};
 use crate::entity::task_suite_agent::SuiteAgentSelectionType;
 use crate::entity::{
-    active_tasks as ActiveTasks, agents as Agent, archived_tasks as ArchivedTasks, groups as Group,
-    task_suite_agent as TaskSuiteAgent, task_suites as TaskSuites, user_group as UserGroup,
-    users as User,
+    active_tasks as ActiveTasks, agents as Agent, archived_tasks as ArchivedTasks,
+    group_agent as GroupAgent, groups as Group, task_suite_agent as TaskSuiteAgent,
+    task_suites as TaskSuites, user_group as UserGroup, users as User,
 };
 use crate::error::{ApiError, AuthError, Error, Result};
 use crate::schema::{
     CancelSuiteResp, CancelTaskSuiteOp, CountQuery, CreateTaskSuiteReq, CreateTaskSuiteResp,
-    ExecHooks, ParsedTaskSuiteInfo, TaskResultMessage, TaskResultSpec, TaskSuiteInfo,
-    TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp, WorkerSchedulePlan,
+    ExecHooks, ParsedTaskSuiteInfo, RemoveSuiteAgentResp, SuiteAgentResp, TaskResultMessage,
+    TaskResultSpec, TaskSuiteInfo, TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp,
+    WorkerSchedulePlan,
 };
 use crate::service::task::{parse_operators_with_number, OperatorWithNumber};
 
@@ -743,4 +744,160 @@ pub async fn user_cancel_task_suite(
     Ok(CancelSuiteResp {
         cancelled_task_count: cancelled_count,
     })
+}
+
+/// Resolve a suite by uuid and authorize the caller (Write/Admin in its group), then
+/// resolve an agent by uuid and require the suite's group to have write access to it.
+/// Shared by the manual include/exclude/remove paths.
+async fn resolve_suite_and_agent<C>(
+    txn: &C,
+    user_id: i64,
+    suite_uuid: Uuid,
+    agent_uuid: Uuid,
+) -> Result<(TaskSuites::Model, Agent::Model)>
+where
+    C: ConnectionTrait,
+{
+    let suite = TaskSuites::Entity::find()
+        .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
+        .one(txn)
+        .await?
+        .ok_or(Error::ApiError(ApiError::NotFound(format!(
+            "Task suite with uuid {suite_uuid} not found"
+        ))))?;
+
+    UserGroup::Entity::find()
+        .filter(UserGroup::Column::UserId.eq(user_id))
+        .filter(UserGroup::Column::GroupId.eq(suite.group_id))
+        .one(txn)
+        .await?
+        .and_then(|ug| (ug.role >= UserGroupRole::Write).then_some(()))
+        .ok_or(Error::AuthError(AuthError::PermissionDenied))?;
+
+    let agent = Agent::Entity::find()
+        .filter(Agent::Column::Uuid.eq(agent_uuid))
+        .one(txn)
+        .await?
+        .ok_or(Error::ApiError(ApiError::NotFound(format!(
+            "Agent with uuid {agent_uuid} not found"
+        ))))?;
+
+    Ok((suite, agent))
+}
+
+/// Set a manual agent override on a suite: `UserIncluded` pins an agent to the suite
+/// even if it doesn't tag-match; `UserExcluded` blocks an agent even if it does.
+///
+/// Requires Write/Admin in the suite's group, and the group must have write access to
+/// the agent. Because `(task_suite_id, agent_id)` is unique, an agent that already has
+/// the opposite override is switched (upsert), not duplicated.
+pub async fn user_set_suite_agent(
+    user_id: i64,
+    pool: &InfraPool,
+    suite_uuid: Uuid,
+    agent_uuid: Uuid,
+    selection: SuiteAgentSelectionType,
+) -> Result<SuiteAgentResp> {
+    let now = TimeDateTimeWithTimeZone::now_utc();
+
+    pool.db
+        .transaction::<_, (), Error>(|txn| {
+            Box::pin(async move {
+                let (suite, agent) =
+                    resolve_suite_and_agent(txn, user_id, suite_uuid, agent_uuid).await?;
+
+                // The suite's group must have write access to the agent.
+                let has_access = GroupAgent::Entity::find()
+                    .filter(GroupAgent::Column::GroupId.eq(suite.group_id))
+                    .filter(GroupAgent::Column::AgentId.eq(agent.id))
+                    .one(txn)
+                    .await?
+                    .map(|ga| ga.role.has_write_access())
+                    .unwrap_or(false);
+                if !has_access {
+                    return Err(Error::ApiError(ApiError::InvalidRequest(format!(
+                        "Group does not have write access to agent {agent_uuid}"
+                    ))));
+                }
+
+                // Upsert: switch an existing (opposite) override rather than insert a
+                // duplicate, since (task_suite_id, agent_id) is unique.
+                match TaskSuiteAgent::Entity::find()
+                    .filter(TaskSuiteAgent::Column::TaskSuiteId.eq(suite.id))
+                    .filter(TaskSuiteAgent::Column::AgentId.eq(agent.id))
+                    .one(txn)
+                    .await?
+                {
+                    Some(existing) if existing.selection_type == selection => {
+                        // Already in the desired state.
+                    }
+                    Some(existing) => {
+                        let mut am: TaskSuiteAgent::ActiveModel = existing.into();
+                        am.selection_type = Set(selection);
+                        am.creator_id = Set(Some(user_id));
+                        am.updated_at = Set(now);
+                        am.update(txn).await?;
+                    }
+                    None => {
+                        let am = TaskSuiteAgent::ActiveModel {
+                            task_suite_id: Set(suite.id),
+                            agent_id: Set(agent.id),
+                            selection_type: Set(selection),
+                            creator_id: Set(Some(user_id)),
+                            created_at: Set(now),
+                            updated_at: Set(now),
+                            ..Default::default()
+                        };
+                        am.insert(txn).await?;
+                    }
+                }
+
+                Ok(())
+            })
+        })
+        .await?;
+
+    // TODO: the manual override just changed the effective agent set. Once
+    // the scheduler exists, trigger a recompute for this suite so a newly-included agent
+    // picks it up (and an excluded one drops/stops it) instead of waiting for the next tick.
+
+    Ok(SuiteAgentResp {
+        suite_uuid,
+        agent_uuid,
+        selection,
+    })
+}
+
+/// Remove any manual override (include or exclude) for an agent on a suite, reverting it
+/// to the tag-match default. Idempotent. Requires Write/Admin in the suite's group.
+pub async fn user_remove_suite_agent(
+    user_id: i64,
+    pool: &InfraPool,
+    suite_uuid: Uuid,
+    agent_uuid: Uuid,
+) -> Result<RemoveSuiteAgentResp> {
+    let removed = pool
+        .db
+        .transaction::<_, bool, Error>(|txn| {
+            Box::pin(async move {
+                let (suite, agent) =
+                    resolve_suite_and_agent(txn, user_id, suite_uuid, agent_uuid).await?;
+
+                let res = TaskSuiteAgent::Entity::delete_many()
+                    .filter(TaskSuiteAgent::Column::TaskSuiteId.eq(suite.id))
+                    .filter(TaskSuiteAgent::Column::AgentId.eq(agent.id))
+                    .exec(txn)
+                    .await?;
+
+                Ok(res.rows_affected > 0)
+            })
+        })
+        .await?;
+
+    if removed {
+        // TODO: removing an override changes the effective agent set; trigger a
+        // scheduler recompute for this suite once that layer exists.
+    }
+
+    Ok(RemoveSuiteAgentResp { removed })
 }

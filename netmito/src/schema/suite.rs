@@ -200,3 +200,27 @@ pub struct CancelSuiteResp {
     /// Number of tasks that were cancelled
     pub cancelled_task_count: u64,
 }
+
+/// Request body for the manual include / exclude / remove agent endpoints.
+///
+/// A single agent per request — these are manual operations, not batch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuiteAgentReq {
+    /// The agent (by uuid) to include, exclude, or remove the override for.
+    pub agent_uuid: Uuid,
+}
+
+/// Response for the include / exclude endpoints: the override now in effect.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuiteAgentResp {
+    pub suite_uuid: Uuid,
+    pub agent_uuid: Uuid,
+    pub selection: crate::entity::task_suite_agent::SuiteAgentSelectionType,
+}
+
+/// Response for the remove-override endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveSuiteAgentResp {
+    /// Whether an override existed and was removed (false = nothing to remove).
+    pub removed: bool,
+}

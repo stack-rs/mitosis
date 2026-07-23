@@ -540,34 +540,6 @@ pub async fn user_get_task_suite_by_uuid(
     })
 }
 
-/// Set a suite `Open → Closed`. Idempotency is enforced by the `state = Open` filter.
-pub(crate) async fn close_task_suite<C>(
-    db: &C,
-    task_suite_id: i64,
-    now: TimeDateTimeWithTimeZone,
-) -> Result<()>
-where
-    C: ConnectionTrait,
-{
-    let updated = TaskSuites::Entity::update_many()
-        .col_expr(
-            TaskSuites::Column::State,
-            Expr::value(TaskSuiteState::Closed),
-        )
-        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
-        .filter(TaskSuites::Column::Id.eq(task_suite_id))
-        .filter(TaskSuites::Column::State.eq(TaskSuiteState::Open))
-        .exec(db)
-        .await?;
-
-    if updated.rows_affected != 1 {
-        return Err(Error::ApiError(ApiError::NotFound(
-            "Task suite not found or already closed".to_string(),
-        )));
-    }
-    Ok(())
-}
-
 /// Close a suite (`Open → Closed`). `Closed` is only an idle marker — the suite
 /// still accepts and runs tasks, and a new task reopens it. Requires Write/Admin
 /// in the suite's group.
@@ -600,7 +572,11 @@ pub async fn user_close_task_suite(user_id: i64, pool: &InfraPool, suite_uuid: U
                     ))));
                 }
 
-                close_task_suite(txn, suite.id, now).await
+                let mut suite: TaskSuites::ActiveModel = suite.into();
+                suite.state = Set(TaskSuiteState::Closed);
+                suite.updated_at = Set(now);
+                suite.update(txn).await?;
+                Ok(())
             })
         })
         .await?;
@@ -631,7 +607,7 @@ pub async fn user_cancel_task_suite(
                     .one(txn)
                     .await?
                     .ok_or(Error::ApiError(ApiError::NotFound(format!(
-                        "Task suite with uuid {suite_uuid}"
+                        "Task suite with uuid {suite_uuid} not found"
                     ))))?;
 
                 UserGroup::Entity::find()
@@ -718,23 +694,11 @@ pub async fn user_cancel_task_suite(
                         .await?;
                 }
 
-                let updated = TaskSuites::Entity::update_many()
-                    .col_expr(
-                        TaskSuites::Column::State,
-                        Expr::value(TaskSuiteState::Cancelled),
-                    )
-                    .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
-                    .col_expr(TaskSuites::Column::CompletedAt, Expr::value(now))
-                    .filter(TaskSuites::Column::Id.eq(suite.id))
-                    .exec(txn)
-                    .await?;
-
-                if updated.rows_affected != 1 {
-                    return Err(Error::ApiError(ApiError::InvalidRequest(
-                        "Failed to update task suite state. Maybe due to concurrent state update"
-                            .to_string(),
-                    )));
-                }
+                let mut suite: TaskSuites::ActiveModel = suite.into();
+                suite.state = Set(TaskSuiteState::Cancelled);
+                suite.updated_at = Set(now);
+                suite.completed_at = Set(Some(now));
+                suite.update(txn).await?;
 
                 Ok(cancelled_count)
             })

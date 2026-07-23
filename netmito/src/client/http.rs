@@ -1391,11 +1391,7 @@ impl MitoHttpClient {
         }
     }
 
-    pub async fn cancel_task_suite(
-        &mut self,
-        uuid: Uuid,
-        force: bool,
-    ) -> crate::error::Result<()> {
+    pub async fn cancel_task_suite(&mut self, uuid: Uuid, force: bool) -> crate::error::Result<()> {
         self.url.set_path(&format!("suites/{uuid}"));
         if force {
             self.url.set_query(Some("op=force"));

@@ -212,7 +212,7 @@ async fn internal_submit_task(
 
     // Not pending, notify agent/worker depending on whether it belongs to a suite
     match suite {
-        Some(suite) => {
+        Some(_suite) => {
             // TODO: If this task belongs to a suite, notify agents
         }
         None => {

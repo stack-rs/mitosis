@@ -57,11 +57,11 @@ pub async fn query_suites(
 }
 
 pub async fn get_suite_details(
-    Extension(_): Extension<AuthUser>,
+    Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<TaskSuiteQueryResp>, ApiError> {
-    let details = service::suite::user_get_task_suite_by_uuid(&pool, uuid)
+    let details = service::suite::user_get_task_suite_by_uuid(u.id, &pool, uuid)
         .await
         .map_err(map_service_error)?;
     Ok(Json(details))

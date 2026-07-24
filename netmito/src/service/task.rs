@@ -3,7 +3,7 @@ use sea_orm::sea_query::{
     InsertStatement, PgFunc, Query,
 };
 use sea_orm::ActiveValue::NotSet;
-use sea_orm::{prelude::*, FromQueryResult, Set, TransactionTrait};
+use sea_orm::{prelude::*, FromQueryResult, QuerySelect, Set, TransactionTrait};
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -89,50 +89,70 @@ async fn internal_submit_task(
         .transaction::<_, (ActiveTasks::Model, Option<TaskSuites::Model>), crate::error::Error>(
             |txn| {
                 Box::pin(async move {
-                    // Check group existacne and user membership (possible permission check in the future)
-                    let group = Group::Entity::find()
-                        .filter(Group::Column::GroupName.eq(&group_name))
-                        .one(txn)
-                        .await?
-                        .ok_or_else(|| {
-                            Error::ApiError(crate::error::ApiError::NotFound(format!(
-                                "User or group with name {} not found",
-                                group_name
-                            )))
-                        })?;
-
-                    UserGroup::Entity::find()
-                        .filter(UserGroup::Column::UserId.eq(creator_id))
-                        .filter(UserGroup::Column::GroupId.eq(group.id))
-                        .one(txn)
-                        .await?
-                        .ok_or(Error::AuthError(crate::error::AuthError::PermissionDenied))?;
-
-                    // If a suite is designated, we have to check suite existance and suite permissions
-                    let suite = match suite_uuid {
-                        None => None,
+                    // Determine the owning group and (optionally) the suite, then
+                    // atomically bump the group's task counter. When a suite is designated it
+                    // is authoritative: the task's group is the suite's owning group, and the
+                    // request's group_name must match it.
+                    let (group_id, task_id, suite) = match suite_uuid {
+                        None => {
+                            // No suite: resolve the user-specified group, verify the caller's
+                            // membership, and bump its task counter in one statement.
+                            let group = Group::Entity::update_many()
+                                .col_expr(
+                                    Group::Column::TaskCount,
+                                    Expr::col(Group::Column::TaskCount).add(1),
+                                )
+                                .col_expr(Group::Column::UpdatedAt, Expr::value(now))
+                                .filter(Group::Column::GroupName.eq(&group_name))
+                                .filter(
+                                    Group::Column::Id.in_subquery(
+                                        Query::select()
+                                            .column((UserGroup::Entity, UserGroup::Column::GroupId))
+                                            .from(UserGroup::Entity)
+                                            .and_where(
+                                                Expr::col((
+                                                    UserGroup::Entity,
+                                                    UserGroup::Column::UserId,
+                                                ))
+                                                .eq(creator_id),
+                                            )
+                                            .to_owned(),
+                                    ),
+                                )
+                                .exec_with_returning(txn)
+                                .await?
+                                .into_iter()
+                                .next()
+                                .ok_or_else(|| {
+                                    Error::ApiError(crate::error::ApiError::NotFound(format!(
+                                        "Group with name {} not found or user does not have access to group",
+                                        group_name
+                                    )))
+                                })?;
+                            (group.id, group.task_count, None)
+                        }
                         Some(suite_uuid) => {
-                            // Check existance
+                            // Suite designated: resolve it (and the caller's membership in its
+                            // owning group) in one join. The suite is authoritative for the group.
                             let suite = TaskSuites::Entity::find()
                                 .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
+                                .filter(UserGroup::Column::UserId.eq(creator_id))
+                                .join(
+                                    sea_orm::JoinType::InnerJoin,
+                                    TaskSuites::Entity::belongs_to(UserGroup::Entity)
+                                        .from(TaskSuites::Column::GroupId)
+                                        .to(UserGroup::Column::GroupId)
+                                        .into(),
+                                )
                                 .one(txn)
                                 .await?
                                 .ok_or_else(|| {
                                     Error::ApiError(crate::error::ApiError::NotFound(format!(
-                                        "Suite with UUID {} not found",
+                                        "Suite with UUID {} not found or user does not have access to it",
                                         suite_uuid
                                     )))
                                 })?;
-                            // Check user have permission
-                            UserGroup::Entity::find()
-                                .filter(UserGroup::Column::UserId.eq(creator_id))
-                                .filter(UserGroup::Column::GroupId.eq(suite.group_id))
-                                .one(txn)
-                                .await?
-                                .ok_or(Error::AuthError(
-                                    crate::error::AuthError::PermissionDenied,
-                                ))?;
-                            // Check can accept task
+                            // The suite must be able to accept new tasks.
                             if !suite.state.can_accept_tasks() {
                                 return Err(Error::ApiError(
                                     crate::error::ApiError::InvalidRequest(format!(
@@ -141,40 +161,55 @@ async fn internal_submit_task(
                                     )),
                                 ));
                             }
-                            Some(suite)
+                            // Derive the owning group from the suite and bump its counter.
+                            let group = Group::Entity::update_many()
+                                .col_expr(
+                                    Group::Column::TaskCount,
+                                    Expr::col(Group::Column::TaskCount).add(1),
+                                )
+                                .col_expr(Group::Column::UpdatedAt, Expr::value(now))
+                                .filter(Group::Column::Id.eq(suite.group_id))
+                                .exec_with_returning(txn)
+                                .await?
+                                .into_iter()
+                                .next()
+                                .ok_or_else(|| {
+                                    // The suite's group row must exist (FK), so this is internal.
+                                    Error::Custom(format!(
+                                        "Owning group {} of suite {} not found",
+                                        suite.group_id, suite_uuid
+                                    ))
+                                })?;
+                            // The request's group_name must match the suite's owning group.
+                            // Safe to reveal the real group: access to the suite is proven.
+                            if group.group_name != group_name {
+                                return Err(Error::ApiError(
+                                    crate::error::ApiError::InvalidRequest(format!(
+                                        "Suite {} belongs to group {}, not {}",
+                                        suite_uuid, group.group_name, group_name
+                                    )),
+                                ));
+                            }
+                            (group.id, group.task_count, Some(suite))
                         }
                     };
-
-                    // Permission check done, start modifying
-                    let prev_group_task_count = group.task_count;
-                    // used later in active_task creation
-                    let group_id = group.id;
-                    let mut group: Group::ActiveModel = group.into();
-                    group.task_count = Set(prev_group_task_count + 1);
-                    group.updated_at = Set(now);
-                    let group = group.update(txn).await?;
 
                     let suite = match suite {
                         None => None,
                         Some(suite) => {
                             let prev_total_tasks = suite.total_tasks;
                             let prev_incomplete_tasks = suite.incomplete_tasks;
-                            let prev_state = suite.state;
                             let mut suite: TaskSuites::ActiveModel = suite.into();
                             suite.total_tasks = Set(prev_total_tasks + 1);
                             suite.incomplete_tasks = Set(prev_incomplete_tasks + 1);
                             suite.last_task_submitted_at = Set(Some(now));
                             suite.updated_at = Set(now);
-
-                            if prev_state.needs_reopen() {
-                                suite.state = Set(TaskSuiteState::Open);
-                                suite.completed_at = Set(None);
-                            }
+                            suite.state = Set(TaskSuiteState::Open);
+                            suite.completed_at = Set(None);
                             Some(suite.update(txn).await?)
                         }
                     };
 
-                    let task_id = group.task_count;
                     let task_uuid = Uuid::new_v4();
 
                     let task = ActiveTasks::ActiveModel {

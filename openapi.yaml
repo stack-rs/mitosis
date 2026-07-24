@@ -1122,7 +1122,10 @@ paths:
   /tasks:
     post:
       summary: Submit task
-      description: Submit a new task for execution
+      description: >-
+        Submit a new task for execution. If suite_uuid is set, the suite is
+        authoritative: the task is placed in the suite's owning group and
+        group_name must match that group.
       operationId: submitTask
       tags:
         - Tasks
@@ -1141,10 +1144,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SubmitTaskResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /tasks/query:
     post:
@@ -1589,7 +1594,10 @@ paths:
   /suites:
     post:
       summary: Create task suite
-      description: Create a new task suite in the Open state
+      description: >-
+        Create a new task suite in the Open state. The caller must have at least
+        the Write role in the target group; a missing group and an unauthorized
+        caller are indistinguishable and both return 404.
       operationId: createTaskSuite
       tags:
         - Suites
@@ -1612,15 +1620,17 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
   /suites/query:
     post:
       summary: Query task suites
-      description: List task suites with optional filtering, scoped to a group the caller can read
+      description: >-
+        List task suites with optional filtering, scoped to a single group. The
+        group defaults to the caller's personal group when omitted, and the
+        caller must have at least the Read role in it; a missing group and an
+        unauthorized caller are indistinguishable and both return 404.
       operationId: queryTaskSuites
       tags:
         - Suites
@@ -1643,13 +1653,17 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /suites/{uuid}:
     get:
       summary: Get task suite
-      description: Get detailed information about a task suite, including its manually-included agents
+      description: >-
+        Get detailed information about a task suite, including its
+        manually-included agents. The caller must have at least the Read role in
+        the suite's group; a non-member and an unknown uuid are indistinguishable
+        and both return 404.
       operationId: getTaskSuite
       tags:
         - Suites
@@ -1671,8 +1685,6 @@ paths:
                 $ref: "#/components/schemas/TaskSuiteQueryResp"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -3155,8 +3167,19 @@ components:
       properties:
         group_name:
           type: string
-          description: Target group for task execution
+          description: >-
+            Target group for task execution. When suite_uuid is set, this must
+            match the suite's owning group, otherwise the request is rejected.
           example: research-team
+        suite_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Optional suite to assign the task to. When set, the suite is
+            authoritative: the task is placed in the suite's owning group and
+            group_name must match that group.
+          example: 550e8400-e29b-41d4-a716-446655440000
         tags:
           type: array
           items:

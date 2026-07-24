@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use sea_orm::sea_query::extension::postgres::PgExpr;
 use sea_orm::sea_query::{Alias, PgFunc, Query};
-use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, Set, TransactionTrait};
+use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, QuerySelect, Set, TransactionTrait};
 use uuid::Uuid;
 
 use super::suite_agent::{
-    apply_suite_agent_override, authorize_suite, resolve_agent, OverrideItemError,
+    apply_suite_agent_override, authorize_suite, resolve_agent, ResolveError,
 };
 use crate::config::InfraPool;
 use crate::entity::role::UserGroupRole;
@@ -17,7 +17,7 @@ use crate::entity::{
     task_suite_agent as TaskSuiteAgent, task_suites as TaskSuites, user_group as UserGroup,
     users as User,
 };
-use crate::error::{ApiError, AuthError, Error, Result};
+use crate::error::{ApiError, Error, Result};
 use crate::schema::{
     CancelTaskSuiteOp, CountQuery, CreateTaskSuiteReq, CreateTaskSuiteResp, ExecHooks,
     ParsedTaskSuiteInfo, SuiteAgentOverrideReq, SuiteAgentOverrideResp, TaskResultMessage,
@@ -67,36 +67,27 @@ pub async fn user_create_task_suite(
         )));
     }
 
-    // A suite may be unnamed (None), but a present name must not be blank.
-    if let Some(ref name) = name {
-        if name.trim().is_empty() {
-            return Err(Error::ApiError(ApiError::InvalidRequest(
-                "name cannot be empty if specified".to_string(),
-            )));
-        }
-    }
-
     let tags = Vec::from_iter(tags);
     let labels = Vec::from_iter(labels);
     let now = TimeDateTimeWithTimeZone::now_utc();
 
-    // Resolve the owning group.
+    // Resolve the owning group and authorize the caller's Write role.
     let group = Group::Entity::find()
         .filter(Group::Column::GroupName.eq(&group_name))
+        .filter(UserGroup::Column::UserId.eq(user_id))
+        .filter(UserGroup::Column::Role.gte(UserGroupRole::Write))
+        .join(
+            sea_orm::JoinType::InnerJoin,
+            Group::Entity::belongs_to(UserGroup::Entity)
+                .from(Group::Column::Id)
+                .to(UserGroup::Column::GroupId)
+                .into(),
+        )
         .one(&pool.db)
         .await?
         .ok_or(Error::ApiError(ApiError::NotFound(format!(
-            "Group with name {group_name}"
+            "Group with name {group_name} not found or user does not have permission"
         ))))?;
-
-    // Permission check: the user must have Write/Admin in the group.
-    UserGroup::Entity::find()
-        .filter(UserGroup::Column::UserId.eq(user_id))
-        .filter(UserGroup::Column::GroupId.eq(group.id))
-        .one(&pool.db)
-        .await?
-        .and_then(|ug| (ug.role >= UserGroupRole::Write).then_some(()))
-        .ok_or(Error::AuthError(AuthError::PermissionDenied))?;
 
     let worker_schedule_json = serde_json::to_value(&worker_schedule)?;
     let exec_hooks_json = exec_hooks.map(|h| serde_json::to_value(&h)).transpose()?;
@@ -125,11 +116,6 @@ pub async fn user_create_task_suite(
     let suite = suite.insert(&pool.db).await?;
 
     Ok(CreateTaskSuiteResp { uuid: suite.uuid })
-}
-
-#[derive(FromQueryResult)]
-struct UserGroupRoleQueryRes {
-    role: UserGroupRole,
 }
 
 /// Validate a suite query and resolve/authorize its target group.
@@ -195,33 +181,25 @@ pub(crate) async fn check_task_suites_query(
         query.group_name = Some(username);
     }
     if let Some(ref group_name) = query.group_name {
-        let builder = pool.db.get_database_backend();
-        let role_stmt = Query::select()
-            .column((UserGroup::Entity, UserGroup::Column::Role))
-            .from(UserGroup::Entity)
+        // Check permission of user to group
+        let authorized = Group::Entity::find()
+            .filter(Group::Column::GroupName.eq(group_name))
+            .filter(UserGroup::Column::UserId.eq(user_id))
+            .filter(UserGroup::Column::Role.gte(UserGroupRole::Read))
             .join(
-                sea_orm::JoinType::Join,
-                Group::Entity,
-                Expr::col((Group::Entity, Group::Column::Id))
-                    .eq(Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))),
+                sea_orm::JoinType::InnerJoin,
+                Group::Entity::belongs_to(UserGroup::Entity)
+                    .from(Group::Column::Id)
+                    .to(UserGroup::Column::GroupId)
+                    .into(),
             )
-            .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
-            .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()))
-            .to_owned();
-        let query_role = UserGroupRoleQueryRes::find_by_statement(builder.build(&role_stmt))
             .one(&pool.db)
             .await?
-            .map(|r| r.role);
-        match query_role {
-            Some(r) if r >= UserGroupRole::Read => {}
-            Some(_) => {
-                return Err(Error::AuthError(AuthError::PermissionDenied));
-            }
-            None => {
-                return Err(Error::ApiError(ApiError::InvalidRequest(format!(
-                    "Group with name {group_name} not found or user is not in the group"
-                ))));
-            }
+            .is_some();
+        if !authorized {
+            return Err(Error::ApiError(ApiError::NotFound(format!(
+                "Group with name {group_name} not found or user does not have permission"
+            ))));
         }
     }
     Ok(())
@@ -413,14 +391,13 @@ struct AgentUuidResult {
     uuid: Uuid,
 }
 
-/// Get a single suite's details, including the uuids of its currently-assigned agents.
+/// Get a single suite's details, including the uuids of agents allowed to execute this suite.
+/// The caller must have at least `Read` in the suite's group.
 ///
-/// User must be a member of the suite's group.
-///
-/// "Assigned" here means the rows persisted in `task_suite_agent` (manual
-/// includes/excludes); tag-matched agents are computed in-memory by the agent
-/// scheduler and are not part of this read.
+/// Currently we only report agents that are UserIncluded to the suite. In the future we
+/// shall read the in-memory list for actual tag matching results.
 pub async fn user_get_task_suite_by_uuid(
+    user_id: i64,
     pool: &InfraPool,
     suite_uuid: Uuid,
 ) -> Result<TaskSuiteQueryResp> {
@@ -468,6 +445,14 @@ pub async fn user_get_task_suite_by_uuid(
             Expr::col((TaskSuites::Entity, TaskSuites::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
         )
+        .join(
+            sea_orm::JoinType::Join,
+            UserGroup::Entity,
+            Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))
+                .eq(Expr::col((TaskSuites::Entity, TaskSuites::Column::GroupId))),
+        )
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::Role)).gte(UserGroupRole::Read))
         .and_where(Expr::col((TaskSuites::Entity, TaskSuites::Column::Uuid)).eq(suite_uuid))
         .to_owned();
 
@@ -540,30 +525,22 @@ pub async fn user_get_task_suite_by_uuid(
     })
 }
 
-/// Close a suite (`Open → Closed`). `Closed` is only an idle marker — the suite
-/// still accepts and runs tasks, and a new task reopens it. Requires Write/Admin
-/// in the suite's group.
+/// Close a suite (`Open → Closed`).
 pub async fn user_close_task_suite(user_id: i64, pool: &InfraPool, suite_uuid: Uuid) -> Result<()> {
     let now = TimeDateTimeWithTimeZone::now_utc();
 
     pool.db
         .transaction::<_, (), Error>(|txn| {
             Box::pin(async move {
-                let suite = TaskSuites::Entity::find()
-                    .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
-                    .one(txn)
-                    .await?
-                    .ok_or(Error::ApiError(ApiError::NotFound(format!(
-                        "Task suite with uuid {suite_uuid}"
-                    ))))?;
-
-                UserGroup::Entity::find()
-                    .filter(UserGroup::Column::UserId.eq(user_id))
-                    .filter(UserGroup::Column::GroupId.eq(suite.group_id))
-                    .one(txn)
-                    .await?
-                    .and_then(|ug| (ug.role >= UserGroupRole::Write).then_some(()))
-                    .ok_or(Error::AuthError(AuthError::PermissionDenied))?;
+                // Resolve the suite and authorize the caller's Write role
+                let suite =
+                    match authorize_suite(txn, user_id, suite_uuid, UserGroupRole::Write).await {
+                        Ok(suite) => suite,
+                        Err(ResolveError::Item(e)) => {
+                            return Err(Error::ApiError(ApiError::NotFound(e.msg)))
+                        }
+                        Err(ResolveError::Fatal(e)) => return Err(e),
+                    };
 
                 if suite.state != TaskSuiteState::Open {
                     return Err(Error::ApiError(ApiError::InvalidRequest(format!(
@@ -602,21 +579,15 @@ pub async fn user_cancel_task_suite(
     pool.db
         .transaction::<_, u64, Error>(|txn| {
             Box::pin(async move {
-                let suite = TaskSuites::Entity::find()
-                    .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
-                    .one(txn)
-                    .await?
-                    .ok_or(Error::ApiError(ApiError::NotFound(format!(
-                        "Task suite with uuid {suite_uuid} not found"
-                    ))))?;
-
-                UserGroup::Entity::find()
-                    .filter(UserGroup::Column::UserId.eq(user_id))
-                    .filter(UserGroup::Column::GroupId.eq(suite.group_id))
-                    .one(txn)
-                    .await?
-                    .and_then(|ug| (ug.role >= UserGroupRole::Write).then_some(()))
-                    .ok_or(Error::AuthError(AuthError::PermissionDenied))?;
+                // Resolve the suite and authorize the caller's Write role in one join.
+                let suite =
+                    match authorize_suite(txn, user_id, suite_uuid, UserGroupRole::Write).await {
+                        Ok(suite) => suite,
+                        Err(ResolveError::Item(e)) => {
+                            return Err(Error::ApiError(ApiError::NotFound(e.msg)))
+                        }
+                        Err(ResolveError::Fatal(e)) => return Err(e),
+                    };
 
                 if matches!(suite.state, TaskSuiteState::Cancelled) {
                     return Err(Error::ApiError(ApiError::InvalidRequest(format!(
@@ -729,13 +700,14 @@ pub async fn user_override_agents_for_suite(
         .transaction::<_, HashMap<Uuid, crate::error::ErrorMsg>, Error>(|txn| {
             Box::pin(async move {
                 // The suite is fixed for the whole batch, so a suite-level failure is request-level
-                let suite = match authorize_suite(txn, user_id, suite_uuid).await {
-                    Ok(suite) => suite,
-                    Err(OverrideItemError::Item(e)) => {
-                        return Err(Error::ApiError(ApiError::NotFound(e.msg)))
-                    }
-                    Err(OverrideItemError::Fatal(e)) => return Err(e),
-                };
+                let suite =
+                    match authorize_suite(txn, user_id, suite_uuid, UserGroupRole::Write).await {
+                        Ok(suite) => suite,
+                        Err(ResolveError::Item(e)) => {
+                            return Err(Error::ApiError(ApiError::NotFound(e.msg)))
+                        }
+                        Err(ResolveError::Fatal(e)) => return Err(e),
+                    };
 
                 let mut errors = HashMap::new();
                 for (agent_uuid, action) in req.overrides {
@@ -746,10 +718,10 @@ pub async fn user_override_agents_for_suite(
                     .await;
                     match outcome {
                         Ok(()) => {}
-                        Err(OverrideItemError::Item(e)) => {
+                        Err(ResolveError::Item(e)) => {
                             errors.insert(agent_uuid, e);
                         }
-                        Err(OverrideItemError::Fatal(e)) => {
+                        Err(ResolveError::Fatal(e)) => {
                             // Some db error occurred, roll back and error
                             return Err(e);
                         }

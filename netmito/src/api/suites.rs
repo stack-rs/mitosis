@@ -6,12 +6,13 @@ use axum::{
 };
 use uuid::Uuid;
 
+use super::map_service_error;
 use crate::{
     config::InfraPool,
     error::ApiError,
     schema::{
-        CancelTaskSuiteParam, CreateTaskSuiteReq, CreateTaskSuiteResp, SuiteAgentSelectionReq,
-        SuiteAgentSelectionResp, TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp,
+        CancelTaskSuiteParam, CreateTaskSuiteReq, CreateTaskSuiteResp, SuiteAgentOverrideReq,
+        SuiteAgentOverrideResp, TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp,
     },
     service::{
         self,
@@ -25,24 +26,12 @@ pub fn suites_router(st: InfraPool) -> Router<InfraPool> {
         .route("/query", post(query_suites))
         .route("/{uuid}", get(get_suite_details).delete(cancel_suite))
         .route("/{uuid}/close", post(close_suite))
-        .route("/{uuid}/agents/selection", post(select_suite_agents))
+        .route("/{uuid}/agents/override", post(override_agents_for_suite))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
         ))
         .with_state(st)
-}
-
-/// Map a service-layer error onto the API error surface.
-fn map_service_error(e: crate::error::Error) -> ApiError {
-    match e {
-        crate::error::Error::AuthError(err) => ApiError::AuthError(err),
-        crate::error::Error::ApiError(e) => e,
-        _ => {
-            tracing::error!("{}", e);
-            ApiError::InternalServerError
-        }
-    }
 }
 
 pub async fn create_suite(
@@ -101,13 +90,13 @@ pub async fn cancel_suite(
     Ok(())
 }
 
-pub async fn select_suite_agents(
+pub async fn override_agents_for_suite(
     Extension(u): Extension<AuthUser>,
     State(pool): State<InfraPool>,
     Path(uuid): Path<Uuid>,
-    Json(req): Json<SuiteAgentSelectionReq>,
-) -> Result<Json<SuiteAgentSelectionResp>, ApiError> {
-    let resp = service::suite::user_add_agents_to_suite(u.id, &pool, uuid, req)
+    Json(req): Json<SuiteAgentOverrideReq>,
+) -> Result<Json<SuiteAgentOverrideResp>, ApiError> {
+    let resp = service::suite::user_override_agents_for_suite(u.id, &pool, uuid, req)
         .await
         .map_err(map_service_error)?;
     Ok(Json(resp))

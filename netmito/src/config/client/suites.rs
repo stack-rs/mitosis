@@ -25,12 +25,8 @@ pub enum SuitesCommands {
     Close(GetSuiteArgs),
     /// Cancel a task suite (terminal; cancels its pending tasks)
     Cancel(CancelSuiteArgs),
-    /// Manually include an agent in a suite (pin it even if it does not tag-match)
-    IncludeAgent(SuiteAgentArgs),
-    /// Manually exclude an agent from a suite (block it even if it tag-matches)
-    ExcludeAgent(SuiteAgentArgs),
-    /// Reset an agent to the tag-match default, clearing any manual include/exclude
-    ResetAgent(SuiteAgentArgs),
+    /// Set agent overrides on a suite in one batch: include, exclude, and/or clear agents
+    Override(AgentsForSuiteOverrideArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -148,9 +144,16 @@ pub struct CancelSuiteArgs {
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
-pub struct SuiteAgentArgs {
+pub struct AgentsForSuiteOverrideArgs {
     /// The UUID of the suite
     pub uuid: Uuid,
-    /// The UUID of the agent
-    pub agent: Uuid,
+    /// Agents to manually include (pin them even if they do not tag-match)
+    #[arg(long, num_args = 0.., value_delimiter = ',')]
+    pub include: Vec<Uuid>,
+    /// Agents to manually exclude (block them even if they tag-match)
+    #[arg(long, num_args = 0.., value_delimiter = ',')]
+    pub exclude: Vec<Uuid>,
+    /// Agents to reset to the tag-match default (clear any manual include/exclude)
+    #[arg(long, num_args = 0.., value_delimiter = ',')]
+    pub clear: Vec<Uuid>,
 }

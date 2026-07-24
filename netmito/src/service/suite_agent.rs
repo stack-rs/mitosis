@@ -1,4 +1,4 @@
-use sea_orm::{prelude::*, ConnectionTrait, Set};
+use sea_orm::{prelude::*, ConnectionTrait, QuerySelect, Set};
 use uuid::Uuid;
 
 use crate::entity::role::UserGroupRole;
@@ -6,70 +6,68 @@ use crate::entity::{
     agents as Agent, group_agent as GroupAgent, task_suite_agent as TaskSuiteAgent,
     task_suites as TaskSuites, user_group as UserGroup,
 };
-use crate::error::Error;
-use crate::schema::{SuiteAgentSelectionAction, SuiteAgentSelectionError};
+use crate::error::{Error, ErrorMsg};
+use crate::schema::SuiteAgentOverrideAction;
 
-/// Outcome of applying one entry in a batch selection: either a per-item failure to
+/// Outcome of applying one entry in a batch override: either a per-item failure to
 /// report back to the caller (`Item`) or a fatal infrastructure error that must abort
 /// the whole batch (`Fatal`). The `From` impls let the resolve/apply primitives use `?`
 /// on DB errors and have them treated as fatal automatically.
-pub(crate) enum SelectionItemError {
-    Item(SuiteAgentSelectionError),
+pub(crate) enum OverrideItemError {
+    Item(ErrorMsg),
     Fatal(Error),
 }
 
-impl From<Error> for SelectionItemError {
+impl From<Error> for OverrideItemError {
     fn from(e: Error) -> Self {
-        SelectionItemError::Fatal(e)
+        OverrideItemError::Fatal(e)
     }
 }
 
-impl From<DbErr> for SelectionItemError {
+impl From<DbErr> for OverrideItemError {
     fn from(e: DbErr) -> Self {
-        SelectionItemError::Fatal(Error::from(e))
+        OverrideItemError::Fatal(Error::from(e))
     }
 }
 
-/// Resolve a suite for a suite agent selection, authorizing the caller's Write role on the
+/// Resolve a suite for a suite agent override, authorizing the caller's Write role on the
 /// suite's owner group.
 pub(crate) async fn authorize_suite<C>(
     txn: &C,
     user_id: i64,
     suite_uuid: Uuid,
-) -> std::result::Result<TaskSuites::Model, SelectionItemError>
+) -> std::result::Result<TaskSuites::Model, OverrideItemError>
 where
     C: ConnectionTrait,
 {
-    let suite = TaskSuites::Entity::find()
+    TaskSuites::Entity::find()
         .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
-        .one(txn)
-        .await?
-        .ok_or(SelectionItemError::Item(
-            SuiteAgentSelectionError::SuiteNotFound,
-        ))?;
-
-    let authorized = UserGroup::Entity::find()
         .filter(UserGroup::Column::UserId.eq(user_id))
-        .filter(UserGroup::Column::GroupId.eq(suite.group_id))
+        .filter(UserGroup::Column::Role.gte(UserGroupRole::Write))
+        .join(
+            sea_orm::JoinType::InnerJoin,
+            TaskSuites::Entity::belongs_to(UserGroup::Entity)
+                .from(TaskSuites::Column::GroupId)
+                .to(UserGroup::Column::GroupId)
+                .into(),
+        )
         .one(txn)
         .await?
-        .map(|ug| ug.role >= UserGroupRole::Write)
-        .unwrap_or(false);
-    if !authorized {
-        return Err(SelectionItemError::Item(
-            SuiteAgentSelectionError::NoWriteAccessOnSuite,
-        ));
-    }
-
-    Ok(suite)
+        .ok_or_else(|| {
+            OverrideItemError::Item(ErrorMsg {
+                msg: format!(
+                    "Suite {suite_uuid} does not exist or the user does not have permission to manage it"
+                ),
+            })
+        })
 }
 
-/// Resolve an agent by uuid for a selection batch. Existence only; the group→agent
-/// access check happens in [`apply_suite_agent_selection`].
+/// Resolve an agent by uuid for an override batch. Existence only; the group→agent
+/// access check happens in [`apply_suite_agent_override`].
 pub(crate) async fn resolve_agent<C>(
     txn: &C,
     agent_uuid: Uuid,
-) -> std::result::Result<Agent::Model, SelectionItemError>
+) -> std::result::Result<Agent::Model, OverrideItemError>
 where
     C: ConnectionTrait,
 {
@@ -77,27 +75,29 @@ where
         .filter(Agent::Column::Uuid.eq(agent_uuid))
         .one(txn)
         .await?
-        .ok_or(SelectionItemError::Item(
-            SuiteAgentSelectionError::AgentNotFound,
-        ))
+        .ok_or_else(|| {
+            OverrideItemError::Item(ErrorMsg {
+                msg: format!("Agent {} not found", agent_uuid),
+            })
+        })
 }
 
-/// Apply one selection override for an already-resolved (suite, agent) pair: enforce
+/// Apply one override for an already-resolved (suite, agent) pair: enforce
 /// the suite group's write access to the agent, then upsert (`Include`/`Exclude`) or
-/// clear (`Match`) the override.
-pub(crate) async fn apply_suite_agent_selection<C>(
+/// clear (`Clear`) the override.
+pub(crate) async fn apply_suite_agent_override<C>(
     txn: &C,
     user_id: i64,
     suite: &TaskSuites::Model,
     agent: &Agent::Model,
-    action: SuiteAgentSelectionAction,
+    action: SuiteAgentOverrideAction,
     now: TimeDateTimeWithTimeZone,
-) -> std::result::Result<(), SelectionItemError>
+) -> std::result::Result<(), OverrideItemError>
 where
     C: ConnectionTrait,
 {
     // The suite's group must have write access to the agent (enforced for all actions,
-    // including Match, unlike the legacy single-agent reset which skipped this check).
+    // including Clear, unlike the legacy single-agent reset which skipped this check).
     let has_access = GroupAgent::Entity::find()
         .filter(GroupAgent::Column::GroupId.eq(suite.group_id))
         .filter(GroupAgent::Column::AgentId.eq(agent.id))
@@ -106,9 +106,9 @@ where
         .map(|ga| ga.role.has_write_access())
         .unwrap_or(false);
     if !has_access {
-        return Err(SelectionItemError::Item(
-            SuiteAgentSelectionError::NoWriteAccessOnAgent,
-        ));
+        return Err(OverrideItemError::Item(ErrorMsg {
+            msg: "Suite group has no write access to agent".to_string(),
+        }));
     }
 
     let existing = TaskSuiteAgent::Entity::find()

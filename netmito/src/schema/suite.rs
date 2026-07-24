@@ -198,55 +198,43 @@ pub enum CancelTaskSuiteOp {
 /// One entry's desired outcome in a batch agent-selection request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SuiteAgentSelectionAction {
+pub enum SuiteAgentOverrideAction {
     /// Pin the agent to the suite even if it does not tag-match (manual include).
     Include,
     /// Block the agent from the suite even if it tag-matches (manual exclude).
     Exclude,
     /// Clear any manual override, falling back to tag-matching.
-    Match,
+    Clear,
 }
 
-impl SuiteAgentSelectionAction {
-    /// The persisted selection type this action maps to, or `None` for `Match`
+impl SuiteAgentOverrideAction {
+    /// The persisted selection type this action maps to, or `None` for `Clear`
     /// (which clears the override).
     pub fn selection_type(
         self,
     ) -> Option<crate::entity::task_suite_agent::SuiteAgentSelectionType> {
-        use crate::entity::task_suite_agent::SuiteAgentSelectionType::{
-            UserExcluded, UserIncluded,
-        };
         match self {
-            Self::Include => Some(UserIncluded),
-            Self::Exclude => Some(UserExcluded),
-            Self::Match => None,
+            Self::Include => {
+                Some(crate::entity::task_suite_agent::SuiteAgentSelectionType::UserIncluded)
+            }
+            Self::Exclude => {
+                Some(crate::entity::task_suite_agent::SuiteAgentSelectionType::UserExcluded)
+            }
+            Self::Clear => None,
         }
     }
 }
 
-/// Batch request to set agent-selection overrides. Keyed by the "other" entity's UUID
+/// Batch request to set agent-suite matching overrides. Keyed by the "other" entity's UUID
 /// (agent UUIDs for a fixed suite; suite UUIDs for a fixed agent in the reverse endpoint).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SuiteAgentSelectionReq {
-    pub selection: HashMap<Uuid, SuiteAgentSelectionAction>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SuiteAgentSelectionError {
-    /// No agent exists with this UUID. (For use in batch adding multiple agents to one suite)
-    AgentNotFound,
-    /// The suite's group has no write access to the agent.
-    NoWriteAccessOnAgent,
-    /// No suite exists with this UUID, (For use in batch adding one agent to multiple suites)
-    SuiteNotFound,
-    /// The user's group has no write access to the suite
-    NoWriteAccessOnSuite,
+pub struct SuiteAgentOverrideReq {
+    pub overrides: HashMap<Uuid, SuiteAgentOverrideAction>,
 }
 
 /// Batch response: entries that could not be applied, keyed by the same UUID as the
 /// request. An empty map means every entry succeeded.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SuiteAgentSelectionResp {
-    pub failed: HashMap<Uuid, SuiteAgentSelectionError>,
+pub struct SuiteAgentOverrideResp {
+    pub errors: HashMap<Uuid, crate::error::ErrorMsg>,
 }

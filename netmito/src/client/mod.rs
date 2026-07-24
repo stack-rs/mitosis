@@ -830,24 +830,48 @@ impl MitoClient {
             .await
     }
 
-    /// Apply a single-agent selection override, reporting the per-agent outcome. Backed
-    /// by the batch endpoint with a one-entry request.
-    async fn suites_select_agent(
-        &mut self,
-        args: SuiteAgentArgs,
-        action: SuiteAgentSelectionAction,
-    ) {
-        let (suite, agent) = (args.uuid, args.agent);
-        let selection = HashMap::from([(agent, action)]);
-        match self.http_client.select_suite_agents(suite, selection).await {
-            Ok(resp) => match resp.failed.get(&agent) {
-                Some(err) => {
-                    tracing::error!(
-                        "Failed to apply {action:?} to agent {agent} on suite {suite}: {err:?}"
-                    )
+    /// Batch-apply agent overrides on a suite from separate include/exclude/clear lists,
+    /// reporting per-agent outcomes. Backed by the batch endpoint in a single request.
+    async fn suites_override_agents(&mut self, args: AgentsForSuiteOverrideArgs) {
+        let suite = args.uuid;
+        let mut overrides: HashMap<Uuid, SuiteAgentOverrideAction> = HashMap::new();
+        let mut conflicts: Vec<Uuid> = Vec::new();
+        for (agents, action) in [
+            (args.include, SuiteAgentOverrideAction::Include),
+            (args.exclude, SuiteAgentOverrideAction::Exclude),
+            (args.clear, SuiteAgentOverrideAction::Clear),
+        ] {
+            for agent in agents {
+                if let Some(prev) = overrides.insert(agent, action) {
+                    if prev != action {
+                        conflicts.push(agent);
+                    }
                 }
-                None => tracing::info!("Applied {action:?} to agent {agent} on suite {suite}"),
-            },
+            }
+        }
+        if !conflicts.is_empty() {
+            tracing::error!(
+                "Agents listed under conflicting overrides: {conflicts:?}. Aborting; no changes applied."
+            );
+            return;
+        }
+        if overrides.is_empty() {
+            tracing::warn!("No agents specified; nothing to do");
+            return;
+        }
+        match self
+            .http_client
+            .override_agents_for_suite(suite, overrides)
+            .await
+        {
+            Ok(resp) => {
+                for (agent, err) in &resp.errors {
+                    tracing::error!(
+                        "Failed to override agent {agent} on suite {suite}: {}",
+                        err.msg
+                    );
+                }
+            }
             Err(e) => tracing::error!("{}", e),
         }
     }
@@ -2055,17 +2079,8 @@ impl MitoClient {
                         tracing::error!("{}", e);
                     }
                 },
-                SuitesCommands::IncludeAgent(args) => {
-                    self.suites_select_agent(args, SuiteAgentSelectionAction::Include)
-                        .await;
-                }
-                SuitesCommands::ExcludeAgent(args) => {
-                    self.suites_select_agent(args, SuiteAgentSelectionAction::Exclude)
-                        .await;
-                }
-                SuitesCommands::ResetAgent(args) => {
-                    self.suites_select_agent(args, SuiteAgentSelectionAction::Match)
-                        .await;
+                SuitesCommands::Override(args) => {
+                    self.suites_override_agents(args).await;
                 }
             },
             ClientCommand::Quit => {

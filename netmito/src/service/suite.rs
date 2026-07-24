@@ -6,7 +6,7 @@ use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, Set, TransactionTrai
 use uuid::Uuid;
 
 use super::suite_agent::{
-    apply_suite_agent_selection, authorize_suite, resolve_agent, SelectionItemError,
+    apply_suite_agent_override, authorize_suite, resolve_agent, OverrideItemError,
 };
 use crate::config::InfraPool;
 use crate::entity::role::UserGroupRole;
@@ -20,9 +20,9 @@ use crate::entity::{
 use crate::error::{ApiError, AuthError, Error, Result};
 use crate::schema::{
     CancelTaskSuiteOp, CountQuery, CreateTaskSuiteReq, CreateTaskSuiteResp, ExecHooks,
-    ParsedTaskSuiteInfo, SuiteAgentSelectionError, SuiteAgentSelectionReq, SuiteAgentSelectionResp,
-    TaskResultMessage, TaskResultSpec, TaskSuiteInfo, TaskSuiteQueryResp, TaskSuitesQueryReq,
-    TaskSuitesQueryResp, WorkerSchedulePlan,
+    ParsedTaskSuiteInfo, SuiteAgentOverrideReq, SuiteAgentOverrideResp, TaskResultMessage,
+    TaskResultSpec, TaskSuiteInfo, TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp,
+    WorkerSchedulePlan,
 };
 use crate::service::task::{parse_operators_with_number, OperatorWithNumber};
 
@@ -712,62 +712,51 @@ pub async fn user_cancel_task_suite(
     Ok(())
 }
 
-/// Batch-apply agent-selection overrides for a single suite. The suite is resolved once
+/// Batch-apply agent overrides for a single suite. The suite is resolved once
 /// (requiring the caller's Write role on its group); each agent is then resolved and
 /// applied independently. Per-agent failures are collected into the response rather than
 /// aborting the batch; only genuine DB errors roll the whole transaction back.
-pub async fn user_add_agents_to_suite(
+pub async fn user_override_agents_for_suite(
     user_id: i64,
     pool: &InfraPool,
     suite_uuid: Uuid,
-    req: SuiteAgentSelectionReq,
-) -> Result<SuiteAgentSelectionResp> {
+    req: SuiteAgentOverrideReq,
+) -> Result<SuiteAgentOverrideResp> {
     let now = TimeDateTimeWithTimeZone::now_utc();
 
-    let failed = pool
+    let errors = pool
         .db
-        .transaction::<_, HashMap<Uuid, SuiteAgentSelectionError>, Error>(|txn| {
+        .transaction::<_, HashMap<Uuid, crate::error::ErrorMsg>, Error>(|txn| {
             Box::pin(async move {
                 // The suite is fixed for the whole batch, so a suite-level failure is request-level
                 let suite = match authorize_suite(txn, user_id, suite_uuid).await {
                     Ok(suite) => suite,
-                    Err(SelectionItemError::Item(SuiteAgentSelectionError::SuiteNotFound)) => {
-                        return Err(Error::ApiError(ApiError::NotFound(format!(
-                            "Task suite with uuid {suite_uuid} not found"
-                        ))));
+                    Err(OverrideItemError::Item(e)) => {
+                        return Err(Error::ApiError(ApiError::NotFound(e.msg)))
                     }
-                    Err(SelectionItemError::Item(
-                        SuiteAgentSelectionError::NoWriteAccessOnSuite,
-                    )) => {
-                        return Err(Error::AuthError(AuthError::PermissionDenied));
-                    }
-                    Err(SelectionItemError::Item(_)) => {
-                        // The rest two failure should not happen here
-                        return Err(Error::ApiError(ApiError::InternalServerError));
-                    }
-                    Err(SelectionItemError::Fatal(e)) => return Err(e),
+                    Err(OverrideItemError::Fatal(e)) => return Err(e),
                 };
 
-                let mut failed = HashMap::new();
-                for (agent_uuid, action) in req.selection {
+                let mut errors = HashMap::new();
+                for (agent_uuid, action) in req.overrides {
                     let outcome = async {
                         let agent = resolve_agent(txn, agent_uuid).await?;
-                        apply_suite_agent_selection(txn, user_id, &suite, &agent, action, now).await
+                        apply_suite_agent_override(txn, user_id, &suite, &agent, action, now).await
                     }
                     .await;
                     match outcome {
                         Ok(()) => {}
-                        Err(SelectionItemError::Item(e)) => {
-                            failed.insert(agent_uuid, e);
+                        Err(OverrideItemError::Item(e)) => {
+                            errors.insert(agent_uuid, e);
                         }
-                        Err(SelectionItemError::Fatal(e)) => {
+                        Err(OverrideItemError::Fatal(e)) => {
                             // Some db error occurred, roll back and error
                             return Err(e);
                         }
                     }
                 }
 
-                Ok(failed)
+                Ok(errors)
             })
         })
         .await?;
@@ -775,5 +764,5 @@ pub async fn user_add_agents_to_suite(
     // TODO: the manual overrides just changed the effective agent set. Once the
     // scheduler exists, trigger a recompute for this suite.
 
-    Ok(SuiteAgentSelectionResp { failed })
+    Ok(SuiteAgentOverrideResp { errors })
 }

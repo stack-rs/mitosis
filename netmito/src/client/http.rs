@@ -1412,26 +1412,26 @@ impl MitoHttpClient {
         }
     }
 
-    /// Batch-set agent selection overrides on a suite. Each entry pins (`Include`),
-    /// blocks (`Exclude`), or clears the override for (`Match`) one agent.
-    pub async fn select_suite_agents(
+    /// Batch-set agent overrides on a suite. Each entry pins (`Include`),
+    /// blocks (`Exclude`), or clears the override for (`Clear`) one agent.
+    pub async fn override_agents_for_suite(
         &mut self,
-        uuid: Uuid,
-        selection: HashMap<Uuid, SuiteAgentSelectionAction>,
-    ) -> crate::error::Result<SuiteAgentSelectionResp> {
+        suite_uuid: Uuid,
+        overrides: HashMap<Uuid, SuiteAgentOverrideAction>,
+    ) -> crate::error::Result<SuiteAgentOverrideResp> {
         self.url
-            .set_path(&format!("suites/{uuid}/agents/selection"));
+            .set_path(&format!("suites/{suite_uuid}/agents/override"));
         let resp = self
             .http_client
             .post(self.url.as_str())
             .bearer_auth(&self.credential)
-            .json(&SuiteAgentSelectionReq { selection })
+            .json(&SuiteAgentOverrideReq { overrides })
             .send()
             .await
             .map_err(map_reqwest_err)?;
         if resp.status().is_success() {
             let resp = resp
-                .json::<SuiteAgentSelectionResp>()
+                .json::<SuiteAgentOverrideResp>()
                 .await
                 .map_err(RequestError::from)?;
             Ok(resp)

@@ -77,6 +77,19 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
     router
 }
 
+/// Map a service-layer error onto the API error surface.
+// TODO: let modules other than suites using this function.
+fn map_service_error(e: crate::error::Error) -> ApiError {
+    match e {
+        crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+        crate::error::Error::ApiError(e) => e,
+        _ => {
+            tracing::error!("{}", e);
+            ApiError::InternalServerError
+        }
+    }
+}
+
 pub async fn query_redis_connection_info(
     Extension(_): Extension<AuthUser>,
 ) -> Result<Json<RedisConnectionInfo>, ApiError> {

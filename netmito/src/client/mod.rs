@@ -850,8 +850,13 @@ impl MitoClient {
             }
         }
         if !conflicts.is_empty() {
+            let conflicts = conflicts
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             tracing::error!(
-                "Agents listed under conflicting overrides: {conflicts:?}. Aborting; no changes applied."
+                "Agents listed under conflicting overrides: {conflicts}. Aborting; no changes applied."
             );
             return;
         }

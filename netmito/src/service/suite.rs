@@ -2,22 +2,20 @@ use std::collections::HashMap;
 
 use sea_orm::sea_query::extension::postgres::PgExpr;
 use sea_orm::sea_query::{Alias, PgFunc, Query};
-use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, QuerySelect, Set, TransactionTrait};
+use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, Set, TransactionTrait};
 use uuid::Uuid;
 
-use super::suite_agent::{
-    apply_suite_agent_override, authorize_suite, resolve_agent, ResolveError,
-};
+use super::suite_agent::{apply_suite_agent_override, authorize_suite, resolve_agent};
 use crate::config::InfraPool;
 use crate::entity::role::UserGroupRole;
 use crate::entity::state::{TaskState, TaskSuiteState};
-use crate::entity::task_suite_agent::SuiteAgentSelectionType;
+use crate::entity::task_suite_agent::SuiteAgentOverrideType;
 use crate::entity::{
     active_tasks as ActiveTasks, agents as Agent, archived_tasks as ArchivedTasks, groups as Group,
     task_suite_agent as TaskSuiteAgent, task_suites as TaskSuites, user_group as UserGroup,
     users as User,
 };
-use crate::error::{ApiError, Error, Result};
+use crate::error::{ApiError, Error, ResolveError, Result};
 use crate::schema::{
     CancelTaskSuiteOp, CountQuery, CreateTaskSuiteReq, CreateTaskSuiteResp, ExecHooks,
     ParsedTaskSuiteInfo, SuiteAgentOverrideReq, SuiteAgentOverrideResp, TaskResultMessage,
@@ -25,6 +23,11 @@ use crate::schema::{
     WorkerSchedulePlan,
 };
 use crate::service::task::{parse_operators_with_number, OperatorWithNumber};
+
+#[derive(FromQueryResult)]
+struct GroupIdResult {
+    id: i64,
+}
 
 pub async fn user_create_task_suite(
     user_id: i64,
@@ -44,26 +47,17 @@ pub async fn user_create_task_suite(
     match &worker_schedule {
         // TODO: this should finally be adjusted to some more flexible definitions
         WorkerSchedulePlan::FixedWorkers {
-            worker_count,
-            task_prefetch_count,
+            worker_count: _worker_count,
+            task_prefetch_count: _task_prefetch_count,
             ..
         } => {
-            if *worker_count < 1 || *worker_count > 256 {
-                return Err(Error::ApiError(ApiError::InvalidRequest(
-                    "worker_count must be between 1 and 256".to_string(),
-                )));
-            }
-            if *task_prefetch_count == 0 {
-                return Err(Error::ApiError(ApiError::InvalidRequest(
-                    "task_prefetch_count must be > 0".to_string(),
-                )));
-            }
+            // TODO: validate the request
         }
     }
 
     if group_name.is_empty() {
         return Err(Error::ApiError(ApiError::InvalidRequest(
-            "group_name is required".to_string(),
+            "Group name cannot be empty".to_string(),
         )));
     }
 
@@ -72,17 +66,23 @@ pub async fn user_create_task_suite(
     let now = TimeDateTimeWithTimeZone::now_utc();
 
     // Resolve the owning group and authorize the caller's Write role.
-    let group = Group::Entity::find()
-        .filter(Group::Column::GroupName.eq(&group_name))
-        .filter(UserGroup::Column::UserId.eq(user_id))
-        .filter(UserGroup::Column::Role.gte(UserGroupRole::Write))
+    let builder = pool.db.get_database_backend();
+    let group_stmt = Query::select()
+        .column((Group::Entity, Group::Column::Id))
+        .from(Group::Entity)
         .join(
-            sea_orm::JoinType::InnerJoin,
-            Group::Entity::belongs_to(UserGroup::Entity)
-                .from(Group::Column::Id)
-                .to(UserGroup::Column::GroupId)
-                .into(),
+            sea_orm::JoinType::Join,
+            UserGroup::Entity,
+            Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
         )
+        .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()))
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+        .and_where(
+            Expr::col((UserGroup::Entity, UserGroup::Column::Role)).gte(UserGroupRole::Write),
+        )
+        .to_owned();
+    let group = GroupIdResult::find_by_statement(builder.build(&group_stmt))
         .one(&pool.db)
         .await?
         .ok_or(Error::ApiError(ApiError::NotFound(format!(
@@ -182,17 +182,23 @@ pub(crate) async fn check_task_suites_query(
     }
     if let Some(ref group_name) = query.group_name {
         // Check permission of user to group
-        let authorized = Group::Entity::find()
-            .filter(Group::Column::GroupName.eq(group_name))
-            .filter(UserGroup::Column::UserId.eq(user_id))
-            .filter(UserGroup::Column::Role.gte(UserGroupRole::Read))
+        let builder = pool.db.get_database_backend();
+        let stmt = Query::select()
+            .column((Group::Entity, Group::Column::Id))
+            .from(Group::Entity)
             .join(
-                sea_orm::JoinType::InnerJoin,
-                Group::Entity::belongs_to(UserGroup::Entity)
-                    .from(Group::Column::Id)
-                    .to(UserGroup::Column::GroupId)
-                    .into(),
+                sea_orm::JoinType::Join,
+                UserGroup::Entity,
+                Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))
+                    .eq(Expr::col((Group::Entity, Group::Column::Id))),
             )
+            .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()))
+            .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+            .and_where(
+                Expr::col((UserGroup::Entity, UserGroup::Column::Role)).gte(UserGroupRole::Read),
+            )
+            .to_owned();
+        let authorized = GroupIdResult::find_by_statement(builder.build(&stmt))
             .one(&pool.db)
             .await?
             .is_some();
@@ -205,11 +211,63 @@ pub(crate) async fn check_task_suites_query(
     Ok(())
 }
 
-/// Apply the `TaskSuitesQueryReq` filters to a suite select statement.
-fn apply_suite_filters(
-    stmt: &mut sea_orm::sea_query::SelectStatement,
-    query: &TaskSuitesQueryReq,
-) -> Result<()> {
+/// Query suites subject to a filter. Only returns suites in a group the caller can read.
+pub async fn user_query_task_suites(
+    user_id: i64,
+    pool: &InfraPool,
+    mut query: TaskSuitesQueryReq,
+) -> Result<TaskSuitesQueryResp> {
+    check_task_suites_query(user_id, pool, &mut query).await?;
+
+    let group_name = query.group_name.clone().unwrap();
+
+    let mut stmt = Query::select();
+    if query.count {
+        stmt.expr(Expr::col((TaskSuites::Entity, TaskSuites::Column::Uuid)).count());
+    } else {
+        stmt.columns([
+            (TaskSuites::Entity, TaskSuites::Column::Uuid),
+            (TaskSuites::Entity, TaskSuites::Column::Name),
+            (TaskSuites::Entity, TaskSuites::Column::Description),
+            (TaskSuites::Entity, TaskSuites::Column::Tags),
+            (TaskSuites::Entity, TaskSuites::Column::Labels),
+            (TaskSuites::Entity, TaskSuites::Column::Priority),
+            (TaskSuites::Entity, TaskSuites::Column::WorkerSchedule),
+            (TaskSuites::Entity, TaskSuites::Column::ExecHooks),
+            (TaskSuites::Entity, TaskSuites::Column::State),
+            (TaskSuites::Entity, TaskSuites::Column::LastTaskSubmittedAt),
+            (TaskSuites::Entity, TaskSuites::Column::TotalTasks),
+            (TaskSuites::Entity, TaskSuites::Column::IncompleteTasks),
+            (TaskSuites::Entity, TaskSuites::Column::CreatedAt),
+            (TaskSuites::Entity, TaskSuites::Column::UpdatedAt),
+            (TaskSuites::Entity, TaskSuites::Column::CompletedAt),
+        ])
+        .expr_as(
+            Expr::col((User::Entity, User::Column::Username)),
+            Alias::new("creator_username"),
+        )
+        .expr_as(
+            Expr::col((Group::Entity, Group::Column::GroupName)),
+            Alias::new("group_name"),
+        );
+    }
+
+    stmt.from(TaskSuites::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            User::Entity,
+            Expr::col((User::Entity, User::Column::Id)).eq(Expr::col((
+                TaskSuites::Entity,
+                TaskSuites::Column::CreatorId,
+            ))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((TaskSuites::Entity, TaskSuites::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        );
+
     if let Some(ref name) = query.name {
         stmt.and_where(Expr::col((TaskSuites::Entity, TaskSuites::Column::Name)).eq(name.clone()));
     }
@@ -278,67 +336,6 @@ fn apply_suite_filters(
     if let Some(offset) = query.offset {
         stmt.offset(offset);
     }
-    Ok(())
-}
-
-/// Query suites subject to a filter. Only returns suites in a group the caller can read.
-pub async fn user_query_task_suites(
-    user_id: i64,
-    pool: &InfraPool,
-    mut query: TaskSuitesQueryReq,
-) -> Result<TaskSuitesQueryResp> {
-    check_task_suites_query(user_id, pool, &mut query).await?;
-
-    let group_name = query.group_name.clone().unwrap();
-
-    let mut stmt = Query::select();
-    if query.count {
-        stmt.expr(Expr::col((TaskSuites::Entity, TaskSuites::Column::Uuid)).count());
-    } else {
-        stmt.columns([
-            (TaskSuites::Entity, TaskSuites::Column::Uuid),
-            (TaskSuites::Entity, TaskSuites::Column::Name),
-            (TaskSuites::Entity, TaskSuites::Column::Description),
-            (TaskSuites::Entity, TaskSuites::Column::Tags),
-            (TaskSuites::Entity, TaskSuites::Column::Labels),
-            (TaskSuites::Entity, TaskSuites::Column::Priority),
-            (TaskSuites::Entity, TaskSuites::Column::WorkerSchedule),
-            (TaskSuites::Entity, TaskSuites::Column::ExecHooks),
-            (TaskSuites::Entity, TaskSuites::Column::State),
-            (TaskSuites::Entity, TaskSuites::Column::LastTaskSubmittedAt),
-            (TaskSuites::Entity, TaskSuites::Column::TotalTasks),
-            (TaskSuites::Entity, TaskSuites::Column::IncompleteTasks),
-            (TaskSuites::Entity, TaskSuites::Column::CreatedAt),
-            (TaskSuites::Entity, TaskSuites::Column::UpdatedAt),
-            (TaskSuites::Entity, TaskSuites::Column::CompletedAt),
-        ])
-        .expr_as(
-            Expr::col((User::Entity, User::Column::Username)),
-            Alias::new("creator_username"),
-        )
-        .expr_as(
-            Expr::col((Group::Entity, Group::Column::GroupName)),
-            Alias::new("group_name"),
-        );
-    }
-
-    stmt.from(TaskSuites::Entity)
-        .join(
-            sea_orm::JoinType::Join,
-            User::Entity,
-            Expr::col((User::Entity, User::Column::Id)).eq(Expr::col((
-                TaskSuites::Entity,
-                TaskSuites::Column::CreatorId,
-            ))),
-        )
-        .join(
-            sea_orm::JoinType::Join,
-            Group::Entity,
-            Expr::col((TaskSuites::Entity, TaskSuites::Column::GroupId))
-                .eq(Expr::col((Group::Entity, Group::Column::Id))),
-        );
-
-    apply_suite_filters(&mut stmt, &query)?;
 
     let builder = pool.db.get_database_backend();
     if query.count {
@@ -483,11 +480,8 @@ pub async fn user_get_task_suite_by_uuid(
             Expr::col((TaskSuiteAgent::Entity, TaskSuiteAgent::Column::TaskSuiteId)).eq(suite.id),
         )
         .and_where(
-            Expr::col((
-                TaskSuiteAgent::Entity,
-                TaskSuiteAgent::Column::SelectionType,
-            ))
-            .eq(SuiteAgentSelectionType::UserIncluded),
+            Expr::col((TaskSuiteAgent::Entity, TaskSuiteAgent::Column::OverrideType))
+                .eq(SuiteAgentOverrideType::UserIncluded),
         )
         .to_owned();
 
@@ -602,19 +596,14 @@ pub async fn user_cancel_task_suite(
                 })
                 .inspect_err(|e| tracing::error!("{}", e))?;
 
-                // Archive every non-terminal task of the suite as Cancelled. With no
-                // agent layer yet, a suite's tasks only ever reach Ready/Pending; the
-                // Running/Finished states are included for forward-compatibility once
-                // agents execute them.
-                let tasks = ActiveTasks::Entity::find()
+                // Archive every non-terminal task of the suite as Cancelled:
+                let tasks = ActiveTasks::Entity::delete_many()
                     .filter(ActiveTasks::Column::TaskSuiteId.eq(suite.id))
-                    .filter(ActiveTasks::Column::State.is_in([
-                        TaskState::Pending,
-                        TaskState::Ready,
-                        TaskState::Running,
-                        TaskState::Finished,
-                    ]))
-                    .all(txn)
+                    .filter(
+                        ActiveTasks::Column::State
+                            .is_not_in([TaskState::Cancelled, TaskState::Unknown]),
+                    )
+                    .exec_with_returning(txn)
                     .await?;
 
                 // The inflight subset is the only set tied to an executing agent: each
@@ -631,7 +620,6 @@ pub async fn user_cancel_task_suite(
 
                 let cancelled_count = tasks.len() as u64;
                 if !tasks.is_empty() {
-                    let task_ids: Vec<i64> = tasks.iter().map(|t| t.id).collect();
                     let archived: Vec<ArchivedTasks::ActiveModel> = tasks
                         .into_iter()
                         .map(|task| ArchivedTasks::ActiveModel {
@@ -656,10 +644,6 @@ pub async fn user_cancel_task_suite(
                         })
                         .collect();
 
-                    ActiveTasks::Entity::delete_many()
-                        .filter(ActiveTasks::Column::Id.is_in(task_ids))
-                        .exec(txn)
-                        .await?;
                     ArchivedTasks::Entity::insert_many(archived)
                         .exec(txn)
                         .await?;

@@ -12,7 +12,7 @@ pub struct Model {
     pub id: i64,
     pub task_suite_id: i64,
     pub agent_id: i64,
-    pub selection_type: SuiteAgentSelectionType,
+    pub override_type: SuiteAgentOverrideType,
     /// Nullable so the creator FK can be `on_delete=SetNull`.
     pub creator_id: Option<i64>,
     pub created_at: TimeDateTimeWithTimeZone,
@@ -67,21 +67,21 @@ impl Related<super::users::Entity> for Entity {
 
 impl ActiveModelBehavior for ActiveModel {}
 
-/// How an agent came to be associated with a task suite.
+/// User's manual override over whether an agent should be assoiated with a suite
 #[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
-pub enum SuiteAgentSelectionType {
+pub enum SuiteAgentOverrideType {
     /// Agent was manually selected by user
     UserIncluded = 0,
     /// Agent was manually excluded by user
     UserExcluded = 1,
 }
 
-impl Display for SuiteAgentSelectionType {
+impl Display for SuiteAgentOverrideType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SuiteAgentSelectionType::UserIncluded => write!(f, "UserIncluded"),
-            SuiteAgentSelectionType::UserExcluded => write!(f, "UserExcluded"),
+            SuiteAgentOverrideType::UserIncluded => write!(f, "UserIncluded"),
+            SuiteAgentOverrideType::UserExcluded => write!(f, "UserExcluded"),
         }
     }
 }

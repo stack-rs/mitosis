@@ -3,7 +3,7 @@ use sea_orm::sea_query::{
     InsertStatement, PgFunc, Query,
 };
 use sea_orm::ActiveValue::NotSet;
-use sea_orm::{prelude::*, FromQueryResult, QuerySelect, Set, TransactionTrait};
+use sea_orm::{prelude::*, FromQueryResult, Set, TransactionTrait};
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -97,28 +97,29 @@ async fn internal_submit_task(
                         None => {
                             // No suite: resolve the user-specified group, verify the caller's
                             // membership, and bump its task counter in one statement.
-                            let group = Group::Entity::update_many()
+                            let mut upd = Group::Entity::update_many()
                                 .col_expr(
                                     Group::Column::TaskCount,
-                                    Expr::col(Group::Column::TaskCount).add(1),
+                                    Expr::col((Group::Entity, Group::Column::TaskCount)).add(1),
                                 )
                                 .col_expr(Group::Column::UpdatedAt, Expr::value(now))
                                 .filter(Group::Column::GroupName.eq(&group_name))
                                 .filter(
-                                    Group::Column::Id.in_subquery(
-                                        Query::select()
-                                            .column((UserGroup::Entity, UserGroup::Column::GroupId))
-                                            .from(UserGroup::Entity)
-                                            .and_where(
-                                                Expr::col((
-                                                    UserGroup::Entity,
-                                                    UserGroup::Column::UserId,
-                                                ))
-                                                .eq(creator_id),
-                                            )
-                                            .to_owned(),
-                                    ),
+                                    Expr::col((UserGroup::Entity, UserGroup::Column::UserId))
+                                        .eq(creator_id),
                                 )
+                                // TODO: when there is 'exec' access level, enforce access check here.
+                                //
+                                // .filter(
+                                //     Expr::col((UserGroup::Entity, UserGroup::Column::Role))
+                                //         .gte(UserGroupRole::Write),
+                                // )
+                                .filter(
+                                    Expr::col((Group::Entity, Group::Column::Id))
+                                        .equals((UserGroup::Entity, UserGroup::Column::GroupId)),
+                                );
+                            upd.query().from(UserGroup::Entity);
+                            let group = upd
                                 .exec_with_returning(txn)
                                 .await?
                                 .into_iter()
@@ -134,24 +135,59 @@ async fn internal_submit_task(
                         Some(suite_uuid) => {
                             // Suite designated: resolve it (and the caller's membership in its
                             // owning group) in one join. The suite is authoritative for the group.
-                            let suite = TaskSuites::Entity::find()
-                                .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
-                                .filter(UserGroup::Column::UserId.eq(creator_id))
+                            let builder = txn.get_database_backend();
+                            let suite_stmt = Query::select()
+                                .columns([
+                                    (TaskSuites::Entity, TaskSuites::Column::Id),
+                                    (TaskSuites::Entity, TaskSuites::Column::Uuid),
+                                    (TaskSuites::Entity, TaskSuites::Column::Name),
+                                    (TaskSuites::Entity, TaskSuites::Column::Description),
+                                    (TaskSuites::Entity, TaskSuites::Column::GroupId),
+                                    (TaskSuites::Entity, TaskSuites::Column::CreatorId),
+                                    (TaskSuites::Entity, TaskSuites::Column::Tags),
+                                    (TaskSuites::Entity, TaskSuites::Column::Labels),
+                                    (TaskSuites::Entity, TaskSuites::Column::Priority),
+                                    (TaskSuites::Entity, TaskSuites::Column::WorkerSchedule),
+                                    (TaskSuites::Entity, TaskSuites::Column::ExecHooks),
+                                    (TaskSuites::Entity, TaskSuites::Column::State),
+                                    (TaskSuites::Entity, TaskSuites::Column::LastTaskSubmittedAt),
+                                    (TaskSuites::Entity, TaskSuites::Column::TotalTasks),
+                                    (TaskSuites::Entity, TaskSuites::Column::IncompleteTasks),
+                                    (TaskSuites::Entity, TaskSuites::Column::CreatedAt),
+                                    (TaskSuites::Entity, TaskSuites::Column::UpdatedAt),
+                                    (TaskSuites::Entity, TaskSuites::Column::CompletedAt),
+                                ])
+                                .from(TaskSuites::Entity)
                                 .join(
-                                    sea_orm::JoinType::InnerJoin,
-                                    TaskSuites::Entity::belongs_to(UserGroup::Entity)
-                                        .from(TaskSuites::Column::GroupId)
-                                        .to(UserGroup::Column::GroupId)
-                                        .into(),
+                                    sea_orm::JoinType::Join,
+                                    UserGroup::Entity,
+                                    Expr::col((UserGroup::Entity, UserGroup::Column::GroupId)).eq(
+                                        Expr::col((
+                                            TaskSuites::Entity,
+                                            TaskSuites::Column::GroupId,
+                                        )),
+                                    ),
                                 )
-                                .one(txn)
-                                .await?
-                                .ok_or_else(|| {
-                                    Error::ApiError(crate::error::ApiError::NotFound(format!(
-                                        "Suite with UUID {} not found or user does not have access to it",
-                                        suite_uuid
-                                    )))
-                                })?;
+                                .and_where(
+                                    Expr::col((TaskSuites::Entity, TaskSuites::Column::Uuid))
+                                        .eq(suite_uuid),
+                                )
+                                .and_where(
+                                    Expr::col((UserGroup::Entity, UserGroup::Column::UserId))
+                                        .eq(creator_id),
+                                )
+                                .to_owned();
+                            let suite = TaskSuites::Model::find_by_statement(
+                                builder.build(&suite_stmt),
+                            )
+                            .one(txn)
+                            .await?
+                            .ok_or_else(|| {
+                                Error::ApiError(crate::error::ApiError::NotFound(format!(
+                                    "Suite with UUID {} not found or user does not have access to it",
+                                    suite_uuid
+                                )))
+                            })?;
                             // The suite must be able to accept new tasks.
                             if !suite.state.can_accept_tasks() {
                                 return Err(Error::ApiError(
@@ -174,11 +210,13 @@ async fn internal_submit_task(
                                 .into_iter()
                                 .next()
                                 .ok_or_else(|| {
-                                    // The suite's group row must exist (FK), so this is internal.
-                                    Error::Custom(format!(
+                                    // The suite's group row must exist (FK)
+                                    tracing::error!(
                                         "Owning group {} of suite {} not found",
-                                        suite.group_id, suite_uuid
-                                    ))
+                                        suite.group_id,
+                                        suite_uuid
+                                    );
+                                    Error::ApiError(crate::error::ApiError::InternalServerError)
                                 })?;
                             // The request's group_name must match the suite's owning group.
                             // Safe to reveal the real group: access to the suite is proven.

@@ -1,4 +1,5 @@
-use sea_orm::{prelude::*, ConnectionTrait, QuerySelect, Set};
+use sea_orm::sea_query::Query;
+use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, Set};
 use uuid::Uuid;
 
 use crate::entity::role::UserGroupRole;
@@ -6,29 +7,8 @@ use crate::entity::{
     agents as Agent, group_agent as GroupAgent, task_suite_agent as TaskSuiteAgent,
     task_suites as TaskSuites, user_group as UserGroup,
 };
-use crate::error::{Error, ErrorMsg};
+use crate::error::{ErrorMsg, ResolveError};
 use crate::schema::SuiteAgentOverrideAction;
-
-/// Outcome of applying one entry in a batch override: either a per-item failure to
-/// report back to the caller (`Item`) or a fatal infrastructure error that must abort
-/// the whole batch (`Fatal`). The `From` impls let the resolve/apply primitives use `?`
-/// on DB errors and have them treated as fatal automatically.
-pub(crate) enum ResolveError {
-    Item(ErrorMsg),
-    Fatal(Error),
-}
-
-impl From<Error> for ResolveError {
-    fn from(e: Error) -> Self {
-        ResolveError::Fatal(e)
-    }
-}
-
-impl From<DbErr> for ResolveError {
-    fn from(e: DbErr) -> Self {
-        ResolveError::Fatal(Error::from(e))
-    }
-}
 
 /// Resolve a suite by uuid and authorize the caller's role is at least `min_user_role`
 /// on its owning group.
@@ -44,17 +24,40 @@ pub(crate) async fn authorize_suite<C>(
 where
     C: ConnectionTrait,
 {
-    TaskSuites::Entity::find()
-        .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
-        .filter(UserGroup::Column::UserId.eq(user_id))
-        .filter(UserGroup::Column::Role.gte(min_user_role))
+    let builder = txn.get_database_backend();
+    let stmt = Query::select()
+        .columns([
+            (TaskSuites::Entity, TaskSuites::Column::Id),
+            (TaskSuites::Entity, TaskSuites::Column::Uuid),
+            (TaskSuites::Entity, TaskSuites::Column::Name),
+            (TaskSuites::Entity, TaskSuites::Column::Description),
+            (TaskSuites::Entity, TaskSuites::Column::GroupId),
+            (TaskSuites::Entity, TaskSuites::Column::CreatorId),
+            (TaskSuites::Entity, TaskSuites::Column::Tags),
+            (TaskSuites::Entity, TaskSuites::Column::Labels),
+            (TaskSuites::Entity, TaskSuites::Column::Priority),
+            (TaskSuites::Entity, TaskSuites::Column::WorkerSchedule),
+            (TaskSuites::Entity, TaskSuites::Column::ExecHooks),
+            (TaskSuites::Entity, TaskSuites::Column::State),
+            (TaskSuites::Entity, TaskSuites::Column::LastTaskSubmittedAt),
+            (TaskSuites::Entity, TaskSuites::Column::TotalTasks),
+            (TaskSuites::Entity, TaskSuites::Column::IncompleteTasks),
+            (TaskSuites::Entity, TaskSuites::Column::CreatedAt),
+            (TaskSuites::Entity, TaskSuites::Column::UpdatedAt),
+            (TaskSuites::Entity, TaskSuites::Column::CompletedAt),
+        ])
+        .from(TaskSuites::Entity)
         .join(
-            sea_orm::JoinType::InnerJoin,
-            TaskSuites::Entity::belongs_to(UserGroup::Entity)
-                .from(TaskSuites::Column::GroupId)
-                .to(UserGroup::Column::GroupId)
-                .into(),
+            sea_orm::JoinType::Join,
+            UserGroup::Entity,
+            Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))
+                .eq(Expr::col((TaskSuites::Entity, TaskSuites::Column::GroupId))),
         )
+        .and_where(Expr::col((TaskSuites::Entity, TaskSuites::Column::Uuid)).eq(suite_uuid))
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::Role)).gte(min_user_role))
+        .to_owned();
+    TaskSuites::Model::find_by_statement(builder.build(&stmt))
         .one(txn)
         .await?
         .ok_or_else(|| {
@@ -120,7 +123,7 @@ where
         .one(txn)
         .await?;
 
-    match (existing, action.selection_type()) {
+    match (existing, action.override_type()) {
         (None, None) => {
             // Nothing to do
         }
@@ -129,7 +132,7 @@ where
             let am = TaskSuiteAgent::ActiveModel {
                 task_suite_id: Set(suite.id),
                 agent_id: Set(agent.id),
-                selection_type: Set(selection),
+                override_type: Set(selection),
                 creator_id: Set(Some(user_id)),
                 created_at: Set(now),
                 updated_at: Set(now),
@@ -144,7 +147,7 @@ where
         (Some(row), Some(selection)) => {
             // Update the existing row
             let mut am: TaskSuiteAgent::ActiveModel = row.into();
-            am.selection_type = Set(selection);
+            am.override_type = Set(selection);
             am.creator_id = Set(Some(user_id));
             am.updated_at = Set(now);
             am.update(txn).await?;

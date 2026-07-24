@@ -208,17 +208,15 @@ pub enum SuiteAgentOverrideAction {
 }
 
 impl SuiteAgentOverrideAction {
-    /// The persisted selection type this action maps to, or `None` for `Clear`
+    /// The persisted override type this action maps to, or `None` for `Clear`
     /// (which clears the override).
-    pub fn selection_type(
-        self,
-    ) -> Option<crate::entity::task_suite_agent::SuiteAgentSelectionType> {
+    pub fn override_type(self) -> Option<crate::entity::task_suite_agent::SuiteAgentOverrideType> {
         match self {
             Self::Include => {
-                Some(crate::entity::task_suite_agent::SuiteAgentSelectionType::UserIncluded)
+                Some(crate::entity::task_suite_agent::SuiteAgentOverrideType::UserIncluded)
             }
             Self::Exclude => {
-                Some(crate::entity::task_suite_agent::SuiteAgentSelectionType::UserExcluded)
+                Some(crate::entity::task_suite_agent::SuiteAgentOverrideType::UserExcluded)
             }
             Self::Clear => None,
         }

@@ -1,4 +1,5 @@
 pub mod cred;
+pub(crate) mod credential_store;
 pub mod token;
 
 use std::{io::Write, net::SocketAddr};

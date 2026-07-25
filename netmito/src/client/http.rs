@@ -9,7 +9,10 @@ use crate::{
     entity::content::ArtifactContentType,
     error::{get_error_from_resp, map_reqwest_err, RequestError},
     schema::*,
-    service::auth::cred::{get_user_credential, modify_or_append_credential, remove_credential},
+    service::auth::{
+        cred::get_user_credential,
+        credential_store::{CredentialStore, CredentialWrite},
+    },
 };
 
 pub struct MitoHttpClient {
@@ -134,8 +137,15 @@ impl MitoHttpClient {
                 .map_err(RequestError::from)?;
             self.credential = resp.token;
             if !self.credential_path.as_os_str().is_empty() {
-                modify_or_append_credential(&self.credential_path, &req.username, &self.credential)
-                    .await?;
+                CredentialStore::write(
+                    &self.credential_path,
+                    &self.url,
+                    CredentialWrite::StoreJwt {
+                        username: &req.username,
+                        token: &self.credential,
+                    },
+                )
+                .await?;
             }
             Ok(())
         } else {
@@ -162,9 +172,15 @@ impl MitoHttpClient {
             self.credential = resp.token;
 
             if !self.credential_path.as_os_str().is_empty() {
-                let username = username.to_string();
-                modify_or_append_credential(&self.credential_path, &username, &self.credential)
-                    .await?;
+                CredentialStore::write(
+                    &self.credential_path,
+                    &self.url,
+                    CredentialWrite::StoreJwt {
+                        username,
+                        token: &self.credential,
+                    },
+                )
+                .await?;
             }
 
             Ok(())
@@ -186,10 +202,14 @@ impl MitoHttpClient {
         if resp.status().is_success() {
             self.credential.clear();
 
-            if self.credential_path.exists() {
-                if let Err(e) = remove_credential(&self.credential_path, username).await {
-                    tracing::warn!("Failed to remove local credential for {username}: {e}");
-                }
+            if let Err(e) = CredentialStore::write(
+                &self.credential_path,
+                &self.url,
+                CredentialWrite::RemoveJwt { username },
+            )
+            .await
+            {
+                tracing::warn!("Failed to remove local credential for {username}: {e}");
             }
 
             Ok(())
@@ -241,8 +261,15 @@ impl MitoHttpClient {
                 .map_err(RequestError::from)?;
             self.credential = resp.token;
             if !self.credential_path.as_os_str().is_empty() {
-                modify_or_append_credential(&self.credential_path, &username, &self.credential)
-                    .await?;
+                CredentialStore::write(
+                    &self.credential_path,
+                    &self.url,
+                    CredentialWrite::StoreJwt {
+                        username: &username,
+                        token: &self.credential,
+                    },
+                )
+                .await?;
             }
             Ok(())
         } else {

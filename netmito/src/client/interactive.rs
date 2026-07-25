@@ -10,8 +10,8 @@ use crate::{
     config::client::ClientInteractiveShell,
     entity::role::GroupWorkerRole,
     schema::{
-        AdminChangePasswordReq, CreateUserReq, GroupQueryInfo, ParsedTaskQueryInfo, TaskQueryInfo,
-        UserChangePasswordReq, WorkerQueryInfo,
+        AdminChangePasswordReq, CreateUserReq, GroupQueryInfo, ParsedTaskQueryInfo,
+        ParsedTaskSuiteInfo, TaskQueryInfo, TaskSuiteInfo, UserChangePasswordReq, WorkerQueryInfo,
     },
     service::auth::{get_and_prompt_password, get_and_prompt_username},
 };
@@ -225,6 +225,79 @@ pub(crate) fn output_group_info(info: &GroupQueryInfo) {
         tracing::info!("Users in the group:");
         for (user, role) in users {
             tracing::info!(" > {} = {}", user, role);
+        }
+    }
+}
+
+pub(crate) fn output_suite_info(info: &TaskSuiteInfo) {
+    tracing::info!("Suite UUID: {}", info.uuid);
+    if let Some(ref name) = info.name {
+        tracing::info!("Name: {}", name);
+    }
+    tracing::info!("State: {}", info.state);
+    tracing::info!(
+        "Owned by group {} (created by {})",
+        info.group_name,
+        info.creator_username
+    );
+    tracing::info!("Tags: {:?}", info.tags);
+    tracing::info!("Labels: {:?}", info.labels);
+    tracing::info!("Priority: {}", info.priority);
+    tracing::info!(
+        "Tasks (incomplete/total): {} / {}",
+        info.incomplete_tasks,
+        info.total_tasks
+    );
+    tracing::info!(
+        "Created at {} and Updated at {}",
+        info.created_at,
+        info.updated_at
+    );
+}
+
+pub(crate) fn output_parsed_suite_info(info: &ParsedTaskSuiteInfo, assigned_agents: &[uuid::Uuid]) {
+    tracing::info!("Suite UUID: {}", info.uuid);
+    if let Some(ref name) = info.name {
+        tracing::info!("Name: {}", name);
+    }
+    if let Some(ref description) = info.description {
+        tracing::info!("Description: {}", description);
+    }
+    tracing::info!("State: {}", info.state);
+    tracing::info!(
+        "Owned by group {} (created by {})",
+        info.group_name,
+        info.creator_username
+    );
+    tracing::info!("Tags: {:?}", info.tags);
+    tracing::info!("Labels: {:?}", info.labels);
+    tracing::info!("Priority: {}", info.priority);
+    tracing::info!("Worker schedule: {:?}", info.worker_schedule);
+    if let Some(ref exec_hooks) = info.exec_hooks {
+        tracing::info!("Exec hooks: {:?}", exec_hooks);
+    }
+    tracing::info!(
+        "Tasks (incomplete/total): {} / {}",
+        info.incomplete_tasks,
+        info.total_tasks
+    );
+    if let Some(last) = info.last_task_submitted_at {
+        tracing::info!("Last task submitted at {}", last);
+    }
+    tracing::info!(
+        "Created at {} and Updated at {}",
+        info.created_at,
+        info.updated_at
+    );
+    if let Some(completed) = info.completed_at {
+        tracing::info!("Completed at {}", completed);
+    }
+    if assigned_agents.is_empty() {
+        tracing::info!("Manually-included agents: None");
+    } else {
+        tracing::info!("Manually-included agents:");
+        for agent in assigned_agents {
+            tracing::info!(" > {}", agent);
         }
     }
 }

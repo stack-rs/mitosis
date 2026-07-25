@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use figment::value::magic::RelativePathBuf;
@@ -1301,6 +1302,139 @@ impl MitoHttpClient {
             .map_err(map_reqwest_err)?;
         if resp.status().is_success() {
             Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn create_task_suite(
+        &mut self,
+        req: CreateTaskSuiteReq,
+    ) -> crate::error::Result<CreateTaskSuiteResp> {
+        self.url.set_path("suites");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<CreateTaskSuiteResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn query_task_suites(
+        &mut self,
+        req: TaskSuitesQueryReq,
+    ) -> crate::error::Result<TaskSuitesQueryResp> {
+        self.url.set_path("suites/query");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<TaskSuitesQueryResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn get_task_suite(&mut self, uuid: Uuid) -> crate::error::Result<TaskSuiteQueryResp> {
+        self.url.set_path(&format!("suites/{uuid}"));
+        let resp = self
+            .http_client
+            .get(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<TaskSuiteQueryResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn close_task_suite(&mut self, uuid: Uuid) -> crate::error::Result<()> {
+        self.url.set_path(&format!("suites/{uuid}/close"));
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn cancel_task_suite(&mut self, uuid: Uuid, force: bool) -> crate::error::Result<()> {
+        self.url.set_path(&format!("suites/{uuid}"));
+        if force {
+            self.url.set_query(Some("op=force"));
+        }
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        // Clear the query so it does not leak into later requests reusing self.url.
+        self.url.set_query(None);
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    /// Batch-set agent overrides on a suite. Each entry pins (`Include`),
+    /// blocks (`Exclude`), or clears the override for (`Clear`) one agent.
+    pub async fn override_agents_for_suite(
+        &mut self,
+        suite_uuid: Uuid,
+        overrides: HashMap<Uuid, SuiteAgentOverrideAction>,
+    ) -> crate::error::Result<SuiteAgentOverrideResp> {
+        self.url
+            .set_path(&format!("suites/{suite_uuid}/agents/override"));
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&SuiteAgentOverrideReq { overrides })
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<SuiteAgentOverrideResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
         } else {
             Err(get_error_from_resp(resp).await.into())
         }

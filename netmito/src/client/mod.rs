@@ -1,4 +1,4 @@
-use std::{io::Write, process::Stdio};
+use std::{collections::HashMap, io::Write, process::Stdio};
 
 use clap_repl::ReadCommandOutput;
 use http::MitoHttpClient;
@@ -797,6 +797,88 @@ impl MitoClient {
 
     pub async fn tasks_cancel(&mut self, uuid: Uuid) -> crate::error::Result<()> {
         self.http_client.cancel_task_by_uuid(uuid).await
+    }
+
+    pub async fn suites_create(
+        &mut self,
+        args: CreateSuiteArgs,
+    ) -> crate::error::Result<CreateTaskSuiteResp> {
+        self.http_client.create_task_suite(args.into()).await
+    }
+
+    pub async fn suites_query(
+        &mut self,
+        args: QuerySuitesArgs,
+    ) -> crate::error::Result<TaskSuitesQueryResp> {
+        self.http_client.query_task_suites(args.into()).await
+    }
+
+    pub async fn suites_get(
+        &mut self,
+        args: GetSuiteArgs,
+    ) -> crate::error::Result<TaskSuiteQueryResp> {
+        self.http_client.get_task_suite(args.uuid).await
+    }
+
+    pub async fn suites_close(&mut self, args: GetSuiteArgs) -> crate::error::Result<()> {
+        self.http_client.close_task_suite(args.uuid).await
+    }
+
+    pub async fn suites_cancel(&mut self, args: CancelSuiteArgs) -> crate::error::Result<()> {
+        self.http_client
+            .cancel_task_suite(args.uuid, args.force)
+            .await
+    }
+
+    /// Batch-apply agent overrides on a suite from separate include/exclude/clear lists,
+    /// reporting per-agent outcomes. Backed by the batch endpoint in a single request.
+    async fn suites_override_agents(&mut self, args: AgentsForSuiteOverrideArgs) {
+        let suite = args.uuid;
+        let mut overrides: HashMap<Uuid, SuiteAgentOverrideAction> = HashMap::new();
+        let mut conflicts: Vec<Uuid> = Vec::new();
+        for (agents, action) in [
+            (args.include, SuiteAgentOverrideAction::Include),
+            (args.exclude, SuiteAgentOverrideAction::Exclude),
+            (args.clear, SuiteAgentOverrideAction::Clear),
+        ] {
+            for agent in agents {
+                if let Some(prev) = overrides.insert(agent, action) {
+                    if prev != action {
+                        conflicts.push(agent);
+                    }
+                }
+            }
+        }
+        if !conflicts.is_empty() {
+            let conflicts = conflicts
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::error!(
+                "Agents listed under conflicting overrides: {conflicts}. Aborting; no changes applied."
+            );
+            return;
+        }
+        if overrides.is_empty() {
+            tracing::warn!("No agents specified; nothing to do");
+            return;
+        }
+        match self
+            .http_client
+            .override_agents_for_suite(suite, overrides)
+            .await
+        {
+            Ok(resp) => {
+                for (agent, err) in &resp.errors {
+                    tracing::error!(
+                        "Failed to override agent {agent} on suite {suite}: {}",
+                        err.msg
+                    );
+                }
+            }
+            Err(e) => tracing::error!("{}", e),
+        }
     }
 
     pub async fn tasks_batch_cancel(
@@ -1937,6 +2019,75 @@ impl MitoClient {
                     }
                 },
             },
+            ClientCommand::Suites(args) => match args.command {
+                SuitesCommands::Create(args) => match self.suites_create(args).await {
+                    Ok(resp) => {
+                        tracing::info!("Suite created with uuid {}", resp.uuid);
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                SuitesCommands::Query(args) => {
+                    let verbose = args.verbose;
+                    let counted = args.count;
+                    match self.suites_query(args).await {
+                        Ok(resp) => {
+                            tracing::info!(
+                                "Found {} suites in group {}",
+                                resp.count,
+                                resp.group_name
+                            );
+                            if !counted {
+                                for suite in resp.suites {
+                                    if verbose {
+                                        output_suite_info(&suite);
+                                    } else {
+                                        tracing::info!(
+                                            "{}, {} ({}), Tasks (incomplete/total): {} / {}",
+                                            suite.uuid,
+                                            suite.name.unwrap_or("[no name]".to_string()),
+                                            suite.state,
+                                            suite.incomplete_tasks,
+                                            suite.total_tasks
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                        }
+                    }
+                }
+                SuitesCommands::Get(args) => match self.suites_get(args).await {
+                    Ok(resp) => {
+                        output_parsed_suite_info(&resp.info, &resp.eligible_agents);
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                SuitesCommands::Close(args) => match self.suites_close(args).await {
+                    Ok(_) => {
+                        tracing::info!("Suite closed successfully");
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                SuitesCommands::Cancel(args) => match self.suites_cancel(args).await {
+                    Ok(_) => {
+                        tracing::info!("Suite cancelled");
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                SuitesCommands::Override(args) => {
+                    self.suites_override_agents(args).await;
+                }
+            },
             ClientCommand::Quit => {
                 return false;
             }
@@ -1955,6 +2106,7 @@ impl MitoClient {
         let exec_options = args.watch.map(|w| TaskExecOptions { watch: Some(w) });
         let mut req = SubmitTaskReq {
             group_name: args.group_name.unwrap_or(self.username.clone()),
+            suite_uuid: args.suite_uuid,
             tags: args.tags.into_iter().collect(),
             labels: args.labels.into_iter().collect(),
             priority: args.priority,

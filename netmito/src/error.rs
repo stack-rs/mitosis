@@ -250,3 +250,24 @@ impl From<S3Error> for ApiError {
         ApiError::PresignS3Error(Box::new(e))
     }
 }
+
+/// Outcome of applying one entry in a batch override: either a per-item failure to
+/// report back to the caller (`Item`) or a fatal infrastructure error that must abort
+/// the whole batch (`Fatal`). The `From` impls let the resolve/apply primitives use `?`
+/// on DB errors and have them treated as fatal automatically.
+pub(crate) enum ResolveError {
+    Item(ErrorMsg),
+    Fatal(Error),
+}
+
+impl From<Error> for ResolveError {
+    fn from(e: Error) -> Self {
+        ResolveError::Fatal(e)
+    }
+}
+
+impl From<DbErr> for ResolveError {
+    fn from(e: DbErr) -> Self {
+        ResolveError::Fatal(Error::from(e))
+    }
+}

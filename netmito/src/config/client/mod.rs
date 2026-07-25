@@ -19,6 +19,7 @@ pub mod admin;
 pub mod artifacts;
 pub mod attachments;
 pub mod groups;
+pub mod suites;
 pub mod tasks;
 pub mod users;
 pub mod workers;
@@ -26,6 +27,7 @@ pub use admin::*;
 pub use artifacts::*;
 pub use attachments::*;
 pub use groups::*;
+pub use suites::*;
 pub use tasks::*;
 pub use users::*;
 pub use workers::*;
@@ -103,6 +105,8 @@ pub enum ClientCommand {
     Groups(GroupsArgs),
     /// Manage tasks, including submitting a task, querying tasks, etc.
     Tasks(TasksArgs),
+    /// Manage task suites, including creating, querying, and assigning agents.
+    Suites(SuitesArgs),
     /// Manage workers, including querying workers, cancel workers, etc.
     Workers(WorkersArgs),
     /// Run an external command

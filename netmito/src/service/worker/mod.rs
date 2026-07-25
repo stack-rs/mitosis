@@ -162,44 +162,45 @@ async fn setup_worker_queues(
             .send(TaskDispatcherOp::RegisterWorker(id))
             .is_err()
     {
-        Err(Error::Custom("send register worker failed".to_string()))
-    } else {
-        // Add tasks from active_tasks to worker_task_queue
-        let builder = pool.db.get_database_backend();
-        let tasks_stmt = Query::select()
-            .columns([
-                (ActiveTask::Entity, ActiveTask::Column::Id),
-                (ActiveTask::Entity, ActiveTask::Column::Priority),
-            ])
-            .from(ActiveTask::Entity)
-            .join(
-                sea_orm::JoinType::Join,
+        return Err(Error::Custom("send register worker failed".to_string()));
+    }
+    // Add tasks from active_tasks to worker_task_queue
+    let builder = pool.db.get_database_backend();
+    let tasks_stmt = Query::select()
+        .columns([
+            (ActiveTask::Entity, ActiveTask::Column::Id),
+            (ActiveTask::Entity, ActiveTask::Column::Priority),
+        ])
+        .from(ActiveTask::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            GroupWorker::Entity,
+            Expr::col((ActiveTask::Entity, ActiveTask::Column::GroupId)).eq(Expr::col((
                 GroupWorker::Entity,
-                Expr::col((ActiveTask::Entity, ActiveTask::Column::GroupId)).eq(Expr::col((
-                    GroupWorker::Entity,
-                    GroupWorker::Column::GroupId,
-                ))),
-            )
-            .join(
-                sea_orm::JoinType::Join,
-                Worker::Entity,
-                Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId))
-                    .eq(Expr::col((Worker::Entity, Worker::Column::Id))),
-            )
-            .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId)).eq(id))
-            .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).gt(0))
-            .and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::Tags)).contained(tags))
-            .to_owned();
-        let tasks: Vec<PartialActiveTask> =
-            PartialActiveTask::find_by_statement(builder.build(&tasks_stmt))
-                .all(&pool.db)
-                .await?;
-        let op = TaskDispatcherOp::AddTasks(id, tasks.into_iter().map(Into::into).collect());
-        if pool.worker_task_queue_tx.send(op).is_err() {
-            Err(Error::Custom("send add tasks failed".to_string()))
-        } else {
-            Ok(())
-        }
+                GroupWorker::Column::GroupId,
+            ))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            Worker::Entity,
+            Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId))
+                .eq(Expr::col((Worker::Entity, Worker::Column::Id))),
+        )
+        .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::WorkerId)).eq(id))
+        .and_where(Expr::col((GroupWorker::Entity, GroupWorker::Column::Role)).gt(0))
+        .and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::Tags)).contained(tags))
+        // Suite-bound tasks are run by agents
+        .and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::TaskSuiteId)).is_null())
+        .to_owned();
+    let tasks: Vec<PartialActiveTask> =
+        PartialActiveTask::find_by_statement(builder.build(&tasks_stmt))
+            .all(&pool.db)
+            .await?;
+    let op = TaskDispatcherOp::AddTasks(id, tasks.into_iter().map(Into::into).collect());
+    if pool.worker_task_queue_tx.send(op).is_err() {
+        Err(Error::Custom("send add tasks failed".to_string()))
+    } else {
+        Ok(())
     }
 }
 

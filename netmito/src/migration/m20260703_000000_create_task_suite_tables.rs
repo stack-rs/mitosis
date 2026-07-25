@@ -426,7 +426,7 @@ impl MigrationTrait for Migration {
                             .not_null(),
                     )
                     .col(
-                        ColumnDef::new(TaskSuiteAgent::SelectionType)
+                        ColumnDef::new(TaskSuiteAgent::OverrideType)
                             .integer()
                             .not_null(),
                     )
@@ -489,8 +489,8 @@ impl MigrationTrait for Migration {
             ),
             ("idx_task_suite_agent-agent_id", TaskSuiteAgent::AgentId),
             (
-                "idx_task_suite_agent-selection_type",
-                TaskSuiteAgent::SelectionType,
+                "idx_task_suite_agent-override_type",
+                TaskSuiteAgent::OverrideType,
             ),
         ] {
             manager
@@ -760,7 +760,7 @@ enum TaskSuiteAgent {
     Id,
     TaskSuiteId,
     AgentId,
-    SelectionType,
+    OverrideType,
     CreatorId,
     CreatedAt,
     UpdatedAt,

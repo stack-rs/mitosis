@@ -86,7 +86,7 @@ pub async fn user_create_task_suite(
         .one(&pool.db)
         .await?
         .ok_or(Error::ApiError(ApiError::NotFound(format!(
-            "Group with name {group_name} not found or user does not have permission"
+            "User doesn't have permission or group with name {group_name}"
         ))))?;
 
     let worker_schedule_json = serde_json::to_value(&worker_schedule)?;
@@ -204,7 +204,7 @@ pub(crate) async fn check_task_suites_query(
             .is_some();
         if !authorized {
             return Err(Error::ApiError(ApiError::NotFound(format!(
-                "Group with name {group_name} not found or user does not have permission"
+                "User doesn't have permission or group with name {group_name}"
             ))));
         }
     }
@@ -457,7 +457,7 @@ pub async fn user_get_task_suite_by_uuid(
         .one(&pool.db)
         .await?
         .ok_or(Error::ApiError(ApiError::NotFound(format!(
-            "Task suite with uuid {suite_uuid}"
+            "User doesn't have permission or suite with uuid {suite_uuid}"
         ))))?;
 
     // Only the manually-included agents are persisted; excluded rows must not be

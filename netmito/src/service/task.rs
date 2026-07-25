@@ -114,10 +114,9 @@ async fn internal_submit_task(
                                 //     Expr::col((UserGroup::Entity, UserGroup::Column::Role))
                                 //         .gte(UserGroupRole::Write),
                                 // )
-                                .filter(
-                                    Expr::col((Group::Entity, Group::Column::Id))
-                                        .equals((UserGroup::Entity, UserGroup::Column::GroupId)),
-                                );
+                                .filter(Expr::col((Group::Entity, Group::Column::Id)).eq(
+                                    Expr::col((UserGroup::Entity, UserGroup::Column::GroupId)),
+                                ));
                             upd.query().from(UserGroup::Entity);
                             let group = upd
                                 .exec_with_returning(txn)
@@ -126,7 +125,7 @@ async fn internal_submit_task(
                                 .next()
                                 .ok_or_else(|| {
                                     Error::ApiError(crate::error::ApiError::NotFound(format!(
-                                        "Group with name {} not found or user does not have access to group",
+                                        "User doesn't have permission or group with name {}",
                                         group_name
                                     )))
                                 })?;
@@ -177,17 +176,16 @@ async fn internal_submit_task(
                                         .eq(creator_id),
                                 )
                                 .to_owned();
-                            let suite = TaskSuites::Model::find_by_statement(
-                                builder.build(&suite_stmt),
-                            )
-                            .one(txn)
-                            .await?
-                            .ok_or_else(|| {
-                                Error::ApiError(crate::error::ApiError::NotFound(format!(
-                                    "Suite with UUID {} not found or user does not have access to it",
-                                    suite_uuid
-                                )))
-                            })?;
+                            let suite =
+                                TaskSuites::Model::find_by_statement(builder.build(&suite_stmt))
+                                    .one(txn)
+                                    .await?
+                                    .ok_or_else(|| {
+                                        Error::ApiError(crate::error::ApiError::NotFound(format!(
+                                            "User doesn't have permission or suite with uuid {}",
+                                            suite_uuid
+                                        )))
+                                    })?;
                             // The suite must be able to accept new tasks.
                             if !suite.state.can_accept_tasks() {
                                 return Err(Error::ApiError(

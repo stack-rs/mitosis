@@ -62,9 +62,7 @@ where
         .await?
         .ok_or_else(|| {
             ResolveError::Item(ErrorMsg {
-                msg: format!(
-                    "Suite {suite_uuid} does not exist or the user does not have permission to manage it"
-                ),
+                msg: format!("User doesn't have permission or suite with uuid {suite_uuid}"),
             })
         })
 }

@@ -8,10 +8,7 @@ use url::Url;
 use crate::{
     error::{ApiError, Error, ErrorMsg, RequestError},
     schema::UserLoginReq,
-    service::auth::{
-        credential_store::{Credential, CredentialRead, CredentialStore, CredentialWrite},
-        fill_user_login,
-    },
+    service::auth::{credential_store::CredentialStore, fill_user_login},
 };
 
 pub trait GetPathBuf {
@@ -69,37 +66,25 @@ impl GetPathBuf for std::path::Path {
 pub async fn get_user_credential(
     cred_path: Option<&RelativePathBuf>,
     client: &Client,
+    url: Url,
+    user: Option<String>,
+    password: Option<String>,
+    refresh: bool,
+) -> crate::error::Result<(String, String)> {
+    let credential_store = CredentialStore::new(cred_path.map(|cred_path| cred_path.relative()))?;
+
+    get_user_credential_with_store(&credential_store, client, url, user, password, refresh).await
+}
+
+pub(crate) async fn get_user_credential_with_store(
+    credential_store: &CredentialStore,
+    client: &Client,
     mut url: Url,
     user: Option<String>,
     password: Option<String>,
     refresh: bool,
 ) -> crate::error::Result<(String, String)> {
-    // Try to load credential from file
-    let cred_path = cred_path
-        .map(|p| p.relative())
-        .or_else(|| {
-            dirs::config_dir().map(|mut p| {
-                p.push("mitosis");
-                p.push("credentials");
-                p
-            })
-        })
-        .ok_or(Error::ConfigError(Box::new(figment::Error::from(
-            "credential path not found",
-        ))))?;
-    // Check if the credential is valid
-    if let Some(Credential::Jwt {
-        username,
-        token: cred,
-    }) = CredentialStore::read(
-        &cred_path,
-        &url,
-        CredentialRead::Jwt {
-            username: user.as_deref(),
-        },
-    )
-    .await?
-    {
+    if let Some((username, cred)) = credential_store.read_jwt(&url, user.as_deref()).await? {
         let request = if refresh {
             url.set_path("refresh");
             client.post(url.as_str())
@@ -123,15 +108,7 @@ pub async fn get_user_credential(
                     .await
                     .map_err(RequestError::from)?;
                 let token = resp.token;
-                CredentialStore::write(
-                    &cred_path,
-                    &url,
-                    CredentialWrite::StoreJwt {
-                        username: &username,
-                        token: &token,
-                    },
-                )
-                .await?;
+                credential_store.write_jwt(&url, &username, &token).await?;
                 return Ok((username, token));
             } else {
                 let resp_name = resp.text().await.map_err(RequestError::from)?;
@@ -143,7 +120,7 @@ pub async fn get_user_credential(
             return Err(ApiError::InternalServerError.into());
         }
     }
-    // Local credential not found or invalid, need to login
+
     tracing::warn!("Local credential not found or invalid, need to login");
     let req = fill_user_login(user, password, refresh)?;
     url.set_path("login");
@@ -166,15 +143,9 @@ pub async fn get_user_credential(
             .await
             .map_err(RequestError::from)?;
         let token = resp.token;
-        CredentialStore::write(
-            &cred_path,
-            &url,
-            CredentialWrite::StoreJwt {
-                username: &req.username,
-                token: &token,
-            },
-        )
-        .await?;
+        credential_store
+            .write_jwt(&url, &req.username, &token)
+            .await?;
         Ok((req.username, token))
     } else {
         let resp = resp.json::<ErrorMsg>().await.map_err(RequestError::from)?;
@@ -213,16 +184,10 @@ where
             .map_err(RequestError::from)?;
         let token = resp.token;
         if let Some(cred_path) = cred_path {
-            let cred_path = cred_path.get_path_buf();
-            CredentialStore::write(
-                &cred_path,
-                &*url,
-                CredentialWrite::StoreJwt {
-                    username: &user_login.username,
-                    token: &token,
-                },
-            )
-            .await?;
+            let credential_store = CredentialStore::new(Some(cred_path.get_path_buf()))?;
+            credential_store
+                .write_jwt(&*url, &user_login.username, &token)
+                .await?;
         }
         Ok(token)
     } else {

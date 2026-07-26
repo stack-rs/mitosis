@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use figment::value::magic::RelativePathBuf;
 use reqwest::Client;
 use url::Url;
@@ -9,17 +7,14 @@ use crate::{
     entity::content::ArtifactContentType,
     error::{get_error_from_resp, map_reqwest_err, RequestError},
     schema::*,
-    service::auth::{
-        cred::get_user_credential,
-        credential_store::{CredentialStore, CredentialWrite},
-    },
+    service::auth::{cred::get_user_credential_with_store, credential_store::CredentialStore},
 };
 
 pub struct MitoHttpClient {
     http_client: Client,
     url: Url,
     credential: String,
-    credential_path: PathBuf,
+    credential_store: Option<CredentialStore>,
 }
 
 impl MitoHttpClient {
@@ -30,7 +25,7 @@ impl MitoHttpClient {
             http_client,
             url: coordinator_addr,
             credential: String::new(),
-            credential_path: PathBuf::new(),
+            credential_store: None,
         }
     }
 
@@ -41,21 +36,13 @@ impl MitoHttpClient {
         password: Option<String>,
         refresh: bool,
     ) -> crate::error::Result<String> {
-        let client_credential_path = credential_path
-            .as_ref()
-            .map(|p| p.relative())
-            .or_else(|| {
-                dirs::config_dir().map(|mut p| {
-                    p.push("mitosis");
-                    p.push("credentials");
-                    p
-                })
-            })
-            .ok_or(crate::error::Error::ConfigError(Box::new(
-                figment::Error::from("credential path not found"),
-            )))?;
-        let (username, credential) = get_user_credential(
-            credential_path.as_ref(),
+        let credential_store = CredentialStore::new(
+            credential_path
+                .as_ref()
+                .map(|credential_path| credential_path.relative()),
+        )?;
+        let (username, credential) = get_user_credential_with_store(
+            &credential_store,
             &self.http_client,
             self.url.clone(),
             user,
@@ -63,7 +50,8 @@ impl MitoHttpClient {
             refresh,
         )
         .await?;
-        self.credential_path = client_credential_path;
+
+        self.credential_store = Some(credential_store);
         self.credential = credential;
         Ok(username)
     }
@@ -136,16 +124,10 @@ impl MitoHttpClient {
                 .await
                 .map_err(RequestError::from)?;
             self.credential = resp.token;
-            if !self.credential_path.as_os_str().is_empty() {
-                CredentialStore::write(
-                    &self.credential_path,
-                    &self.url,
-                    CredentialWrite::StoreJwt {
-                        username: &req.username,
-                        token: &self.credential,
-                    },
-                )
-                .await?;
+            if let Some(credential_store) = &self.credential_store {
+                credential_store
+                    .write_jwt(&self.url, &req.username, &self.credential)
+                    .await?;
             }
             Ok(())
         } else {
@@ -171,16 +153,10 @@ impl MitoHttpClient {
 
             self.credential = resp.token;
 
-            if !self.credential_path.as_os_str().is_empty() {
-                CredentialStore::write(
-                    &self.credential_path,
-                    &self.url,
-                    CredentialWrite::StoreJwt {
-                        username,
-                        token: &self.credential,
-                    },
-                )
-                .await?;
+            if let Some(credential_store) = &self.credential_store {
+                credential_store
+                    .write_jwt(&self.url, username, &self.credential)
+                    .await?;
             }
 
             Ok(())
@@ -202,14 +178,10 @@ impl MitoHttpClient {
         if resp.status().is_success() {
             self.credential.clear();
 
-            if let Err(e) = CredentialStore::write(
-                &self.credential_path,
-                &self.url,
-                CredentialWrite::RemoveJwt { username },
-            )
-            .await
-            {
-                tracing::warn!("Failed to remove local credential for {username}: {e}");
+            if let Some(credential_store) = &self.credential_store {
+                if let Err(e) = credential_store.remove_jwt(&self.url, username).await {
+                    tracing::warn!("Failed to remove local credential for {username}: {e}");
+                }
             }
 
             Ok(())
@@ -260,16 +232,10 @@ impl MitoHttpClient {
                 .await
                 .map_err(RequestError::from)?;
             self.credential = resp.token;
-            if !self.credential_path.as_os_str().is_empty() {
-                CredentialStore::write(
-                    &self.credential_path,
-                    &self.url,
-                    CredentialWrite::StoreJwt {
-                        username: &username,
-                        token: &self.credential,
-                    },
-                )
-                .await?;
+            if let Some(credential_store) = &self.credential_store {
+                credential_store
+                    .write_jwt(&self.url, &username, &self.credential)
+                    .await?;
             }
             Ok(())
         } else {

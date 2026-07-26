@@ -1,47 +1,14 @@
-use std::{io, path::Path};
+use std::{io, path::PathBuf};
 
 use base64::{engine::general_purpose, Engine as _};
 use tokio::io::AsyncBufReadExt;
 use url::Url;
 
-pub(crate) enum Credential {
-    Jwt {
-        username: String,
-        token: String,
-    },
-    #[allow(dead_code)]
-    Login {
-        username: String,
-        md5_password: [u8; 16],
-    },
-}
+use crate::error::Error;
 
-pub(crate) enum CredentialRead<'a> {
-    Jwt {
-        username: Option<&'a str>,
-    },
-    #[allow(dead_code)]
-    Login {
-        username: &'a str,
-    },
+pub(crate) struct CredentialStore {
+    credential_path: PathBuf,
 }
-
-pub(crate) enum CredentialWrite<'a> {
-    StoreJwt {
-        username: &'a str,
-        token: &'a str,
-    },
-    #[allow(dead_code)]
-    StoreLogin {
-        username: &'a str,
-        md5_password: &'a [u8; 16],
-    },
-    RemoveJwt {
-        username: &'a str,
-    },
-}
-
-pub(crate) struct CredentialStore;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CredentialKind {
@@ -67,6 +34,11 @@ impl ParsedCredentialValue<'_> {
             Self::Login(_) => CredentialKind::Login,
         }
     }
+}
+
+enum StoredCredential {
+    Jwt { username: String, token: String },
+    Login([u8; 16]),
 }
 
 fn encode_origin(coordinator_url: &Url) -> String {
@@ -103,12 +75,103 @@ fn parse_credential(line: &str) -> Option<ParsedCredential<'_>> {
 }
 
 impl CredentialStore {
-    pub(crate) async fn read(
-        credential_path: &Path,
+    pub(crate) fn new(credential_path: Option<PathBuf>) -> crate::error::Result<Self> {
+        let credential_path = credential_path
+            .or_else(|| {
+                dirs::config_dir().map(|mut path| {
+                    path.push("mitosis");
+                    path.push("credentials");
+                    path
+                })
+            })
+            .ok_or(Error::ConfigError(Box::new(figment::Error::from(
+                "credential path not found",
+            ))))?;
+
+        Ok(Self { credential_path })
+    }
+
+    pub(crate) async fn read_jwt(
+        &self,
         coordinator_url: &Url,
-        request: CredentialRead<'_>,
-    ) -> io::Result<Option<Credential>> {
-        let Ok(file) = tokio::fs::File::open(credential_path).await else {
+        username: Option<&str>,
+    ) -> io::Result<Option<(String, String)>> {
+        match self
+            .read(coordinator_url, username, CredentialKind::Jwt)
+            .await?
+        {
+            Some(StoredCredential::Jwt { username, token }) => Ok(Some((username, token))),
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) async fn write_jwt(
+        &self,
+        coordinator_url: &Url,
+        username: &str,
+        token: &str,
+    ) -> io::Result<()> {
+        let encoded_origin = encode_origin(coordinator_url);
+        let replacement = format!("{encoded_origin}:{username}:jwt={token}");
+
+        self.rewrite(
+            &encoded_origin,
+            username,
+            CredentialKind::Jwt,
+            Some(replacement),
+        )
+        .await
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn read_login(
+        &self,
+        coordinator_url: &Url,
+        username: &str,
+    ) -> io::Result<Option<[u8; 16]>> {
+        match self
+            .read(coordinator_url, Some(username), CredentialKind::Login)
+            .await?
+        {
+            Some(StoredCredential::Login(md5_password)) => Ok(Some(md5_password)),
+            _ => Ok(None),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn write_login(
+        &self,
+        coordinator_url: &Url,
+        username: &str,
+        md5_password: &[u8; 16],
+    ) -> io::Result<()> {
+        let encoded_origin = encode_origin(coordinator_url);
+        let md5_password = general_purpose::STANDARD.encode(md5_password);
+        let replacement = format!("{encoded_origin}:{username}:login={md5_password}");
+
+        self.rewrite(
+            &encoded_origin,
+            username,
+            CredentialKind::Login,
+            Some(replacement),
+        )
+        .await
+    }
+
+    pub(crate) async fn remove_jwt(&self, coordinator_url: &Url, username: &str) -> io::Result<()> {
+        let encoded_origin = encode_origin(coordinator_url);
+
+        self.rewrite(&encoded_origin, username, CredentialKind::Jwt, None)
+            .await
+    }
+
+    async fn read(
+        &self,
+        coordinator_url: &Url,
+        requested_username: Option<&str>,
+        kind: CredentialKind,
+    ) -> io::Result<Option<StoredCredential>> {
+        let Ok(file) = tokio::fs::File::open(&self.credential_path).await else {
             return Ok(None);
         };
 
@@ -119,78 +182,45 @@ impl CredentialStore {
             let Some(credential) = parse_credential(&line) else {
                 continue;
             };
+
             let ParsedCredential {
                 encoded_origin: stored_origin,
                 username,
                 value,
             } = credential;
 
-            if stored_origin != encoded_origin.as_str() {
+            if stored_origin != encoded_origin.as_str() || value.kind() != kind {
                 continue;
             }
 
-            match (&request, value) {
-                (
-                    CredentialRead::Jwt {
-                        username: requested,
-                    },
-                    ParsedCredentialValue::Jwt(token),
-                ) if match requested {
-                    Some(requested) => *requested == username,
-                    None => true,
-                } =>
-                {
-                    return Ok(Some(Credential::Jwt {
-                        username: username.to_owned(),
-                        token: token.to_owned(),
-                    }));
+            if let Some(requested_username) = requested_username {
+                if requested_username != username {
+                    continue;
                 }
-                (
-                    CredentialRead::Login {
-                        username: requested,
-                    },
-                    ParsedCredentialValue::Login(md5_password),
-                ) if *requested == username => {
-                    return Ok(Some(Credential::Login {
-                        username: username.to_owned(),
-                        md5_password,
-                    }));
-                }
-                _ => {}
             }
+
+            return Ok(Some(match value {
+                ParsedCredentialValue::Jwt(token) => StoredCredential::Jwt {
+                    username: username.to_owned(),
+                    token: token.to_owned(),
+                },
+                ParsedCredentialValue::Login(md5_password) => StoredCredential::Login(md5_password),
+            }));
         }
 
         Ok(None)
     }
 
-    pub(crate) async fn write(
-        credential_path: &Path,
-        coordinator_url: &Url,
-        operation: CredentialWrite<'_>,
+    async fn rewrite(
+        &self,
+        encoded_origin: &str,
+        username: &str,
+        kind: CredentialKind,
+        replacement: Option<String>,
     ) -> io::Result<()> {
-        let encoded_origin = encode_origin(coordinator_url);
-        let (username, kind, replacement) = match operation {
-            CredentialWrite::StoreJwt { username, token } => (
-                username,
-                CredentialKind::Jwt,
-                Some(format!("{encoded_origin}:{username}:jwt={token}")),
-            ),
-            CredentialWrite::StoreLogin {
-                username,
-                md5_password,
-            } => {
-                let md5_password = general_purpose::STANDARD.encode(md5_password);
-                (
-                    username,
-                    CredentialKind::Login,
-                    Some(format!("{encoded_origin}:{username}:login={md5_password}")),
-                )
-            }
-            CredentialWrite::RemoveJwt { username } => (username, CredentialKind::Jwt, None),
-        };
-
         if replacement.is_some() {
-            if let Some(parent) = credential_path
+            if let Some(parent) = self
+                .credential_path
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
             {
@@ -198,16 +228,17 @@ impl CredentialStore {
             }
         }
 
-        let file = match tokio::fs::File::open(credential_path).await {
+        let file = match tokio::fs::File::open(&self.credential_path).await {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 if let Some(replacement) = replacement.as_deref() {
-                    tokio::fs::write(credential_path, replacement).await?;
+                    tokio::fs::write(&self.credential_path, replacement).await?;
                 }
                 return Ok(());
             }
             Err(error) => return Err(error),
         };
+
         let mut lines = tokio::io::BufReader::new(file).lines();
         let mut new_lines = Vec::new();
         let mut found = false;
@@ -215,7 +246,7 @@ impl CredentialStore {
         while let Some(line) = lines.next_line().await? {
             let matches = match parse_credential(&line) {
                 Some(credential) => {
-                    credential.encoded_origin == encoded_origin.as_str()
+                    credential.encoded_origin == encoded_origin
                         && credential.username == username
                         && credential.value.kind() == kind
                 }
@@ -239,9 +270,9 @@ impl CredentialStore {
         }
 
         if new_lines.is_empty() {
-            tokio::fs::remove_file(credential_path).await?;
+            tokio::fs::remove_file(&self.credential_path).await?;
         } else {
-            tokio::fs::write(credential_path, new_lines.join("\n")).await?;
+            tokio::fs::write(&self.credential_path, new_lines.join("\n")).await?;
         }
 
         Ok(())

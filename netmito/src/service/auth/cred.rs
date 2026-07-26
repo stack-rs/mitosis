@@ -198,22 +198,23 @@ pub async fn get_user_credential(
     if cred_path.exists() {
         if let Ok(mut lines) = read_lines(&cred_path).await {
             if let Some((username, cred)) = extract_credential(user.as_ref(), &mut lines).await? {
-                if refresh {
-                    url.set_path("refresh");
-                    let resp = client
-                        .post(url.as_str())
-                        .bearer_auth(&cred)
-                        .send()
-                        .await
-                        .map_err(|e| {
-                            if e.is_request() && e.is_connect() {
-                                url.set_path("");
-                                RequestError::ConnectionError(url.to_string())
-                            } else {
-                                e.into()
-                            }
-                        })?;
-                    if resp.status().is_success() {
+                url.set_path(if refresh { "refresh" } else { "auth" });
+                let request = if refresh {
+                    client.post(url.as_str())
+                } else {
+                    client.get(url.as_str())
+                };
+                let resp = request.bearer_auth(&cred).send().await.map_err(|e| {
+                    if e.is_request() && e.is_connect() {
+                        url.set_path("");
+                        RequestError::ConnectionError(url.to_string())
+                    } else {
+                        e.into()
+                    }
+                })?;
+                let status = resp.status();
+                if status.is_success() {
+                    if refresh {
                         let resp = resp
                             .json::<crate::schema::UserLoginResp>()
                             .await
@@ -221,32 +222,14 @@ pub async fn get_user_credential(
                         let token = resp.token;
                         modify_or_append_credential(&cred_path, &username, &token).await?;
                         return Ok((username, token));
-                    } else if resp.status().is_server_error() {
-                        return Err(ApiError::InternalServerError.into());
-                    }
-                } else {
-                    url.set_path("auth");
-                    let resp = client
-                        .get(url.as_str())
-                        .bearer_auth(&cred)
-                        .send()
-                        .await
-                        .map_err(|e| {
-                            if e.is_request() && e.is_connect() {
-                                url.set_path("");
-                                RequestError::ConnectionError(url.to_string())
-                            } else {
-                                e.into()
-                            }
-                        })?;
-                    if resp.status().is_success() {
+                    } else {
                         let resp_name = resp.text().await.map_err(RequestError::from)?;
                         if resp_name == username {
                             return Ok((username, cred));
                         }
-                    } else if resp.status().is_server_error() {
-                        return Err(ApiError::InternalServerError.into());
                     }
+                } else if status.is_server_error() {
+                    return Err(ApiError::InternalServerError.into());
                 }
             }
         }

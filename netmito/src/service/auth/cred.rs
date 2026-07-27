@@ -198,10 +198,11 @@ pub async fn get_user_credential(
     if cred_path.exists() {
         if let Ok(mut lines) = read_lines(&cred_path).await {
             if let Some((username, cred)) = extract_credential(user.as_ref(), &mut lines).await? {
-                url.set_path(if refresh { "refresh" } else { "auth" });
                 let request = if refresh {
+                    url.set_path("refresh");
                     client.post(url.as_str())
                 } else {
+                    url.set_path("auth");
                     client.get(url.as_str())
                 };
                 let resp = request.bearer_auth(&cred).send().await.map_err(|e| {

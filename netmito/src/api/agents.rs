@@ -14,9 +14,9 @@ use crate::{
     schema::{
         AcceptSuiteReq, AcceptSuiteResp, AgentHeartbeatReq, AgentHeartbeatResp, AgentShutdownReq,
         AgentsQueryReq, AgentsQueryResp, CompleteJobReq, CompleteJobResp, EnterCleanupReq,
-        FetchSuiteReq, FetchSuiteResp, FetchTasksReq, FetchTasksResp, HookReportReq,
-        HookReportResp, RegisterAgentReq, RegisterAgentResp, RemoteResourceDownloadResp,
-        ReportAgentTaskReq, ReportTaskResp, StartJobReq, TaskQueryResp,
+        FetchTasksReq, FetchTasksResp, HookReportReq, HookReportResp, RegisterAgentReq,
+        RegisterAgentResp, RemoteResourceDownloadResp, ReportAgentTaskReq, ReportTaskResp,
+        StartJobReq, TaskQueryResp,
     },
     service::{
         self,
@@ -37,8 +37,7 @@ pub fn agents_router(st: InfraPool) -> Router<InfraPool> {
 
     let agent_router = Router::new()
         .route("/heartbeat", post(heartbeat))
-        .route("/suite", get(fetch_suite))
-        .route("/suite/accept", post(accept_suite))
+        .route("/suite", post(accept_suite))
         .route("/job/start", post(start_job))
         .route("/job/cleanup", post(enter_cleanup))
         .route("/job/complete", post(complete_job))
@@ -51,6 +50,10 @@ pub fn agents_router(st: InfraPool) -> Router<InfraPool> {
             get(download_artifact),
         )
         .route("/tasks/{uuid}/attachments/{*key}", get(download_attachment))
+        .route(
+            "/suites/{uuid}/attachments/{*key}",
+            get(download_suite_attachment),
+        )
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             agent_auth_middleware,
@@ -115,19 +118,9 @@ async fn heartbeat(
     Ok(Json(resp))
 }
 
-/// `GET /agents/suite` — poll for a suite to run.
-async fn fetch_suite(
-    Extension(a): Extension<AuthAgent>,
-    State(pool): State<InfraPool>,
-    Query(req): Query<FetchSuiteReq>,
-) -> Result<Json<FetchSuiteResp>, ApiError> {
-    let resp = service::agent::agent_fetch_suite(a.id, &pool, req.suite_uuid)
-        .await
-        .map_err(map_service_error)?;
-    Ok(Json(resp))
-}
-
-/// `POST /agents/suite/accept` — claim a suite and open a job.
+/// `POST /agents/suite` — pick a suite and claim it, opening a job. The body's
+/// optional `suite_uuid` is a preference; a stale one falls back to the best
+/// available.
 async fn accept_suite(
     Extension(a): Extension<AuthAgent>,
     State(pool): State<InfraPool>,
@@ -244,6 +237,19 @@ async fn download_attachment(
     Path((uuid, key)): Path<(Uuid, String)>,
 ) -> Result<Json<RemoteResourceDownloadResp>, ApiError> {
     let attachment = service::s3::worker_download_attachment(&pool, uuid, key)
+        .await
+        .map_err(map_service_error)?;
+    Ok(Json(attachment))
+}
+
+/// `GET /agents/suites/{uuid}/attachments/{*key}` — presigned input download for
+/// a hook, whose inputs belong to the suite rather than to any one task.
+async fn download_suite_attachment(
+    Extension(_): Extension<AuthAgent>,
+    State(pool): State<InfraPool>,
+    Path((uuid, key)): Path<(Uuid, String)>,
+) -> Result<Json<RemoteResourceDownloadResp>, ApiError> {
+    let attachment = service::s3::suite_download_attachment(&pool, uuid, key)
         .await
         .map_err(map_service_error)?;
     Ok(Json(attachment))

@@ -67,12 +67,22 @@ pub struct CoordinatorConfig {
     /// notification sockets are not culled by intermediate proxies.
     #[serde(with = "humantime_serde", default = "default_ws_ping_interval")]
     pub(crate) ws_ping_interval: std::time::Duration,
+    /// How long a suite may go without a new task before the coordinator sweeps
+    /// it out of `Open`. It is also how long an agent holds a drained job open
+    /// waiting for more work, so raising it trades idle machine time for fewer
+    /// provision hooks.
+    #[serde(with = "humantime_serde", default = "default_suite_auto_close_timeout")]
+    pub(crate) suite_auto_close_timeout: std::time::Duration,
     pub(crate) log_path: Option<RelativePathBuf>,
     pub(crate) file_log: bool,
 }
 
 fn default_ws_ping_interval() -> std::time::Duration {
     std::time::Duration::from_secs(30)
+}
+
+fn default_suite_auto_close_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(120)
 }
 
 fn default_mitosis_region() -> String {
@@ -164,6 +174,11 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub ws_ping_interval: Option<String>,
+    /// How long a suite may go without a new task before it is swept out of
+    /// Open, and how long an agent holds a drained job. Default 60 seconds
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub suite_auto_close_timeout: Option<String>,
     /// The log file path. If not specified, then the default rolling log file path would be used.
     /// If specified, then the log file would be exactly at the path specified.
     #[arg(long)]
@@ -206,6 +221,7 @@ impl Default for CoordinatorConfig {
             access_token_expires_in: std::time::Duration::from_secs(60 * 60 * 24 * 7),
             heartbeat_timeout: std::time::Duration::from_secs(600),
             ws_ping_interval: default_ws_ping_interval(),
+            suite_auto_close_timeout: default_suite_auto_close_timeout(),
             log_path: None,
             file_log: false,
         }

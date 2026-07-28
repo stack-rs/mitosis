@@ -8,7 +8,7 @@
 //! `Result` writes the `hook_tasks` row; `Upload` presigns an S3 PUT for a log
 //! or artifact of a hook whose result is already recorded. Hook artifacts live
 //! in the shared `artifacts` table keyed by `hook_tasks.uuid` — there is no
-//! separate hook-artifact table (`docs/plans/agent-service-port.md`, D2).
+//! separate hook-artifact table.
 
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{prelude::*, Set, TransactionTrait};

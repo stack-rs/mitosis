@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use sea_orm::sea_query::extension::postgres::PgExpr;
-use sea_orm::sea_query::{Alias, PgFunc, Query};
+use sea_orm::sea_query::{Alias, Func, PgFunc, Query};
 use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, Set, TransactionTrait};
 use uuid::Uuid;
 
@@ -27,6 +27,81 @@ use crate::service::task::{parse_operators_with_number, OperatorWithNumber};
 #[derive(FromQueryResult)]
 struct GroupIdResult {
     id: i64,
+}
+
+/// Sweep suites that have gone quiet out of `Open`.
+///
+/// A suite stays `Open` from its last submission until `timeout` has passed,
+/// even after its tasks have all drained, which is what lets the agent running
+/// it hold its job open and pick up a late arrival without provisioning again.
+/// The states this settles it into:
+///
+/// | from | condition | to |
+/// |---|---|---|
+/// | `Open` | idle, work remains | `Closed` |
+/// | `Open` | idle, nothing left | `Complete` |
+/// | `Closed` | nothing left | `Complete` |
+///
+/// The last rule is a backstop: `agent::task::commit_suite_task` completes a
+/// `Closed` suite as its last task commits, leaving this to catch the ones
+/// closed after their work had already drained.
+///
+/// Idleness is measured from the last submission, falling back to creation, so a
+/// suite that never received a task closes too rather than sitting `Open`
+/// forever.
+pub async fn sweep_inactive_suites(
+    db: &DatabaseConnection,
+    timeout: std::time::Duration,
+) -> Result<u64> {
+    let now = TimeDateTimeWithTimeZone::now_utc();
+    let threshold = now - time::Duration::seconds(timeout.as_secs() as i64);
+    let idle_since = Expr::expr(Func::coalesce([
+        Expr::col(TaskSuites::Column::LastTaskSubmittedAt).into(),
+        Expr::col(TaskSuites::Column::CreatedAt).into(),
+    ]));
+
+    let completed = TaskSuites::Entity::update_many()
+        .col_expr(
+            TaskSuites::Column::State,
+            Expr::value(TaskSuiteState::Complete),
+        )
+        .col_expr(TaskSuites::Column::CompletedAt, Expr::value(Some(now)))
+        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+        .filter(TaskSuites::Column::IncompleteTasks.eq(0))
+        .filter(
+            // A `Closed` suite is already known to be idle; an `Open` one has to
+            // have gone quiet for the whole window first.
+            TaskSuites::Column::State
+                .eq(TaskSuiteState::Closed)
+                .or(TaskSuites::Column::State
+                    .eq(TaskSuiteState::Open)
+                    .and(idle_since.clone().lt(threshold))),
+        )
+        .exec(db)
+        .await?
+        .rows_affected;
+
+    let closed = TaskSuites::Entity::update_many()
+        .col_expr(
+            TaskSuites::Column::State,
+            Expr::value(TaskSuiteState::Closed),
+        )
+        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+        .filter(TaskSuites::Column::State.eq(TaskSuiteState::Open))
+        .filter(TaskSuites::Column::IncompleteTasks.gt(0))
+        .filter(idle_since.lt(threshold))
+        .exec(db)
+        .await?
+        .rows_affected;
+
+    if completed + closed > 0 {
+        tracing::debug!(
+            completed,
+            closed,
+            "Swept suites idle for more than {timeout:?}"
+        );
+    }
+    Ok(completed + closed)
 }
 
 pub async fn user_create_task_suite(

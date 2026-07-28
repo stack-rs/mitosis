@@ -20,7 +20,7 @@
 //! | `Finish` | task → `Finished` (not yet archived) |
 //! | `Cancel` | task → `Cancelled`; the agent follows up with `Commit` |
 //! | `Upload` | request for presigned S3 URL for an artifact (records metadata, charges group quota) |
-//! | `Commit` | archives the task with its result, decrements the suite's `incomplete_tasks`, triggers the downstream task if one was spawned |
+//! | `Commit` | archives the task with its result, decrements the suite's `incomplete_tasks` (completing the suite if that empties an already-`Closed` one), triggers the downstream task if one was spawned |
 //! | `Submit` | spawns a downstream child in the parent's group, in any suite that group owns or none |
 
 use sea_orm::{prelude::*, QueryOrder, QuerySelect, Set, TransactionTrait};
@@ -136,7 +136,14 @@ pub async fn agent_fetch_tasks(
         count = tasks.len(),
         "Agent claimed tasks from a suite"
     );
-    Ok(FetchTasksResp { tasks })
+    // Read from the same snapshot as the eligibility check above, which is at
+    // most a claim-transaction old. Erring on the side of `true` for a suite the
+    // sweep has just settled only costs one more poll.
+    let hold_job_open = matches!(suite.state, TaskSuiteState::Open);
+    Ok(FetchTasksResp {
+        tasks,
+        hold_job_open,
+    })
 }
 
 /// Report the result of a task this agent claimed.
@@ -297,14 +304,20 @@ pub async fn agent_report_task(
     Ok(None)
 }
 
-/// Tick a suite's `incomplete_tasks` down after a commit, and flip it to
-/// `Complete` once nothing is left.
+/// Tick a suite's `incomplete_tasks` down after a commit, and complete it if
+/// that was the last task of an already-`Closed` suite.
+///
+/// Draining an `Open` suite does not complete it: it stays `Open` until it has
+/// also been quiet for `suite_auto_close_timeout`, which is what lets the agent
+/// hold its job — and its provisioned environment — open for a late arrival.
+/// `service::suite::sweep_inactive_suites` settles it afterwards. A `Closed`
+/// suite has no such window to wait out, so it is completed here.
 async fn commit_suite_task(
     pool: &InfraPool,
     suite_id: i64,
     now: TimeDateTimeWithTimeZone,
 ) -> Result<()> {
-    let updated = TaskSuites::Entity::update_many()
+    TaskSuites::Entity::update_many()
         .col_expr(
             TaskSuites::Column::IncompleteTasks,
             Expr::col(TaskSuites::Column::IncompleteTasks).sub(1),
@@ -312,19 +325,13 @@ async fn commit_suite_task(
         .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
         .filter(TaskSuites::Column::Id.eq(suite_id))
         .filter(TaskSuites::Column::IncompleteTasks.gt(0))
-        .exec_with_returning(&pool.db)
+        .exec(&pool.db)
         .await?;
 
-    let Some(suite) = updated.into_iter().next() else {
-        return Ok(());
-    };
-    if suite.incomplete_tasks != 0
-        || !matches!(suite.state, TaskSuiteState::Open | TaskSuiteState::Closed)
-    {
-        return Ok(());
-    }
-
-    // Conditional so concurrent commits that also observed 0 are no-ops.
+    // Conditional on the state and the count, which is what makes a second
+    // statement safe without a transaction around the pair: a submission racing
+    // it either lands first and leaves a non-zero count, or lands after and sets
+    // `Open` itself.
     TaskSuites::Entity::update_many()
         .col_expr(
             TaskSuites::Column::State,
@@ -333,15 +340,10 @@ async fn commit_suite_task(
         .col_expr(TaskSuites::Column::CompletedAt, Expr::value(Some(now)))
         .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
         .filter(TaskSuites::Column::Id.eq(suite_id))
+        .filter(TaskSuites::Column::State.eq(TaskSuiteState::Closed))
         .filter(TaskSuites::Column::IncompleteTasks.eq(0))
-        .filter(
-            TaskSuites::Column::State
-                .eq(TaskSuiteState::Open)
-                .or(TaskSuites::Column::State.eq(TaskSuiteState::Closed)),
-        )
         .exec(&pool.db)
         .await?;
-    tracing::info!(suite_id, "Suite drained — transitioned to Complete");
 
     Ok(())
 }

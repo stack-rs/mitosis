@@ -23,7 +23,7 @@ use crate::{
     entity::{
         active_tasks as ActiveTask, archived_tasks as ArchivedTask, artifacts as Artifact,
         attachments as Attachment, content::ArtifactContentType, groups as Group,
-        role::UserGroupRole, user_group as UserGroup,
+        role::UserGroupRole, task_suites as TaskSuite, user_group as UserGroup,
     },
     error::AuthError,
 };
@@ -638,6 +638,52 @@ pub async fn worker_download_attachment(
             }
         }
     };
+    presign_group_attachment(pool, group_id, &group_name, key).await
+}
+
+/// Presign an attachment of the group that owns `suite_uuid`.
+///
+/// The hook half of [`worker_download_attachment`]: a hook's inputs are named
+/// exactly like a task's, but a hook has no task uuid to resolve the group
+/// through — it belongs to a suite. Identity-free like its sibling; the route is
+/// what gates access.
+pub async fn suite_download_attachment(
+    pool: &InfraPool,
+    suite_uuid: Uuid,
+    key: String,
+) -> Result<RemoteResourceDownloadResp, crate::error::Error> {
+    let builder = pool.db.get_database_backend();
+    let stmt = Query::select()
+        .column((Group::Entity, Group::Column::Id))
+        .column((Group::Entity, Group::Column::GroupName))
+        .from(Group::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            TaskSuite::Entity,
+            Expr::col((TaskSuite::Entity, TaskSuite::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        .and_where(Expr::col((TaskSuite::Entity, TaskSuite::Column::Uuid)).eq(suite_uuid))
+        .limit(1)
+        .to_owned();
+    let GroupInfo {
+        id: group_id,
+        group_name,
+    } = GroupInfo::find_by_statement(builder.build(&stmt))
+        .one(&pool.db)
+        .await?
+        .ok_or(crate::error::ApiError::NotFound(format!(
+            "Task suite with uuid {suite_uuid}"
+        )))?;
+    presign_group_attachment(pool, group_id, &group_name, key).await
+}
+
+async fn presign_group_attachment(
+    pool: &InfraPool,
+    group_id: i64,
+    group_name: &str,
+    key: String,
+) -> Result<RemoteResourceDownloadResp, crate::error::Error> {
     let attachment = Attachment::Entity::find()
         .filter(Attachment::Column::GroupId.eq(group_id))
         .filter(Attachment::Column::Key.eq(key.clone()))

@@ -4,12 +4,13 @@
 //! ## The loop
 //!
 //! ```text
-//! register ──▶ heartbeat ──▶ fetch suite ──▶ accept ──▶ start ──▶ …tasks… ──▶ cleanup ──▶ complete
-//!                  ▲                                                                          │
-//!                  └──────────────────────────── Idle ◀───────────────────────────────────────┘
+//! register ──▶ heartbeat ──▶ accept suite ──▶ start ──▶ …tasks… ──▶ cleanup ──▶ complete
+//!                  ▲                                                                │
+//!                  └─────────────────────── Idle ◀───────────────────────────────────┘
 //! ```
 //!
-//! `accept` is the only transition that claims anything: it locks the suite,
+//! `accept` is the only transition that claims anything, and it both chooses
+//! the suite and takes it: one transaction picks a candidate, locks it,
 //! re-checks eligibility, moves the agent `Idle → Provisioning`, and opens a
 //! `suite_agent_jobs` row whose opaque id the agent echoes on every later call.
 //! `start`/`cleanup`/`complete` advance that row and the agent state in step.
@@ -49,8 +50,8 @@ use crate::error::{ApiError, AuthError, Error, Result};
 use crate::schema::{
     AcceptSuiteReq, AcceptSuiteResp, AgentHeartbeatReq, AgentHeartbeatResp, AgentInfo,
     AgentNotification, AgentShutdownOp, AgentsQueryReq, AgentsQueryResp, CompleteJobReq,
-    CompleteJobResp, CountQuery, ExecHooks, FetchSuiteResp, RegisterAgentReq, RegisterAgentResp,
-    SuiteJobOutcome, TaskSuiteSpec, WorkerSchedulePlan,
+    CompleteJobResp, CountQuery, ExecHooks, RegisterAgentReq, RegisterAgentResp, SuiteJobOutcome,
+    TaskSuiteSpec, WorkerSchedulePlan,
 };
 use crate::service::auth::token::generate_worker_token;
 use crate::ws::AgentWsRouter;
@@ -606,52 +607,12 @@ pub async fn notify_suite_available(pool: &InfraPool, suite_id: i64) {
     }
 }
 
-/// Hand the agent a suite to run: the one it asked for, or the best available.
-pub async fn agent_fetch_suite(
-    agent_id: i64,
-    pool: &InfraPool,
-    specific_suite_uuid: Option<Uuid>,
-) -> Result<FetchSuiteResp> {
-    let suite = match specific_suite_uuid {
-        Some(suite_uuid) => {
-            let suite = TaskSuites::Entity::find()
-                .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
-                .one(&pool.db)
-                .await?;
-            match suite {
-                // Silently "no suite" rather than an error: a stale hint is a
-                // normal race (the suite drained or was cancelled), and the
-                // agent's answer is the same either way — stay idle.
-                Some(suite)
-                    if matching::is_agent_eligible(&pool.db, suite.id, agent_id).await?
-                        && matches!(suite.state, TaskSuiteState::Open | TaskSuiteState::Closed)
-                        && suite.incomplete_tasks > 0 =>
-                {
-                    Some(suite)
-                }
-                _ => None,
-            }
-        }
-        None => match matching::best_available_suite_id(&pool.db, agent_id).await? {
-            Some(suite_id) => {
-                TaskSuites::Entity::find_by_id(suite_id)
-                    .one(&pool.db)
-                    .await?
-            }
-            None => None,
-        },
-    };
-
-    let suite = match suite {
-        Some(suite) => Some(suite_to_spec(pool, suite).await?),
-        None => None,
-    };
-    Ok(FetchSuiteResp { suite })
-}
-
-async fn suite_to_spec(pool: &InfraPool, suite: TaskSuites::Model) -> Result<TaskSuiteSpec> {
+async fn suite_to_spec<C: ConnectionTrait>(
+    db: &C,
+    suite: TaskSuites::Model,
+) -> Result<TaskSuiteSpec> {
     let group = Group::Entity::find_by_id(suite.group_id)
-        .one(&pool.db)
+        .one(db)
         .await?
         .ok_or_else(|| Error::ApiError(ApiError::NotFound("Group of the suite".to_string())))?;
     let worker_schedule: WorkerSchedulePlan = serde_json::from_value(suite.worker_schedule)?;
@@ -673,12 +634,17 @@ async fn suite_to_spec(pool: &InfraPool, suite: TaskSuites::Model) -> Result<Tas
     })
 }
 
-/// Claim a suite: agent `Idle → Provisioning`, and a fresh job row is opened.
+/// Pick a suite and claim it in one transaction: agent `Idle → Provisioning`, a
+/// fresh job row, and the spec to run. Choosing under the suite's row lock is
+/// what leaves no window for another agent to take it in between.
+///
+/// `req.suite_uuid` is a preference. A hint that no longer points at runnable
+/// work — drained, cancelled, no longer this agent's, or simply gone — falls
+/// through to the best available suite rather than answering "nothing".
 ///
 /// Rejections that are the coordinator's decision rather than a client error
-/// (not eligible, suite drained, agent already busy) come back as
-/// `accepted: false` with a reason, not an HTTP error: they are ordinary races
-/// an agent recovers from by going back to idle.
+/// (nothing available, agent already busy) come back as `accepted: false` with a
+/// reason, not an HTTP error.
 pub async fn agent_accept_suite(
     agent_id: i64,
     pool: &InfraPool,
@@ -688,29 +654,11 @@ pub async fn agent_accept_suite(
 
     let outcome = pool
         .db
-        .transaction::<_, std::result::Result<(i64, i32), String>, Error>(|txn| {
+        .transaction::<_, std::result::Result<(TaskSuiteSpec, i64, i32), String>, Error>(|txn| {
             Box::pin(async move {
-                let suite = TaskSuites::Entity::find()
-                    .filter(TaskSuites::Column::Uuid.eq(req.suite_uuid))
-                    .lock_exclusive()
-                    .one(txn)
-                    .await?
-                    .ok_or_else(|| {
-                        Error::ApiError(ApiError::NotFound(format!("Suite {}", req.suite_uuid)))
-                    })?;
+                // One suite at a time, checked before anything is locked. A busy
+                // agent that asks again is racing its own state, not erroring.
 
-                if !matching::is_agent_eligible(txn, suite.id, agent_id).await? {
-                    return Ok(Err("Agent is not eligible for this suite".to_string()));
-                }
-                if !matches!(suite.state, TaskSuiteState::Open | TaskSuiteState::Closed) {
-                    return Ok(Err(format!(
-                        "Suite is {}, which cannot be accepted",
-                        suite.state
-                    )));
-                }
-
-                // One suite at a time. A busy agent that asks again is racing
-                // its own state, not erroring.
                 let agent = Agent::Entity::find_by_id(agent_id)
                     .one(txn)
                     .await?
@@ -722,31 +670,111 @@ pub async fn agent_accept_suite(
                     )));
                 }
 
+                // What the agent asked for, if it is still worth running.
+                let requested = match req.suite_uuid {
+                    Some(suite_uuid) => {
+                        lock_runnable_suite(txn, agent_id, SuiteTarget::Uuid(suite_uuid)).await?
+                    }
+                    None => None,
+                };
+                // Otherwise — or if the hint went stale — the best on offer.
+                let suite = match requested {
+                    Some(suite) => suite,
+                    None => {
+                        match matching::best_available_suite_id(txn, agent_id).await? {
+                            Some(suite_id) => {
+                                match lock_runnable_suite(txn, agent_id, SuiteTarget::Id(suite_id))
+                                    .await?
+                                {
+                                    Some(suite) => suite,
+                                    // Drained between the pick and the lock.
+                                    None => {
+                                        return Ok(Err(
+                                            "No suite is available for this agent".to_string()
+                                        ))
+                                    }
+                                }
+                            }
+                            None => {
+                                return Ok(Err("No suite is available for this agent".to_string()))
+                            }
+                        }
+                    }
+                };
+
+                let suite_id = suite.id;
+                let spec = suite_to_spec(txn, suite).await?;
+
                 let mut agent: Agent::ActiveModel = agent.into();
-                agent.assigned_task_suite_id = Set(Some(suite.id));
+                agent.assigned_task_suite_id = Set(Some(suite_id));
                 agent.updated_at = Set(now);
                 agent.update(txn).await?;
 
-                let job = job::create_job(txn, suite.id, agent_id, now).await?;
-                Ok(Ok((job.id, job.job_id)))
+                let job = job::create_job(txn, suite_id, agent_id, now).await?;
+                Ok(Ok((spec, job.id, job.job_id)))
             })
         })
         .await?;
 
     match outcome {
-        Ok((job, job_id)) => Ok(AcceptSuiteResp {
+        Ok((suite, job, job_id)) => Ok(AcceptSuiteResp {
             accepted: true,
+            suite: Some(suite),
             job: Some(job),
             job_id: Some(job_id),
             reason: None,
         }),
         Err(reason) => Ok(AcceptSuiteResp {
             accepted: false,
+            suite: None,
             job: None,
             job_id: None,
             reason: Some(reason),
         }),
     }
+}
+
+/// How a candidate suite was arrived at: named by the agent, or picked for it.
+enum SuiteTarget {
+    Uuid(Uuid),
+    Id(i64),
+}
+
+/// Lock one candidate suite and answer whether this agent may run it now.
+///
+/// `None` covers every way a candidate can fail — gone, not this agent's,
+/// terminal, or drained — since the caller falls through to the next candidate
+/// for all of them. The checks are re-run under the lock even for a suite
+/// `best_available_suite_id` just returned: that query takes no locks, so its
+/// answer can go stale before we take one.
+async fn lock_runnable_suite<C: ConnectionTrait>(
+    txn: &C,
+    agent_id: i64,
+    target: SuiteTarget,
+) -> Result<Option<TaskSuites::Model>> {
+    let query = TaskSuites::Entity::find();
+    let suite = match target {
+        SuiteTarget::Uuid(uuid) => query.filter(TaskSuites::Column::Uuid.eq(uuid)),
+        SuiteTarget::Id(id) => query.filter(TaskSuites::Column::Id.eq(id)),
+    }
+    .lock_exclusive()
+    .one(txn)
+    .await?;
+
+    let Some(suite) = suite else {
+        return Ok(None);
+    };
+    // Same predicate as `matching::suite_has_work`, which is what the picker
+    // filters on.
+    if !matches!(suite.state, TaskSuiteState::Open | TaskSuiteState::Closed)
+        || suite.incomplete_tasks == 0
+    {
+        return Ok(None);
+    }
+    if !matching::is_agent_eligible(txn, suite.id, agent_id).await? {
+        return Ok(None);
+    }
+    Ok(Some(suite))
 }
 
 /// Provisioning finished: job `Provisioning → Executing`, agent `Executing`.

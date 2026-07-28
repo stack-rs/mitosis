@@ -255,7 +255,7 @@ pub(crate) fn output_suite_info(info: &TaskSuiteInfo) {
     );
 }
 
-pub(crate) fn output_parsed_suite_info(info: &ParsedTaskSuiteInfo, assigned_agents: &[uuid::Uuid]) {
+pub(crate) fn output_parsed_suite_info(info: &ParsedTaskSuiteInfo, eligible_agents: &[uuid::Uuid]) {
     tracing::info!("Suite UUID: {}", info.uuid);
     if let Some(ref name) = info.name {
         tracing::info!("Name: {}", name);
@@ -292,11 +292,11 @@ pub(crate) fn output_parsed_suite_info(info: &ParsedTaskSuiteInfo, assigned_agen
     if let Some(completed) = info.completed_at {
         tracing::info!("Completed at {}", completed);
     }
-    if assigned_agents.is_empty() {
-        tracing::info!("Manually-included agents: None");
+    if eligible_agents.is_empty() {
+        tracing::info!("Currently eligible agents: None");
     } else {
-        tracing::info!("Manually-included agents:");
-        for agent in assigned_agents {
+        tracing::info!("Currently eligible agents:");
+        for agent in eligible_agents {
             tracing::info!(" > {}", agent);
         }
     }

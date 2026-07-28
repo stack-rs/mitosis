@@ -2056,45 +2056,18 @@ paths:
           $ref: "#/components/responses/NotFound"
 
   /agents/suite:
-    get:
-      summary: Fetch a suite to run
-      description: >-
-        Return the suite this agent should pick up next — highest priority first,
-        then oldest — or the specific one named by `suite_uuid`. An empty
-        response means there is nothing available; a suite the agent is not
-        eligible for is reported the same way, since a stale hint is an ordinary
-        race rather than an error.
-      operationId: agentFetchSuite
-      tags:
-        - Agents
-      security:
-        - agentAuth: []
-      parameters:
-        - name: suite_uuid
-          in: query
-          required: false
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: The suite to run, if any
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/FetchSuiteResp"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-
-  /agents/suite/accept:
     post:
-      summary: Accept a suite
+      summary: Claim a suite to run
       description: >-
-        Claim a suite: the agent moves Idle → Provisioning and a job record is
-        opened, whose opaque handle the agent echoes on every later job-scoped
-        call. A refusal the coordinator decides (not eligible, suite drained,
-        agent already busy) is reported as `accepted: false` with a reason rather
-        than an error status.
+        Select a suite and claim it in one transaction: the agent moves Idle →
+        Provisioning, a job record is opened whose opaque handle the agent echoes
+        on every later job-scoped call, and the suite's spec comes back with it.
+        Selecting and claiming are not separable, so no other agent can take the
+        suite in between. `suite_uuid` is a preference — a hint that no longer
+        points at runnable work falls back to the best available suite rather
+        than answering "nothing". A refusal the coordinator decides (nothing
+        available, agent already busy) is reported as `accepted: false` with a
+        reason rather than an error status.
       operationId: agentAcceptSuite
       tags:
         - Agents
@@ -2108,15 +2081,13 @@ paths:
               $ref: "#/components/schemas/AcceptSuiteReq"
       responses:
         "200":
-          description: Accepted, or declined with a reason
+          description: The claimed suite and its job, or a declined answer with a reason
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/AcceptSuiteResp"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
 
   /agents/job/start:
     post:
@@ -2388,6 +2359,44 @@ paths:
         - name: uuid
           in: path
           required: true
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Presigned download URL and size
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemoteResourceDownloadResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /agents/suites/{uuid}/attachments/{key}:
+    get:
+      summary: Download a suite attachment as an agent
+      description: >-
+        Presigned download for a group attachment a **hook** needs. The hook half
+        of `/agents/tasks/{uuid}/attachments/{key}`: a hook's inputs are named the
+        same way, but it belongs to a suite rather than to any one task, so the
+        owning group is resolved through the suite.
+      operationId: agentDownloadSuiteAttachment
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          description: Suite UUID
           schema:
             type: string
             format: uuid
@@ -5651,20 +5660,16 @@ components:
           type: integer
           format: int32
 
-    FetchSuiteResp:
-      type: object
-      properties:
-        suite:
-          $ref: "#/components/schemas/TaskSuiteSpec"
-
     AcceptSuiteReq:
       type: object
-      required:
-        - suite_uuid
       properties:
         suite_uuid:
           type: string
           format: uuid
+          description: >-
+            The suite the agent was notified about, if any. A preference, not a
+            demand: one that is gone, drained, cancelled or no longer this
+            agent's falls back to the best available suite.
 
     AcceptSuiteResp:
       type: object
@@ -5673,6 +5678,10 @@ components:
       properties:
         accepted:
           type: boolean
+        suite:
+          allOf:
+            - $ref: "#/components/schemas/TaskSuiteSpec"
+          description: What to run. Present exactly when `accepted` is true.
         job:
           type: integer
           format: int64
@@ -5683,7 +5692,7 @@ components:
           description: Suite-scoped job number, for display
         reason:
           type: string
-          description: Why the claim was declined, when `accepted` is false
+          description: Why nothing was claimed, when `accepted` is false
 
     StartJobReq:
       type: object
@@ -5836,6 +5845,17 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/WorkerTaskResp"
+        hold_job_open:
+          type: boolean
+          default: false
+          description: >-
+            Whether the agent should keep waiting on this job rather than wind it
+            down — true while the suite is `Open`, which covers "drained, but not
+            idle long enough to be sure". An empty `tasks` with this set means
+            "come back and ask again", not "there is no more work", so a task
+            submitted moments later runs in the same job against the environment
+            its provision hook already built. It goes false once the
+            coordinator's idle sweep has settled the suite.
 
     ReportAgentTaskReq:
       type: object

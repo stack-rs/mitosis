@@ -3,8 +3,7 @@
 //! agent notification events carried over `/ws/agents`.
 //!
 //! Ported from `../mitosis-dev` with the run→job rename applied and the fields
-//! our slim `suite_agent_jobs` row does not carry dropped (see
-//! `docs/plans/agent-layer.md`, D-D/D-I).
+//! our slim `suite_agent_jobs` row does not carry dropped.
 
 use std::collections::HashSet;
 
@@ -181,20 +180,14 @@ pub struct AgentHeartbeatResp {
     pub notifications: Vec<WsNotificationEvent>,
 }
 
-/// Query parameters for `GET /agents/suite`
+/// Request body for `POST /agents/suite`
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct FetchSuiteReq {
-    /// If specified, only consider this specific suite
+pub struct AcceptSuiteReq {
+    /// The suite the agent was notified about, if any. A preference, not a
+    /// demand: one that is gone, drained or no longer this agent's to run falls
+    /// back to the best available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suite_uuid: Option<Uuid>,
-}
-
-/// Response containing suite details for execution
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FetchSuiteResp {
-    /// Suite to execute (`None` if no suitable suite is available)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub suite: Option<TaskSuiteSpec>,
 }
 
 /// Full specification of a task suite handed to an agent for execution
@@ -217,17 +210,15 @@ pub struct TaskSuiteSpec {
     pub incomplete_tasks: i32,
 }
 
-/// Request to accept a suite assignment (claim it for execution)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcceptSuiteReq {
-    pub suite_uuid: Uuid,
-}
-
-/// Response after accepting a suite
+/// Response to `POST /agents/suite`: the claim and everything needed to run it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceptSuiteResp {
-    /// Whether the suite was successfully accepted
+    /// Whether a suite was claimed. False is an ordinary answer (nothing
+    /// available, or this agent is already busy), not an error.
     pub accepted: bool,
+    /// What to run. Present exactly when `accepted` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suite: Option<TaskSuiteSpec>,
     /// Opaque job handle (`suite_agent_jobs.id`) the agent echoes on every
     /// later job-scoped call. Present only when `accepted` is true.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,7 +226,7 @@ pub struct AcceptSuiteResp {
     /// Per-suite job number, for display/inspection. Present with `job`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_id: Option<i32>,
-    /// Reason if not accepted (e.g., the agent is not eligible for this suite)
+    /// Why nothing was claimed, when `accepted` is false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -358,6 +349,12 @@ fn default_fetch_count() -> u32 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FetchTasksResp {
     pub tasks: Vec<WorkerTaskResp>,
+    /// Whether the agent should keep waiting on this job rather than wind it
+    /// down. True while the suite is `Open`, which covers "drained, but not idle
+    /// long enough to be sure". An empty batch with this set means "come back
+    /// and ask again", so the provisioned environment stays warm.
+    #[serde(default)]
+    pub hold_job_open: bool,
 }
 
 /// Request to report a task result. Mirrors the worker's `ReportTaskReq{id, op}`
@@ -461,10 +458,10 @@ pub enum AgentNotification {
 
     /// Stop the current suite and pick up a higher-priority one.
     ///
-    /// **Not emitted yet.** A running agent is never interrupted for now (see
-    /// `docs/plans/agent-layer.md`, constraint 5). The variant exists so the
-    /// signal can be turned on later without a wire change; the agent already
-    /// handles it by cancelling its job and targeting the new suite.
+    /// **Not emitted yet.** A running agent is never interrupted for now. The
+    /// variant exists so the signal can be turned on later without a wire
+    /// change; the agent already handles it by cancelling its job and targeting
+    /// the new suite.
     PreemptSuite {
         new_suite_uuid: Uuid,
         new_priority: i32,

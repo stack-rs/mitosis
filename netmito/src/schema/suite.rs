@@ -172,7 +172,9 @@ pub struct ParsedTaskSuiteInfo {
     pub completed_at: Option<OffsetDateTime>,
 }
 
-/// Detailed suite response: the suite plus the UUIDs of its assigned agents
+/// Detailed suite response: the suite plus the UUIDs of the agents currently
+/// eligible to run it — tag-matched plus manual includes, minus manual excludes,
+/// computed at query time rather than stored
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSuiteQueryResp {
     pub info: ParsedTaskSuiteInfo,

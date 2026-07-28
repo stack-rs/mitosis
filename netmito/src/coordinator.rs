@@ -10,9 +10,24 @@ use crate::config::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 use crate::migration::{Migrator, MigratorTrait};
 use crate::service::agent::heartbeat::AgentHeartbeatQueue;
 use crate::service::s3::setup_buckets;
+use crate::service::suite::sweep_inactive_suites;
 use crate::service::worker::{restore_workers, HeartbeatQueue, TaskDispatcher};
 use crate::signal::shutdown_signal;
 use crate::ws::AgentWsRouter;
+
+/// How often the idle-suite sweep runs, given the configured idle window.
+///
+/// Half the window, so a drained suite lingers in `Open` at most about one and a
+/// half windows past its last task — and an agent holds its job for no longer
+/// than that. Scaling with the window is what keeps a small one meaningful: a
+/// fixed period would swamp a 5-second window and waste queries on an hour-long
+/// one. Clamped at both ends so neither extreme misbehaves.
+fn suite_sweep_period(idle_window: std::time::Duration) -> std::time::Duration {
+    (idle_window / 2).clamp(
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(30),
+    )
+}
 
 pub struct MitoCoordinator {
     pub infra_pool: InfraPool,
@@ -22,6 +37,9 @@ pub struct MitoCoordinator {
     pub ws_router: AgentWsRouter,
     pub cancel_token: CancellationToken,
     pub log_dir: PathBuf,
+    /// How long a suite may go without a new task before the sweep settles it
+    /// out of `Open`.
+    pub suite_auto_close_timeout: std::time::Duration,
 }
 
 impl MitoCoordinator {
@@ -131,6 +149,7 @@ impl MitoCoordinator {
             agent_heartbeat_queue_rx,
         );
         let ws_router = config.build_ws_router(cancel_token.clone(), ws_router_rx);
+        let suite_auto_close_timeout = config.suite_auto_close_timeout;
 
         // Setup s3 storage
         // List all buckets and create if not exist
@@ -161,6 +180,7 @@ impl MitoCoordinator {
             ws_router,
             cancel_token,
             log_dir,
+            suite_auto_close_timeout,
         })
     }
 
@@ -173,11 +193,41 @@ impl MitoCoordinator {
             mut agent_heartbeat_queue,
             mut ws_router,
             cancel_token,
+            suite_auto_close_timeout,
             ..
         } = self;
 
         // Create TaskTracker to manage background tasks
         let task_tracker = TaskTracker::new();
+
+        // Settle idle suites out of `Open`. Jittered so a fleet of coordinators
+        // against one database does not sweep in lockstep.
+        {
+            let db = infra_pool.db.clone();
+            let cancel = cancel_token.clone();
+            let period = suite_sweep_period(suite_auto_close_timeout);
+            task_tracker.spawn(async move {
+                loop {
+                    // Up to half a period of jitter, so several coordinators on
+                    // one database do not all sweep on the same tick.
+                    let delay = period
+                        + std::time::Duration::from_millis(rand::Rng::random_range(
+                            &mut rand::rng(),
+                            0..=(period.as_millis() as u64 / 2),
+                        ));
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(delay) => {
+                            if let Err(e) = sweep_inactive_suites(&db, suite_auto_close_timeout).await {
+                                tracing::error!("Failed to sweep inactive suites: {e}");
+                            }
+                        }
+                    }
+                }
+                tracing::info!("Suite sweep stopped");
+            });
+        }
 
         // Spawn background tasks using TaskTracker
         task_tracker.spawn(async move {

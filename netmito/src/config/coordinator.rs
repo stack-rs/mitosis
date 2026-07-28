@@ -23,8 +23,11 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use crate::{
+    channel::{MRx, MTx},
     error::Error,
+    service::agent::heartbeat::{AgentHeartbeatOp, AgentHeartbeatQueue},
     service::worker::{HeartbeatOp, HeartbeatQueue, TaskDispatcher, TaskDispatcherOp},
+    ws::{AgentWsRouter, RouterOp},
 };
 
 use super::TracingGuard;
@@ -60,8 +63,16 @@ pub struct CoordinatorConfig {
     pub(crate) access_token_expires_in: std::time::Duration,
     #[serde(with = "humantime_serde")]
     pub(crate) heartbeat_timeout: std::time::Duration,
+    /// How often to send a WebSocket keepalive to a connected agent, so idle
+    /// notification sockets are not culled by intermediate proxies.
+    #[serde(with = "humantime_serde", default = "default_ws_ping_interval")]
+    pub(crate) ws_ping_interval: std::time::Duration,
     pub(crate) log_path: Option<RelativePathBuf>,
     pub(crate) file_log: bool,
+}
+
+fn default_ws_ping_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(30)
 }
 
 fn default_mitosis_region() -> String {
@@ -149,6 +160,10 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub heartbeat_timeout: Option<String>,
+    /// The agent WebSocket keepalive interval, default to 30 seconds
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub ws_ping_interval: Option<String>,
     /// The log file path. If not specified, then the default rolling log file path would be used.
     /// If specified, then the log file would be exactly at the path specified.
     #[arg(long)]
@@ -190,6 +205,7 @@ impl Default for CoordinatorConfig {
             access_token_public_path: "public.pem".to_string().into(),
             access_token_expires_in: std::time::Duration::from_secs(60 * 60 * 24 * 7),
             heartbeat_timeout: std::time::Duration::from_secs(600),
+            ws_ping_interval: default_ws_ping_interval(),
             log_path: None,
             file_log: false,
         }
@@ -234,6 +250,23 @@ impl CoordinatorConfig {
         #[cfg(feature = "crossfire-channel")] rx: crossfire::AsyncRx<HeartbeatOp>,
     ) -> HeartbeatQueue {
         HeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
+    }
+
+    pub fn build_agent_heartbeat_queue(
+        &self,
+        cancel_token: CancellationToken,
+        pool: InfraPool,
+        rx: MRx<AgentHeartbeatOp>,
+    ) -> AgentHeartbeatQueue {
+        AgentHeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
+    }
+
+    pub fn build_ws_router(
+        &self,
+        cancel_token: CancellationToken,
+        rx: MRx<RouterOp>,
+    ) -> AgentWsRouter {
+        AgentWsRouter::new(cancel_token, rx)
     }
 
     pub async fn build_redis_connection_info(
@@ -310,6 +343,8 @@ impl CoordinatorConfig {
         #[cfg(feature = "crossfire-channel")] worker_heartbeat_queue_tx: crossfire::MTx<
             HeartbeatOp,
         >,
+        agent_heartbeat_queue_tx: MTx<AgentHeartbeatOp>,
+        ws_router_tx: MTx<RouterOp>,
     ) -> crate::error::Result<InfraPool> {
         let db = sea_orm::Database::connect(&self.db_url).await?;
         let credential = Credentials::new(
@@ -333,6 +368,10 @@ impl CoordinatorConfig {
             attachments_bucket: self.attachments_bucket.clone(),
             worker_task_queue_tx,
             worker_heartbeat_queue_tx,
+            agent_heartbeat_queue_tx,
+            ws_router_tx,
+            boot_uuid: uuid::Uuid::new_v4(),
+            ws_ping_interval: self.ws_ping_interval,
         })
     }
 
@@ -446,6 +485,13 @@ pub struct InfraPool {
     pub worker_heartbeat_queue_tx: UnboundedSender<HeartbeatOp>,
     #[cfg(feature = "crossfire-channel")]
     pub worker_heartbeat_queue_tx: crossfire::MTx<HeartbeatOp>,
+    pub agent_heartbeat_queue_tx: MTx<AgentHeartbeatOp>,
+    pub ws_router_tx: MTx<RouterOp>,
+    /// Identifies this coordinator process. Agents compare it against the
+    /// `boot_id` in a `CounterSync` to notice a restart and reset the
+    /// notification sequence they are tracking.
+    pub boot_uuid: uuid::Uuid,
+    pub ws_ping_interval: std::time::Duration,
 }
 
 #[derive(Debug)]

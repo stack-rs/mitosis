@@ -12,7 +12,8 @@ use crate::{
     error::ApiError,
     schema::{
         CancelTaskSuiteParam, CreateTaskSuiteReq, CreateTaskSuiteResp, SuiteAgentOverrideReq,
-        SuiteAgentOverrideResp, TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp,
+        SuiteAgentOverrideResp, SuiteJobQueryResp, SuiteJobsQueryReq, SuiteJobsQueryResp,
+        TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp,
     },
     service::{
         self,
@@ -27,6 +28,8 @@ pub fn suites_router(st: InfraPool) -> Router<InfraPool> {
         .route("/{uuid}", get(get_suite_details).delete(cancel_suite))
         .route("/{uuid}/close", post(close_suite))
         .route("/{uuid}/agents/override", post(override_agents_for_suite))
+        .route("/{uuid}/jobs/query", post(query_suite_jobs))
+        .route("/{uuid}/jobs/{job_id}", get(get_suite_job))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -97,6 +100,31 @@ pub async fn override_agents_for_suite(
     Json(req): Json<SuiteAgentOverrideReq>,
 ) -> Result<Json<SuiteAgentOverrideResp>, ApiError> {
     let resp = service::suite::user_override_agents_for_suite(u.id, &pool, uuid, req)
+        .await
+        .map_err(map_service_error)?;
+    Ok(Json(resp))
+}
+
+/// `POST /suites/{uuid}/jobs/query` — the suite's job history, filtered.
+pub async fn query_suite_jobs(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<SuiteJobsQueryReq>,
+) -> Result<Json<SuiteJobsQueryResp>, ApiError> {
+    let resp = service::suite::user_query_suite_jobs(u.id, &pool, uuid, req)
+        .await
+        .map_err(map_service_error)?;
+    Ok(Json(resp))
+}
+
+/// `GET /suites/{uuid}/jobs/{job_id}` — one job plus its hook executions.
+pub async fn get_suite_job(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path((uuid, job_id)): Path<(Uuid, i32)>,
+) -> Result<Json<SuiteJobQueryResp>, ApiError> {
+    let resp = service::suite::user_get_suite_job(u.id, &pool, uuid, job_id)
         .await
         .map_err(map_service_error)?;
     Ok(Json(resp))

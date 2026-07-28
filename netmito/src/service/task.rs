@@ -45,9 +45,15 @@ fn check_exec_spec(spec: &ExecSpec) -> crate::error::Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 enum Submitter {
     User,
-    Worker(Uuid),
+    /// A running task spawning a downstream child, identified by the parent's
+    /// uuid and the group the parent itself lives in.
+    Task {
+        upstream_task_uuid: Uuid,
+        parent_group_id: i64,
+    },
 }
 
 async fn internal_submit_task(
@@ -71,7 +77,9 @@ async fn internal_submit_task(
     // Used later when creating active tasks active model
     let (state, upstream_task_uuid) = match submitter {
         Submitter::User => (Set(crate::entity::state::TaskState::Ready), NotSet),
-        Submitter::Worker(upstream_task_uuid) => (
+        Submitter::Task {
+            upstream_task_uuid, ..
+        } => (
             Set(crate::entity::state::TaskState::Pending),
             Set(Some(upstream_task_uuid)),
         ),
@@ -89,51 +97,18 @@ async fn internal_submit_task(
         .transaction::<_, (ActiveTasks::Model, Option<TaskSuites::Model>), crate::error::Error>(
             |txn| {
                 Box::pin(async move {
-                    // Determine the owning group and (optionally) the suite, then
-                    // atomically bump the group's task counter. When a suite is designated it
-                    // is authoritative: the task's group is the suite's owning group, and the
-                    // request's group_name must match it.
-                    let (group_id, task_id, suite) = match suite_uuid {
-                        None => {
-                            // No suite: resolve the user-specified group, verify the caller's
-                            // membership, and bump its task counter in one statement.
-                            let mut upd = Group::Entity::update_many()
-                                .col_expr(
-                                    Group::Column::TaskCount,
-                                    Expr::col((Group::Entity, Group::Column::TaskCount)).add(1),
-                                )
-                                .col_expr(Group::Column::UpdatedAt, Expr::value(now))
-                                .filter(Group::Column::GroupName.eq(&group_name))
-                                .filter(
-                                    Expr::col((UserGroup::Entity, UserGroup::Column::UserId))
-                                        .eq(creator_id),
-                                )
-                                // TODO: when there is 'exec' access level, enforce access check here.
-                                //
-                                // .filter(
-                                //     Expr::col((UserGroup::Entity, UserGroup::Column::Role))
-                                //         .gte(UserGroupRole::Write),
-                                // )
-                                .filter(Expr::col((Group::Entity, Group::Column::Id)).eq(
-                                    Expr::col((UserGroup::Entity, UserGroup::Column::GroupId)),
-                                ));
-                            upd.query().from(UserGroup::Entity);
-                            let group = upd
-                                .exec_with_returning(txn)
-                                .await?
-                                .into_iter()
-                                .next()
-                                .ok_or_else(|| {
-                                    Error::ApiError(crate::error::ApiError::NotFound(format!(
-                                        "User doesn't have permission or group with name {}",
-                                        group_name
-                                    )))
-                                })?;
-                            (group.id, group.task_count, None)
-                        }
-                        Some(suite_uuid) => {
-                            // Suite designated: resolve it (and the caller's membership in its
-                            // owning group) in one join. The suite is authoritative for the group.
+                    // Resolve the designated suite, if any. How it is authorized
+                    // depends on the submitter: a user reaches a suite through their
+                    // own group memberships, while a task spawning a child may target
+                    // any suite owned by the group the parent task itself lives in.
+                    //
+                    // The parent's creator is deliberately not re-checked, so a long-running suite
+                    // keeps spawning work after that user leaves the group.
+                    let suite = match (suite_uuid, submitter) {
+                        (None, _) => None,
+                        (Some(suite_uuid), Submitter::User) => {
+                            // Resolve the suite and the caller's membership in its
+                            // owning group in one join.
                             let builder = txn.get_database_backend();
                             let suite_stmt = Query::select()
                                 .columns([
@@ -186,47 +161,137 @@ async fn internal_submit_task(
                                             suite_uuid
                                         )))
                                     })?;
-                            // The suite must be able to accept new tasks.
-                            if !suite.state.can_accept_tasks() {
-                                return Err(Error::ApiError(
-                                    crate::error::ApiError::InvalidRequest(format!(
-                                        "Suite is in {} state and cannot accept new tasks",
-                                        suite.state
-                                    )),
-                                ));
-                            }
-                            // Derive the owning group from the suite and bump its counter.
+                            Some(suite)
+                        }
+                        (
+                            Some(suite_uuid),
+                            Submitter::Task {
+                                parent_group_id, ..
+                            },
+                        ) => Some(
+                            TaskSuites::Entity::find()
+                                .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
+                                .filter(TaskSuites::Column::GroupId.eq(parent_group_id))
+                                .one(txn)
+                                .await?
+                                .ok_or_else(|| {
+                                    // A suite owned by another group is reported the
+                                    // same way as one that does not exist.
+                                    Error::ApiError(crate::error::ApiError::NotFound(format!(
+                                        "Suite with uuid {} in the parent task's group",
+                                        suite_uuid
+                                    )))
+                                })?,
+                        ),
+                    };
+
+                    // The suite must be able to accept new tasks.
+                    if let Some(suite) = &suite {
+                        if !suite.state.can_accept_tasks() {
+                            return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                                format!(
+                                    "Suite is in {} state and cannot accept new tasks",
+                                    suite.state
+                                ),
+                            )));
+                        }
+                    }
+
+                    // The owning group, when it is already pinned by something other
+                    // than `group_name`: a designated suite owns the task, and a
+                    // task-spawned child always stays in its parent's group. `None`
+                    // is the plain user path, where the group is resolved from
+                    // `group_name` and the caller's membership.
+                    let pinned_group_id = match (&suite, submitter) {
+                        (Some(suite), _) => Some(suite.group_id),
+                        (
+                            None,
+                            Submitter::Task {
+                                parent_group_id, ..
+                            },
+                        ) => Some(parent_group_id),
+                        (None, Submitter::User) => None,
+                    };
+
+                    // Bump the owning group's task counter atomically.
+                    let (group_id, task_id) = match pinned_group_id {
+                        Some(pinned_group_id) => {
                             let group = Group::Entity::update_many()
                                 .col_expr(
                                     Group::Column::TaskCount,
                                     Expr::col(Group::Column::TaskCount).add(1),
                                 )
                                 .col_expr(Group::Column::UpdatedAt, Expr::value(now))
-                                .filter(Group::Column::Id.eq(suite.group_id))
+                                .filter(Group::Column::Id.eq(pinned_group_id))
                                 .exec_with_returning(txn)
                                 .await?
                                 .into_iter()
                                 .next()
                                 .ok_or_else(|| {
-                                    // The suite's group row must exist (FK)
-                                    tracing::error!(
-                                        "Owning group {} of suite {} not found",
-                                        suite.group_id,
-                                        suite_uuid
-                                    );
+                                    // The row must exist: both the suite and the
+                                    // parent task hold an FK to it.
+                                    tracing::error!("Owning group {} not found", pinned_group_id);
                                     Error::ApiError(crate::error::ApiError::InternalServerError)
                                 })?;
-                            // The request's group_name must match the suite's owning group.
-                            // Safe to reveal the real group: access to the suite is proven.
+                            // The request's group_name must match
                             if group.group_name != group_name {
+                                let owner = match &suite {
+                                    Some(suite) => {
+                                        format!(
+                                            "Suite {} belongs to group {}",
+                                            suite.uuid, group.group_name
+                                        )
+                                    }
+                                    None => format!(
+                                        "The parent task belongs to group {}",
+                                        group.group_name
+                                    ),
+                                };
                                 return Err(Error::ApiError(
                                     crate::error::ApiError::InvalidRequest(format!(
-                                        "Suite {} belongs to group {}, not {}",
-                                        suite_uuid, group.group_name, group_name
+                                        "{}, not {}",
+                                        owner, group_name
                                     )),
                                 ));
                             }
-                            (group.id, group.task_count, Some(suite))
+                            (group.id, group.task_count)
+                        }
+                        None => {
+                            // Resolve the user-specified group, verify the caller's
+                            // membership, and bump its task counter in one statement.
+                            let mut upd = Group::Entity::update_many()
+                                .col_expr(
+                                    Group::Column::TaskCount,
+                                    Expr::col((Group::Entity, Group::Column::TaskCount)).add(1),
+                                )
+                                .col_expr(Group::Column::UpdatedAt, Expr::value(now))
+                                .filter(Group::Column::GroupName.eq(&group_name))
+                                .filter(
+                                    Expr::col((UserGroup::Entity, UserGroup::Column::UserId))
+                                        .eq(creator_id),
+                                )
+                                // TODO: when there is 'exec' access level, enforce access check here.
+                                //
+                                // .filter(
+                                //     Expr::col((UserGroup::Entity, UserGroup::Column::Role))
+                                //         .gte(UserGroupRole::Write),
+                                // )
+                                .filter(Expr::col((Group::Entity, Group::Column::Id)).eq(
+                                    Expr::col((UserGroup::Entity, UserGroup::Column::GroupId)),
+                                ));
+                            upd.query().from(UserGroup::Entity);
+                            let group = upd
+                                .exec_with_returning(txn)
+                                .await?
+                                .into_iter()
+                                .next()
+                                .ok_or_else(|| {
+                                    Error::ApiError(crate::error::ApiError::NotFound(format!(
+                                        "User doesn't have permission or group with name {}",
+                                        group_name
+                                    )))
+                                })?;
+                            (group.id, group.task_count)
                         }
                     };
 
@@ -264,6 +329,7 @@ async fn internal_submit_task(
                         exec_options: Set(exec_options_json),
                         result: Set(None),
                         upstream_task_uuid,
+                        task_suite_id: Set(suite.as_ref().map(|s| s.id)),
                         ..Default::default()
                     };
                     let task = task.insert(txn).await?;
@@ -283,8 +349,11 @@ async fn internal_submit_task(
 
     // Not pending, notify agent/worker depending on whether it belongs to a suite
     match suite {
-        Some(_suite) => {
-            // TODO: If this task belongs to a suite, notify agents
+        Some(suite) => {
+            // Suite tasks are pulled by agents from the suite, not pushed into
+            // worker queues; all this does is wake the idle eligible agents so
+            // one picks the suite up without waiting for its next heartbeat.
+            crate::service::agent::notify_suite_available(pool, suite.id).await;
         }
         None => {
             let builder = pool.db.get_database_backend();
@@ -336,13 +405,29 @@ pub async fn user_submit_task(
     internal_submit_task(pool, creator_id, Submitter::User, req).await
 }
 
+/// Submit the downstream child of a running task, on behalf of the worker or
+/// agent executing it.
+///
+/// The child stays in the parent's group, and `req.suite_uuid` may name any
+/// suite that group owns — the parent's own suite, a sibling one, or `None` for
+/// a suite-less task dispatched to workers.
 pub async fn worker_submit_pending_task(
     pool: &InfraPool,
     creator_id: i64,
     upstream_task_uuid: Uuid,
+    parent_group_id: i64,
     req: SubmitTaskReq,
 ) -> crate::error::Result<SubmitTaskResp> {
-    internal_submit_task(pool, creator_id, Submitter::Worker(upstream_task_uuid), req).await
+    internal_submit_task(
+        pool,
+        creator_id,
+        Submitter::Task {
+            upstream_task_uuid,
+            parent_group_id,
+        },
+        req,
+    )
+    .await
 }
 
 pub async fn worker_trigger_pending_task(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<()> {
@@ -359,6 +444,12 @@ pub async fn worker_trigger_pending_task(pool: &InfraPool, uuid: Uuid) -> crate:
     task.state = Set(TaskState::Ready);
     task.updated_at = Set(TimeDateTimeWithTimeZone::now_utc());
     let task = task.update(&pool.db).await?;
+    // A suite task never enters the worker queues — agents pull it from its
+    // suite. Wake the idle eligible agents instead.
+    if let Some(suite_id) = task.task_suite_id {
+        crate::service::agent::notify_suite_available(pool, suite_id).await;
+        return Ok(());
+    }
     // Batch add task to worker task queues
     let builder = pool.db.get_database_backend();
     let tasks_stmt = Query::select()

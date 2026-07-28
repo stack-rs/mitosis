@@ -8,14 +8,18 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use crate::api::router;
 use crate::config::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 use crate::migration::{Migrator, MigratorTrait};
+use crate::service::agent::heartbeat::AgentHeartbeatQueue;
 use crate::service::s3::setup_buckets;
 use crate::service::worker::{restore_workers, HeartbeatQueue, TaskDispatcher};
 use crate::signal::shutdown_signal;
+use crate::ws::AgentWsRouter;
 
 pub struct MitoCoordinator {
     pub infra_pool: InfraPool,
     pub worker_task_queue: TaskDispatcher,
     pub worker_heartbeat_queue: HeartbeatQueue,
+    pub agent_heartbeat_queue: AgentHeartbeatQueue,
+    pub ws_router: AgentWsRouter,
     pub cancel_token: CancellationToken,
     pub log_dir: PathBuf,
 }
@@ -96,13 +100,21 @@ impl MitoCoordinator {
         let (worker_heartbeat_queue_tx, worker_heartbeat_queue_rx) =
             crossfire::mpsc::unbounded_async();
 
+        let (agent_heartbeat_queue_tx, agent_heartbeat_queue_rx) = crate::channel::unbounded();
+        let (ws_router_tx, ws_router_rx) = crate::channel::unbounded();
+
         // Setup worker task queue
         let worker_task_queue =
             config.build_worker_task_queue(cancel_token.clone(), worker_task_queue_rx);
 
         // Setup infra pool
         let infra_pool = config
-            .build_infra_pool(worker_task_queue_tx, worker_heartbeat_queue_tx)
+            .build_infra_pool(
+                worker_task_queue_tx,
+                worker_heartbeat_queue_tx,
+                agent_heartbeat_queue_tx,
+                ws_router_tx,
+            )
             .await?;
 
         // Setup worker heartbeat queue
@@ -111,6 +123,14 @@ impl MitoCoordinator {
             infra_pool.clone(),
             worker_heartbeat_queue_rx,
         );
+
+        // Setup the agent-side actors: liveness tracking and the notification router
+        let agent_heartbeat_queue = config.build_agent_heartbeat_queue(
+            cancel_token.clone(),
+            infra_pool.clone(),
+            agent_heartbeat_queue_rx,
+        );
+        let ws_router = config.build_ws_router(cancel_token.clone(), ws_router_rx);
 
         // Setup s3 storage
         // List all buckets and create if not exist
@@ -137,6 +157,8 @@ impl MitoCoordinator {
             infra_pool,
             worker_task_queue,
             worker_heartbeat_queue,
+            agent_heartbeat_queue,
+            ws_router,
             cancel_token,
             log_dir,
         })
@@ -148,6 +170,8 @@ impl MitoCoordinator {
             infra_pool,
             mut worker_task_queue,
             mut worker_heartbeat_queue,
+            mut agent_heartbeat_queue,
+            mut ws_router,
             cancel_token,
             ..
         } = self;
@@ -166,7 +190,18 @@ impl MitoCoordinator {
             tracing::info!("Heartbeat queue stopped");
         });
 
+        task_tracker.spawn(async move {
+            ws_router.run().await;
+        });
+
+        task_tracker.spawn(async move {
+            agent_heartbeat_queue.run().await;
+        });
+
         restore_workers(&infra_pool).await?;
+        // Agents keep their rows across a coordinator restart, so tell them this
+        // is a new boot and their notification sequence starts over.
+        crate::service::agent::notify_agents_of_restart(&infra_pool).await?;
         let app = router(infra_pool, cancel_token.clone());
         let addr = crate::config::SERVER_CONFIG
             .get()

@@ -1,7 +1,9 @@
+pub mod agent;
 pub mod client;
 pub mod coordinator;
 pub mod manager;
 pub mod worker;
+pub use agent::{AgentConfig, AgentConfigCli};
 pub use client::{ClientConfig, ClientConfigCli};
 pub use coordinator::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 pub(crate) use coordinator::{

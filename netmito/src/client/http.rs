@@ -1759,4 +1759,104 @@ impl MitoHttpClient {
             Err(get_error_from_resp(resp).await.into())
         }
     }
+
+    /// List a suite's jobs — one row per agent attempt at running it.
+    pub async fn query_suite_jobs(
+        &mut self,
+        suite_uuid: Uuid,
+        req: SuiteJobsQueryReq,
+    ) -> crate::error::Result<SuiteJobsQueryResp> {
+        self.url
+            .set_path(&format!("suites/{suite_uuid}/jobs/query"));
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<SuiteJobsQueryResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    /// One job of a suite, with its hook executions embedded.
+    pub async fn get_suite_job(
+        &mut self,
+        suite_uuid: Uuid,
+        job_id: i32,
+    ) -> crate::error::Result<SuiteJobQueryResp> {
+        self.url
+            .set_path(&format!("suites/{suite_uuid}/jobs/{job_id}"));
+        let resp = self
+            .http_client
+            .get(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<SuiteJobQueryResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn query_agents(
+        &mut self,
+        req: AgentsQueryReq,
+    ) -> crate::error::Result<AgentsQueryResp> {
+        self.url.set_path("agents/query");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<AgentsQueryResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    /// Shut an agent down. The agent row is never deleted — it is marked
+    /// `Offline`; see `service::agent::user_shutdown_agent_by_uuid`.
+    pub async fn shutdown_agent(&mut self, uuid: Uuid, force: bool) -> crate::error::Result<()> {
+        self.url.set_path(&format!("agents/{uuid}"));
+        if force {
+            self.url.set_query(Some("op=force"));
+        }
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        // Clear the query so it does not leak into later requests reusing self.url.
+        self.url.set_query(None);
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
 }

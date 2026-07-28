@@ -18,7 +18,7 @@ use sea_orm::{entity::prelude::*, Set};
 
 use crate::{
     config::InfraPool,
-    entity::{state::UserState, users as User, workers as Worker},
+    entity::{agents as Agent, state::UserState, users as User, workers as Worker},
     error::{ApiError, AuthError},
     schema::{UserChangePasswordReq, UserLoginReq},
 };
@@ -26,7 +26,6 @@ use token::{generate_token, verify_token};
 
 // TODO: should check if the structure and logic is high cohesive and low coupling enough, and
 // refactor if necessary.
-// TODO: check if we allow non-expiry lifetime
 
 #[derive(Debug, Clone)]
 pub struct AuthUser {
@@ -46,6 +45,12 @@ pub struct AuthAdminUser {
 
 #[derive(Debug, Clone)]
 pub struct AuthWorker {
+    pub id: i64,
+    pub uuid: Uuid,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthAgent {
     pub id: i64,
     pub uuid: Uuid,
 }
@@ -412,4 +417,30 @@ async fn worker_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<AuthWor
         id: worker.id,
         uuid,
     })
+}
+
+pub async fn agent_auth_middleware(
+    State(pool): State<InfraPool>,
+    TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
+    mut req: Request<Body>,
+    next: Next,
+) -> Result<impl IntoResponse, ApiError> {
+    let auth_agent = agent_auth(&pool.db, &bearer).await?;
+    req.extensions_mut().insert(auth_agent);
+    Ok(next.run(req).await)
+}
+
+async fn agent_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<AuthAgent, AuthError> {
+    let token = bearer.token();
+    let claims = verify_token(token).map_err(|_| AuthError::InvalidToken)?;
+    let uuid = Uuid::parse_str(&claims.sub).map_err(|_| AuthError::InvalidToken)?;
+
+    let agent = Agent::Entity::find()
+        .filter(Agent::Column::Uuid.eq(uuid))
+        .one(db)
+        .await
+        .map_err(|_| AuthError::WrongCredentials)?
+        .ok_or(AuthError::WrongCredentials)?;
+
+    Ok(AuthAgent { id: agent.id, uuid })
 }

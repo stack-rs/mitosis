@@ -24,6 +24,8 @@ access_token_public_path = "public.pem"
 # chosen by the Worker itself, via its own lifetime setting.
 access_token_expires_in = "7d"
 heartbeat_timeout = "600s"
+# ws_ping_interval is the keepalive cadence on agent notification sockets
+ws_ping_interval = "30s"
 file_log = false
 # log_path is not set. It will use the default rolling log file path if file_log is set to true
 
@@ -46,6 +48,28 @@ file_log = false
 # log_path is not set. It will use the default rolling log file path if file_log is set to true
 #   - If shared_log is enabled and log_path is not set, it will use workers.log in cache directory
 #   - If shared_log is disabled and log_path is not set, it will use {worker_uuid}.log in cache directory
+
+[agent]
+coordinator_addr = "http://127.0.0.1:5000"
+heartbeat_interval = "1m"
+# polling_interval is how long to wait before retrying a failed coordinator call
+polling_interval = "30s"
+lifetime = "30d"
+# credential_path is not set
+# user is not set
+# password is not set
+# admin_group is not set, default to the registering user's own group. It is the
+#   one group that can shut the agent down, and the user must be its Admin.
+# groups are not set, default to the user's group. Each listed group gains Write
+#   access to the agent. Registration rewrites group access outright, so a group
+#   left out of a re-registration loses the access it had.
+# tags are not set. An agent is eligible for a suite when it carries every tag
+#   the suite asks for.
+# labels are not set. Labels are for querying only, never for matching.
+# machine_code is not set. It is resolved from the cached value, then
+#   /etc/machine-id, then a generated UUID. It keys the agent's record, so a
+#   machine that comes back with a different code strands its old record.
+# retain is not set, default to false
 
 [client]
 # user = "mitosis_admin"

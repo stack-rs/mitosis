@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    entity::state::TaskSuiteState,
-    schema::{CreateTaskSuiteReq, TaskSuitesQueryReq, WorkerSchedulePlan},
+    entity::state::{SuiteJobState, TaskSuiteState},
+    schema::{CreateTaskSuiteReq, SuiteJobsQueryReq, TaskSuitesQueryReq, WorkerSchedulePlan},
 };
 
 #[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
@@ -27,6 +27,8 @@ pub enum SuitesCommands {
     Cancel(CancelSuiteArgs),
     /// Set agent overrides on a suite in one batch: include, exclude, and/or clear agents
     Override(AgentsForSuiteOverrideArgs),
+    /// Inspect the suite's jobs — one per agent attempt at running it
+    Jobs(SuiteJobsArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -156,4 +158,40 @@ pub struct AgentsForSuiteOverrideArgs {
     /// Agents to reset to the tag-match default (clear any manual include/exclude)
     #[arg(long, num_args = 0.., value_delimiter = ',')]
     pub clear: Vec<Uuid>,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct SuiteJobsArgs {
+    /// The UUID of the suite
+    pub uuid: Uuid,
+    /// Show one job in full, including its hook executions
+    #[arg(long)]
+    pub job: Option<i32>,
+    /// Filter the listing by job state
+    #[arg(long, num_args = 0.., value_delimiter = ',')]
+    pub states: Vec<SuiteJobState>,
+    /// Only list jobs run by this agent
+    #[arg(long)]
+    pub agent: Option<Uuid>,
+    /// Maximum number of jobs to list
+    #[arg(long)]
+    pub limit: Option<u64>,
+    /// Number of jobs to skip (for pagination)
+    #[arg(long)]
+    pub offset: Option<u64>,
+    /// Report the number of matching jobs instead of listing them
+    #[arg(long)]
+    pub count: bool,
+}
+
+impl From<&SuiteJobsArgs> for SuiteJobsQueryReq {
+    fn from(args: &SuiteJobsArgs) -> Self {
+        Self {
+            states: (!args.states.is_empty()).then(|| args.states.iter().copied().collect()),
+            agent_uuid: args.agent,
+            limit: args.limit,
+            offset: args.offset,
+            count: args.count,
+        }
+    }
 }

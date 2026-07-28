@@ -8,7 +8,7 @@ use reqwest::{header::CONTENT_LENGTH, Response};
 use sea_orm::{
     prelude::*,
     sea_query::{Expr, Query},
-    FromQueryResult, Set, TransactionTrait,
+    FromQueryResult, QuerySelect, Set, TransactionTrait,
 };
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
@@ -413,18 +413,9 @@ pub(crate) async fn group_upload_artifact(
         StoredTaskModel::Active(ref task) => (task.uuid, task.group_id),
         StoredTaskModel::Archived(ref task) => (task.uuid, task.group_id),
     };
-    // Check if group is active and has enough storage quota
-    let group = Group::Entity::find_by_id(group_id)
-        .one(&pool.db)
-        .await?
-        .ok_or(ApiError::InvalidRequest(
-            "Group for the task not found".to_string(),
-        ))?;
-    if group.state != GroupState::Active {
-        return Err(ApiError::InvalidRequest("Group is not active".to_string()).into());
-    }
-    let s3_client = pool.s3.clone();
-    let artifacts_bucket = pool.artifacts_bucket.clone();
+    // The group is loaded, checked and quota-allocated inside the transaction
+    // by `reserve_artifact_upload`.
+    let pool_cloned = pool.clone();
     // This returns (exist, url)
     let resp = pool
         .db
@@ -449,83 +440,121 @@ pub(crate) async fn group_upload_artifact(
                         updated_task.update(txn).await?;
                     }
                 }
-                let artifact = Artifact::Entity::find()
-                    .filter(Artifact::Column::TaskId.eq(uuid))
-                    .filter(Artifact::Column::ContentType.eq(content_type))
-                    .one(txn)
-                    .await?;
-                let s3_object_key = format!("{uuid}/{content_type}");
-                let url: String;
-                // Check group storage quota and allocate storage for the artifact
-                let exist = match artifact {
-                    Some(artifact) => {
-                        let recorded_content_length = content_length.max(artifact.size);
-                        let new_storage_used =
-                            group.storage_used + (recorded_content_length - artifact.size);
-                        if new_storage_used > group.storage_quota {
-                            return Err(ApiError::QuotaExceeded.into());
-                        }
-                        url = get_presigned_upload_link(
-                            &s3_client,
-                            &artifacts_bucket,
-                            s3_object_key,
-                            content_length,
-                        )
-                        .await
-                        .map_err(ApiError::from)?;
-                        let artifact = Artifact::ActiveModel {
-                            id: Set(artifact.id),
-                            size: Set(recorded_content_length),
-                            updated_at: Set(now),
-                            ..Default::default()
-                        };
-                        artifact.update(txn).await?;
-                        let group = Group::ActiveModel {
-                            id: Set(group_id),
-                            storage_used: Set(new_storage_used),
-                            updated_at: Set(now),
-                            ..Default::default()
-                        };
-                        group.update(txn).await?;
-                        true
-                    }
-                    None => {
-                        let new_storage_used = group.storage_used + content_length;
-                        if new_storage_used > group.storage_quota {
-                            return Err(ApiError::QuotaExceeded.into());
-                        }
-                        url = get_presigned_upload_link(
-                            &s3_client,
-                            &artifacts_bucket,
-                            s3_object_key,
-                            content_length,
-                        )
-                        .await
-                        .map_err(ApiError::from)?;
-                        let artifact = Artifact::ActiveModel {
-                            task_id: Set(uuid),
-                            content_type: Set(content_type),
-                            size: Set(content_length),
-                            created_at: Set(now),
-                            updated_at: Set(now),
-                            ..Default::default()
-                        };
-                        artifact.insert(txn).await?;
-                        let group = Group::ActiveModel {
-                            id: Set(group_id),
-                            storage_used: Set(new_storage_used),
-                            updated_at: Set(now),
-                            ..Default::default()
-                        };
-                        group.update(txn).await?;
-                        false
-                    }
-                };
-                Ok((exist, url))
+                reserve_artifact_upload(
+                    txn,
+                    &pool_cloned,
+                    group_id,
+                    uuid,
+                    content_type,
+                    content_length,
+                    now,
+                )
+                .await
             })
         })
         .await?;
     Ok(resp)
+}
+
+/// Account for one artifact upload and presign its PUT, inside the caller's
+/// transaction. Returns `(already_existed, url)`.
+///
+/// `owner_uuid` is what the artifact is filed under in `artifacts.task_id`.
+///
+/// Check for group active, check for group quota and signs a s3 upload link
+pub(crate) async fn reserve_artifact_upload<C: ConnectionTrait>(
+    txn: &C,
+    pool: &InfraPool,
+    group_id: i64,
+    owner_uuid: Uuid,
+    content_type: ArtifactContentType,
+    content_length: i64,
+    now: TimeDateTimeWithTimeZone,
+) -> Result<(bool, String), Error> {
+    let s3_client = &pool.s3;
+    let artifacts_bucket = &pool.artifacts_bucket;
+    let group = Group::Entity::find_by_id(group_id)
+        .lock_exclusive()
+        .one(txn)
+        .await?
+        .ok_or(ApiError::InvalidRequest(
+            "Group for the artifact not found".to_string(),
+        ))?;
+    if group.state != GroupState::Active {
+        return Err(ApiError::InvalidRequest("Group is not active".to_string()).into());
+    }
+    let artifact = Artifact::Entity::find()
+        .filter(Artifact::Column::TaskId.eq(owner_uuid))
+        .filter(Artifact::Column::ContentType.eq(content_type))
+        .one(txn)
+        .await?;
+    let s3_object_key = format!("{owner_uuid}/{content_type}");
+    let url: String;
+    // Check group storage quota and allocate storage for the artifact
+    let exist = match artifact {
+        Some(artifact) => {
+            let recorded_content_length = content_length.max(artifact.size);
+            let new_storage_used = group.storage_used + (recorded_content_length - artifact.size);
+            if new_storage_used > group.storage_quota {
+                return Err(ApiError::QuotaExceeded.into());
+            }
+            url = get_presigned_upload_link(
+                s3_client,
+                artifacts_bucket,
+                s3_object_key,
+                content_length,
+            )
+            .await
+            .map_err(ApiError::from)?;
+            let artifact = Artifact::ActiveModel {
+                id: Set(artifact.id),
+                size: Set(recorded_content_length),
+                updated_at: Set(now),
+                ..Default::default()
+            };
+            artifact.update(txn).await?;
+            let group = Group::ActiveModel {
+                id: Set(group.id),
+                storage_used: Set(new_storage_used),
+                updated_at: Set(now),
+                ..Default::default()
+            };
+            group.update(txn).await?;
+            true
+        }
+        None => {
+            let new_storage_used = group.storage_used + content_length;
+            if new_storage_used > group.storage_quota {
+                return Err(ApiError::QuotaExceeded.into());
+            }
+            url = get_presigned_upload_link(
+                s3_client,
+                artifacts_bucket,
+                s3_object_key,
+                content_length,
+            )
+            .await
+            .map_err(ApiError::from)?;
+            let artifact = Artifact::ActiveModel {
+                task_id: Set(owner_uuid),
+                content_type: Set(content_type),
+                size: Set(content_length),
+                created_at: Set(now),
+                updated_at: Set(now),
+                ..Default::default()
+            };
+            artifact.insert(txn).await?;
+            let group = Group::ActiveModel {
+                id: Set(group.id),
+                storage_used: Set(new_storage_used),
+                updated_at: Set(now),
+                ..Default::default()
+            };
+            group.update(txn).await?;
+            false
+        }
+    };
+    Ok((exist, url))
 }
 
 pub async fn user_upload_artifact(

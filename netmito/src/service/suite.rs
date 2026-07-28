@@ -8,17 +8,17 @@ use uuid::Uuid;
 use super::suite_agent::{apply_suite_agent_override, authorize_suite, resolve_agent};
 use crate::config::InfraPool;
 use crate::entity::role::UserGroupRole;
-use crate::entity::state::{TaskState, TaskSuiteState};
-use crate::entity::task_suite_agent::SuiteAgentOverrideType;
+use crate::entity::state::{SuiteJobState, TaskState, TaskSuiteState};
 use crate::entity::{
     active_tasks as ActiveTasks, agents as Agent, archived_tasks as ArchivedTasks, groups as Group,
-    task_suite_agent as TaskSuiteAgent, task_suites as TaskSuites, user_group as UserGroup,
-    users as User,
+    hook_tasks as HookTasks, suite_agent_jobs as SuiteAgentJobs, task_suites as TaskSuites,
+    user_group as UserGroup, users as User,
 };
 use crate::error::{ApiError, Error, ResolveError, Result};
 use crate::schema::{
-    CancelTaskSuiteOp, CountQuery, CreateTaskSuiteReq, CreateTaskSuiteResp, ExecHooks,
-    ParsedTaskSuiteInfo, SuiteAgentOverrideReq, SuiteAgentOverrideResp, TaskResultMessage,
+    AgentNotification, CancelTaskSuiteOp, CountQuery, CreateTaskSuiteReq, CreateTaskSuiteResp,
+    ExecHooks, HookTaskInfo, ParsedTaskSuiteInfo, SuiteAgentOverrideReq, SuiteAgentOverrideResp,
+    SuiteJobInfo, SuiteJobQueryResp, SuiteJobsQueryReq, SuiteJobsQueryResp, TaskResultMessage,
     TaskResultSpec, TaskSuiteInfo, TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp,
     WorkerSchedulePlan,
 };
@@ -383,11 +383,6 @@ struct SuiteDetailResult {
     completed_at: Option<TimeDateTimeWithTimeZone>,
 }
 
-#[derive(FromQueryResult)]
-struct AgentUuidResult {
-    uuid: Uuid,
-}
-
 /// Get a single suite's details, including the uuids of agents allowed to execute this suite.
 /// The caller must have at least `Read` in the suite's group.
 ///
@@ -460,37 +455,10 @@ pub async fn user_get_task_suite_by_uuid(
             "User doesn't have permission or suite with uuid {suite_uuid}"
         ))))?;
 
-    // Only the manually-included agents are persisted; excluded rows must not be
-    // reported as assigned.
-    //
-    // TODO: this is only the manual half. The *effective* assigned set is
-    // `(in-memory tag-matched ∪ UserIncluded) − UserExcluded`. Once the agent scheduler
-    // exists, merge its in-memory tag-matched set here (and subtract UserExcluded) to
-    // produce the real assigned-agent list.
-    let agent_stmt = Query::select()
-        .column((Agent::Entity, Agent::Column::Uuid))
-        .from(Agent::Entity)
-        .join(
-            sea_orm::JoinType::Join,
-            TaskSuiteAgent::Entity,
-            Expr::col((TaskSuiteAgent::Entity, TaskSuiteAgent::Column::AgentId))
-                .eq(Expr::col((Agent::Entity, Agent::Column::Id))),
-        )
-        .and_where(
-            Expr::col((TaskSuiteAgent::Entity, TaskSuiteAgent::Column::TaskSuiteId)).eq(suite.id),
-        )
-        .and_where(
-            Expr::col((TaskSuiteAgent::Entity, TaskSuiteAgent::Column::OverrideType))
-                .eq(SuiteAgentOverrideType::UserIncluded),
-        )
-        .to_owned();
-
-    let eligible_agents = AgentUuidResult::find_by_statement(builder.build(&agent_stmt))
-        .all(&pool.db)
-        .await?
-        .into_iter()
-        .map(|m| m.uuid)
-        .collect();
+    // The effective set: `(tag-matched ∪ UserIncluded) − UserExcluded`, gated by
+    // the suite group's access to each agent. See `service::agent::matching`.
+    let eligible_agents =
+        crate::service::agent::matching::eligible_agent_uuids(&pool.db, suite.id).await?;
 
     let worker_schedule: WorkerSchedulePlan = serde_json::from_value(suite.worker_schedule)?;
     let exec_hooks: Option<ExecHooks> = suite.exec_hooks.map(serde_json::from_value).transpose()?;
@@ -558,20 +526,24 @@ pub async fn user_close_task_suite(user_id: i64, pool: &InfraPool, suite_uuid: U
 /// Cancel a suite (`* → Cancelled`, terminal). Archives every non-terminal task
 /// of the suite as `Cancelled`. Requires Write/Admin in the suite's group.
 ///
-/// `op` (`Graceful`/`Force`) currently has no differentiated effect: its only
-/// distinction is how running agents/jobs tear down and get notified, which lives
-/// in the agent layer that is not ported yet. The parameter is accepted now so the
-/// API stays stable; wire its behavior in with the agent work (see the seams below).
+/// `op` decides what happens to agents mid-run:
+/// - `Graceful` — in-flight jobs keep their state and run their cleanup hook;
+///   each agent is told the suite was cancelled and drives its own job to
+///   `Completed`. No task the agent is holding is archived out from under it
+///   without notice: it also gets the list of task uuids that were cancelled.
+/// - `Force` — in-flight jobs are written `Killed` on the spot (no cleanup) and
+///   their agents are told to stop.
 pub async fn user_cancel_task_suite(
     user_id: i64,
     pool: &InfraPool,
     suite_uuid: Uuid,
-    _op: CancelTaskSuiteOp,
+    op: CancelTaskSuiteOp,
 ) -> Result<()> {
     let now = TimeDateTimeWithTimeZone::now_utc();
 
-    pool.db
-        .transaction::<_, u64, Error>(|txn| {
+    let (suite_id, cancelled_task_uuids) = pool
+        .db
+        .transaction::<_, (i64, Vec<Uuid>), Error>(|txn| {
             Box::pin(async move {
                 // Resolve the suite and authorize the caller's Write role in one join.
                 let suite =
@@ -606,19 +578,16 @@ pub async fn user_cancel_task_suite(
                     .exec_with_returning(txn)
                     .await?;
 
-                // The inflight subset is the only set tied to an executing agent: each
-                // carries the `runner_uuid` of the agent running it. A Force cancel must
-                // signal those agents to stop so they don't commit tasks we just archived.
-                // Collected now and intentionally left unused.
-                // TODO: wire this to a per-agent shutdown/TasksCancelled
-                // push once the agent/notification layer exists
-                let _inflight_signals: Vec<(Option<Uuid>, Uuid)> = tasks
+                // The in-flight subset is the only one an agent is holding right
+                // now. Those agents are told which task uuids vanished, so they
+                // stop rather than reporting against rows we just archived.
+                let cancelled_task_uuids: Vec<Uuid> = tasks
                     .iter()
                     .filter(|t| matches!(t.state, TaskState::Running | TaskState::Finished))
-                    .map(|t| (t.runner_uuid, t.uuid))
+                    .map(|t| t.uuid)
                     .collect();
 
-                let cancelled_count = tasks.len() as u64;
+                let suite_id = suite.id;
                 if !tasks.is_empty() {
                     let archived: Vec<ArchivedTasks::ActiveModel> = tasks
                         .into_iter()
@@ -655,14 +624,42 @@ pub async fn user_cancel_task_suite(
                 suite.completed_at = Set(Some(now));
                 suite.update(txn).await?;
 
-                Ok(cancelled_count)
+                Ok((suite_id, cancelled_task_uuids))
             })
         })
         .await?;
 
-    // TODO: notify assigned/executing agents that this suite was cancelled (and, for
-    // Force, push per-agent TasksCancelled built from `_running_signals` above), then
-    // drop the suite's in-memory task buffer in the dispatcher.
+    // Tear down whatever is still running. `Force` writes the terminal itself so
+    // no further agent report is accepted; `Graceful` leaves the job alone and
+    // lets the agent walk it through cleanup to `Completed`.
+    let running_agents = match op {
+        CancelTaskSuiteOp::Force => {
+            crate::service::agent::job::kill_suite_jobs(&pool.db, suite_id, now).await?
+        }
+        CancelTaskSuiteOp::Graceful => {
+            crate::service::agent::job::agents_running_suite(&pool.db, suite_id).await?
+        }
+    };
+
+    crate::service::agent::notify_agents_by_id(
+        pool,
+        &running_agents,
+        AgentNotification::SuiteCancelled {
+            suite_uuid,
+            reason: "Suite was cancelled by a user".to_string(),
+        },
+    )
+    .await;
+    if !cancelled_task_uuids.is_empty() {
+        crate::service::agent::notify_agents_by_id(
+            pool,
+            &running_agents,
+            AgentNotification::TasksCancelled {
+                task_uuids: cancelled_task_uuids,
+            },
+        )
+        .await;
+    }
 
     Ok(())
 }
@@ -679,9 +676,9 @@ pub async fn user_override_agents_for_suite(
 ) -> Result<SuiteAgentOverrideResp> {
     let now = TimeDateTimeWithTimeZone::now_utc();
 
-    let errors = pool
+    let (suite_id, errors) = pool
         .db
-        .transaction::<_, HashMap<Uuid, crate::error::ErrorMsg>, Error>(|txn| {
+        .transaction::<_, (Option<i64>, HashMap<Uuid, crate::error::ErrorMsg>), Error>(|txn| {
             Box::pin(async move {
                 // The suite is fixed for the whole batch, so a suite-level failure is request-level
                 let suite =
@@ -692,6 +689,7 @@ pub async fn user_override_agents_for_suite(
                         }
                         Err(ResolveError::Fatal(e)) => return Err(e),
                     };
+                let suite_id = suite.id;
 
                 let mut errors = HashMap::new();
                 for (agent_uuid, action) in req.overrides {
@@ -712,13 +710,161 @@ pub async fn user_override_agents_for_suite(
                     }
                 }
 
-                Ok(errors)
+                Ok((Some(suite_id), errors))
             })
         })
         .await?;
 
-    // TODO: the manual overrides just changed the effective agent set. Once the
-    // scheduler exists, trigger a recompute for this suite.
+    // The effective agent set just changed. Notify the agents
+    if let Some(suite_id) = suite_id {
+        crate::service::agent::notify_suite_available(pool, suite_id).await;
+    }
 
     Ok(SuiteAgentOverrideResp { errors })
+}
+
+/// Query a suite's jobs, newest first.
+pub async fn user_query_suite_jobs(
+    user_id: i64,
+    pool: &InfraPool,
+    suite_uuid: Uuid,
+    query: SuiteJobsQueryReq,
+) -> Result<SuiteJobsQueryResp> {
+    let suite = match authorize_suite(&pool.db, user_id, suite_uuid, UserGroupRole::Read).await {
+        Ok(suite) => suite,
+        Err(ResolveError::Item(e)) => return Err(Error::ApiError(ApiError::NotFound(e.msg))),
+        Err(ResolveError::Fatal(e)) => return Err(e),
+    };
+
+    let mut stmt = Query::select();
+    if query.count {
+        stmt.expr(Expr::col((SuiteAgentJobs::Entity, SuiteAgentJobs::Column::Id)).count());
+    } else {
+        stmt.columns([
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::JobId),
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::State),
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::CreatedAt),
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::UpdatedAt),
+        ])
+        .expr_as(
+            Expr::col((Agent::Entity, Agent::Column::Uuid)),
+            Alias::new("agent_uuid"),
+        );
+    }
+
+    stmt.from(SuiteAgentJobs::Entity)
+        // Left join: `agent_id` is nullable to leave room for a future detach.
+        .join(
+            sea_orm::JoinType::LeftJoin,
+            Agent::Entity,
+            Expr::col((Agent::Entity, Agent::Column::Id)).eq(Expr::col((
+                SuiteAgentJobs::Entity,
+                SuiteAgentJobs::Column::AgentId,
+            ))),
+        )
+        .and_where(
+            Expr::col((SuiteAgentJobs::Entity, SuiteAgentJobs::Column::TaskSuiteId)).eq(suite.id),
+        );
+
+    if let Some(ref states) = query.states {
+        let states_vec: Vec<SuiteJobState> = states.iter().copied().collect();
+        stmt.and_where(
+            Expr::col((SuiteAgentJobs::Entity, SuiteAgentJobs::Column::State))
+                .eq(PgFunc::any(states_vec)),
+        );
+    }
+    if let Some(agent_uuid) = query.agent_uuid {
+        stmt.and_where(Expr::col((Agent::Entity, Agent::Column::Uuid)).eq(agent_uuid));
+    }
+    if let Some(limit) = query.limit {
+        stmt.limit(limit);
+    }
+    if let Some(offset) = query.offset {
+        stmt.offset(offset);
+    }
+
+    let builder = pool.db.get_database_backend();
+    if query.count {
+        let count = CountQuery::find_by_statement(builder.build(&stmt))
+            .one(&pool.db)
+            .await?
+            .map(|c| c.count as u64)
+            .unwrap_or(0);
+        Ok(SuiteJobsQueryResp {
+            count,
+            jobs: vec![],
+        })
+    } else {
+        stmt.order_by_expr(
+            Expr::col((SuiteAgentJobs::Entity, SuiteAgentJobs::Column::JobId)).into(),
+            sea_orm::Order::Desc,
+        );
+        let jobs = SuiteJobInfo::find_by_statement(builder.build(&stmt))
+            .all(&pool.db)
+            .await?;
+        Ok(SuiteJobsQueryResp {
+            count: jobs.len() as u64,
+            jobs,
+        })
+    }
+}
+
+/// One job of a suite, with its hook executions embedded. A hook's artifacts
+/// are downloaded through the existing artifact endpoints using its `uuid`.
+pub async fn user_get_suite_job(
+    user_id: i64,
+    pool: &InfraPool,
+    suite_uuid: Uuid,
+    job_id: i32,
+) -> Result<SuiteJobQueryResp> {
+    let suite = match authorize_suite(&pool.db, user_id, suite_uuid, UserGroupRole::Read).await {
+        Ok(suite) => suite,
+        Err(ResolveError::Item(e)) => return Err(Error::ApiError(ApiError::NotFound(e.msg))),
+        Err(ResolveError::Fatal(e)) => return Err(e),
+    };
+
+    let job = SuiteAgentJobs::Entity::find()
+        .filter(SuiteAgentJobs::Column::TaskSuiteId.eq(suite.id))
+        .filter(SuiteAgentJobs::Column::JobId.eq(job_id))
+        .one(&pool.db)
+        .await?
+        .ok_or(Error::ApiError(ApiError::NotFound(format!(
+            "Job {job_id} of suite {suite_uuid}"
+        ))))?;
+
+    let agent_uuid = match job.agent_id {
+        Some(agent_id) => Agent::Entity::find_by_id(agent_id)
+            .one(&pool.db)
+            .await?
+            .map(|a| a.uuid),
+        None => None,
+    };
+
+    let hooks = HookTasks::Entity::find()
+        .filter(HookTasks::Column::SuiteAgentJobId.eq(job.id))
+        .all(&pool.db)
+        .await?
+        .into_iter()
+        .map(|hook| {
+            Ok(HookTaskInfo {
+                uuid: hook.uuid,
+                hook_type: hook.hook_type,
+                state: hook.state,
+                result: hook.result.map(serde_json::from_value).transpose()?,
+                started_at: hook.started_at,
+                completed_at: hook.completed_at,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(SuiteJobQueryResp {
+        info: SuiteJobInfo {
+            job_id: job.job_id,
+            state: job.state,
+            agent_uuid,
+            created_at: job.created_at,
+            updated_at: job.updated_at,
+        },
+        hooks,
+    })
 }

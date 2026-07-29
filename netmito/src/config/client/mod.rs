@@ -279,7 +279,6 @@ impl ClientConfig {
             .merge(Serialized::from(cli, "client"))
             .select("client");
 
-        let config: Self = figment.extract()?;
-        Ok(config)
+        Ok(figment.extract()?)
     }
 }

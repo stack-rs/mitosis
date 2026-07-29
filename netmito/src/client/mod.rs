@@ -10,7 +10,7 @@ use crate::{
     config::{client::*, ClientConfig, ClientConfigCli},
     entity::state::TaskExecState,
     schema::*,
-    service::auth::fill_user_login,
+    service::auth::{fill_user_login, get_and_prompt_username},
 };
 
 pub mod http;
@@ -84,14 +84,10 @@ impl MitoClient {
 
     pub async fn setup(config: ClientConfig) -> crate::error::Result<Self> {
         tracing::debug!("Client is setting up");
-        let mut http_client = MitoHttpClient::new(config.coordinator_addr);
+        let mut http_client =
+            MitoHttpClient::new(config.coordinator_addr, config.credential_path).await?;
         let username = http_client
-            .connect(
-                config.credential_path,
-                config.user,
-                config.password,
-                config.refresh,
-            )
+            .connect(config.user, config.password, config.refresh)
             .await?;
 
         Ok(MitoClient {
@@ -292,7 +288,11 @@ impl MitoClient {
     }
 
     pub async fn user_login(&mut self, args: LoginArgs) -> crate::error::Result<()> {
-        let req = fill_user_login(args.username, args.password, args.refresh)?;
+        let username = match args.username {
+            Some(name) => name,
+            None => get_and_prompt_username(None, "Please input username")?,
+        };
+        let req = fill_user_login(username, args.password, args.refresh)?;
         let username = req.username.clone();
         self.http_client.user_login(req).await?;
         self.username = username;
@@ -300,11 +300,11 @@ impl MitoClient {
     }
 
     pub async fn revoke(&mut self) -> crate::error::Result<()> {
-        self.http_client.revoke(&self.username).await
+        self.http_client.revoke().await
     }
 
     pub async fn refresh_token(&mut self) -> crate::error::Result<()> {
-        self.http_client.refresh_token(&self.username).await
+        self.http_client.refresh_token().await
     }
 
     pub async fn user_auth(&mut self) -> crate::error::Result<String> {

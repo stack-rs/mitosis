@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use figment::value::magic::RelativePathBuf;
 use reqwest::Client;
@@ -8,61 +7,59 @@ use uuid::Uuid;
 
 use crate::{
     entity::content::ArtifactContentType,
-    error::{get_error_from_resp, map_reqwest_err, RequestError},
+    error::{get_error_from_resp, map_reqwest_err, CredentialGuardError, RequestError},
     schema::*,
-    service::auth::cred::{get_user_credential, modify_or_append_credential, remove_credential},
+    service::auth::{
+        cred::get_user_credential, credential_guard::CredentialGuard, get_and_prompt_username,
+    },
 };
 
 pub struct MitoHttpClient {
     http_client: Client,
     url: Url,
-    credential: String,
-    credential_path: PathBuf,
+    credential_guard: CredentialGuard,
 }
 
 impl MitoHttpClient {
-    pub fn new(mut coordinator_addr: Url) -> Self {
+    pub async fn new(
+        mut coordinator_addr: Url,
+        credential_path: Option<RelativePathBuf>,
+    ) -> crate::error::Result<Self> {
         let http_client = Client::new();
+        let credential_guard = CredentialGuard::new(
+            credential_path.map(|credential_path| credential_path.relative()),
+            &coordinator_addr,
+        )
+        .await;
         coordinator_addr.set_path("/");
-        Self {
+
+        Ok(Self {
             http_client,
             url: coordinator_addr,
-            credential: String::new(),
-            credential_path: PathBuf::new(),
-        }
+            credential_guard,
+        })
     }
 
     pub async fn connect(
         &mut self,
-        credential_path: Option<RelativePathBuf>,
         user: Option<String>,
         password: Option<String>,
         refresh: bool,
     ) -> crate::error::Result<String> {
-        let client_credential_path = credential_path
-            .as_ref()
-            .map(|p| p.relative())
-            .or_else(|| {
-                dirs::config_dir().map(|mut p| {
-                    p.push("mitosis");
-                    p.push("credentials");
-                    p
-                })
-            })
-            .ok_or(crate::error::Error::ConfigError(Box::new(
-                figment::Error::from("credential path not found"),
-            )))?;
-        let (username, credential) = get_user_credential(
-            credential_path.as_ref(),
+        let username = match user {
+            Some(name) => name,
+            None => get_and_prompt_username(None, "Please input username")?,
+        };
+        get_user_credential(
+            &mut self.credential_guard,
             &self.http_client,
             self.url.clone(),
-            user,
+            username.clone(),
             password,
             refresh,
         )
         .await?;
-        self.credential_path = client_credential_path;
-        self.credential = credential;
+
         Ok(username)
     }
 
@@ -83,11 +80,16 @@ impl MitoHttpClient {
     }
 
     pub async fn get_redis_connection_info(&mut self) -> crate::error::Result<RedisConnectionInfo> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("redis");
         let resp = self
             .http_client
             .get(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -103,11 +105,16 @@ impl MitoHttpClient {
     }
 
     pub async fn user_auth(&mut self) -> crate::error::Result<String> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("auth");
         let resp = self
             .http_client
             .get(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -128,28 +135,34 @@ impl MitoHttpClient {
             .send()
             .await
             .map_err(map_reqwest_err)?;
+        self.credential_guard
+            .load_credential(req.username.clone())
+            .await;
         if resp.status().is_success() {
             let resp = resp
                 .json::<UserLoginResp>()
                 .await
                 .map_err(RequestError::from)?;
-            self.credential = resp.token;
-            if !self.credential_path.as_os_str().is_empty() {
-                modify_or_append_credential(&self.credential_path, &req.username, &self.credential)
-                    .await?;
-            }
+            self.credential_guard
+                .save_credential(None, &resp.token)
+                .await;
             Ok(())
         } else {
             Err(get_error_from_resp(resp).await.into())
         }
     }
 
-    pub async fn refresh_token(&mut self, username: &str) -> crate::error::Result<()> {
+    pub async fn refresh_token(&mut self) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("refresh");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -160,13 +173,9 @@ impl MitoHttpClient {
                 .await
                 .map_err(RequestError::from)?;
 
-            self.credential = resp.token;
-
-            if !self.credential_path.as_os_str().is_empty() {
-                let username = username.to_string();
-                modify_or_append_credential(&self.credential_path, &username, &self.credential)
-                    .await?;
-            }
+            self.credential_guard
+                .save_credential(None, &resp.token)
+                .await;
 
             Ok(())
         } else {
@@ -174,25 +183,23 @@ impl MitoHttpClient {
         }
     }
 
-    pub async fn revoke(&mut self, username: &str) -> crate::error::Result<()> {
+    pub async fn revoke(&mut self) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("revoke");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
 
         if resp.status().is_success() {
-            self.credential.clear();
-
-            if self.credential_path.exists() {
-                if let Err(e) = remove_credential(&self.credential_path, username).await {
-                    tracing::warn!("Failed to remove local credential for {username}: {e}");
-                }
-            }
-
+            self.credential_guard.remove_credential(None).await;
             Ok(())
         } else {
             Err(get_error_from_resp(resp).await.into())
@@ -204,12 +211,18 @@ impl MitoHttpClient {
         username: String,
         req: AdminChangePasswordReq,
     ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
+
         self.url
             .set_path(&format!("admin/users/{username}/password"));
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -226,11 +239,16 @@ impl MitoHttpClient {
         username: String,
         req: UserChangePasswordReq,
     ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("users/{username}/password"));
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -240,11 +258,9 @@ impl MitoHttpClient {
                 .json::<UserChangePasswordResp>()
                 .await
                 .map_err(RequestError::from)?;
-            self.credential = resp.token;
-            if !self.credential_path.as_os_str().is_empty() {
-                modify_or_append_credential(&self.credential_path, &username, &self.credential)
-                    .await?;
-            }
+            self.credential_guard
+                .save_credential(None, &resp.token)
+                .await;
             Ok(())
         } else {
             Err(get_error_from_resp(resp).await.into())
@@ -252,11 +268,16 @@ impl MitoHttpClient {
     }
 
     pub async fn admin_create_user(&mut self, req: CreateUserReq) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("admin/users");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -269,11 +290,16 @@ impl MitoHttpClient {
     }
 
     pub async fn admin_delete_user(&mut self, username: String) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("admin/users/{username}"));
         let resp = self
             .http_client
             .delete(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -289,6 +315,11 @@ impl MitoHttpClient {
         uuid: Uuid,
         force: bool,
     ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("admin/workers/{uuid}"));
         if force {
             self.url.set_query(Some("op=force"))
@@ -296,7 +327,7 @@ impl MitoHttpClient {
         let resp = self
             .http_client
             .delete(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -308,11 +339,16 @@ impl MitoHttpClient {
     }
 
     pub async fn user_create_group(&mut self, req: CreateGroupReq) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("groups");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -325,11 +361,16 @@ impl MitoHttpClient {
     }
 
     pub async fn get_task_by_uuid(&mut self, uuid: Uuid) -> crate::error::Result<TaskQueryResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("tasks/{uuid}"));
         let resp = self
             .http_client
             .get(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -349,6 +390,11 @@ impl MitoHttpClient {
         uuid: Uuid,
         content_type: ArtifactContentType,
     ) -> crate::error::Result<RemoteResourceDownloadResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         let content_serde_val = serde_json::to_value(content_type)?;
         let content_serde_str = content_serde_val.as_str().unwrap_or("result");
         self.url.set_path(&format!(
@@ -357,7 +403,7 @@ impl MitoHttpClient {
         let resp = self
             .http_client
             .get(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -377,12 +423,17 @@ impl MitoHttpClient {
         group_name: &str,
         key: &str,
     ) -> crate::error::Result<RemoteResourceDownloadResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url
             .set_path(&format!("groups/{group_name}/download/attachments/{key}"));
         let resp = self
             .http_client
             .get(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -445,11 +496,16 @@ impl MitoHttpClient {
         &mut self,
         req: ArtifactsDownloadByFilterReq,
     ) -> crate::error::Result<ArtifactsDownloadListResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("tasks/download/artifacts");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -469,11 +525,16 @@ impl MitoHttpClient {
         &mut self,
         req: ArtifactsDownloadByUuidsReq,
     ) -> crate::error::Result<ArtifactsDownloadListResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("tasks/download/artifacts/list");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -494,12 +555,17 @@ impl MitoHttpClient {
         group_name: &str,
         req: AttachmentsDownloadByFilterReq,
     ) -> crate::error::Result<AttachmentsDownloadListResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url
             .set_path(&format!("groups/{group_name}/download/attachments"));
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -520,12 +586,17 @@ impl MitoHttpClient {
         group_name: &str,
         req: AttachmentsDownloadByKeysReq,
     ) -> crate::error::Result<AttachmentsDownloadListResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url
             .set_path(&format!("groups/{group_name}/download/attachments/list"));
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -547,6 +618,11 @@ impl MitoHttpClient {
         content_type: ArtifactContentType,
         admin: bool,
     ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         let content_serde_val = serde_json::to_value(content_type)?;
         let content_serde_str = content_serde_val.as_str().unwrap_or("result");
         if admin {
@@ -559,7 +635,7 @@ impl MitoHttpClient {
         let resp = self
             .http_client
             .delete(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -576,6 +652,11 @@ impl MitoHttpClient {
         key: &str,
         admin: bool,
     ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         if admin {
             self.url
                 .set_path(&format!("admin/groups/{group_name}/attachments/{key}"));
@@ -586,7 +667,7 @@ impl MitoHttpClient {
         let resp = self
             .http_client
             .delete(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -601,12 +682,17 @@ impl MitoHttpClient {
         group_name: &str,
         key: &str,
     ) -> crate::error::Result<AttachmentMetadata> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url
             .set_path(&format!("groups/{group_name}/attachments/{key}"));
         let resp = self
             .http_client
             .get(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -626,12 +712,17 @@ impl MitoHttpClient {
         username: &str,
         req: ChangeUserGroupQuota,
     ) -> crate::error::Result<UserGroupQuotaResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url
             .set_path(&format!("admin/users/{username}/group-quota"));
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -652,12 +743,17 @@ impl MitoHttpClient {
         group_name: &str,
         req: ChangeGroupStorageQuotaReq,
     ) -> crate::error::Result<GroupStorageQuotaResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url
             .set_path(&format!("admin/groups/{group_name}/storage-quota"));
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -677,11 +773,16 @@ impl MitoHttpClient {
         &mut self,
         req: TasksQueryReq,
     ) -> crate::error::Result<TasksQueryResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("tasks/query");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -702,12 +803,17 @@ impl MitoHttpClient {
         group_name: &str,
         req: AttachmentsQueryReq,
     ) -> crate::error::Result<AttachmentsQueryResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url
             .set_path(&format!("groups/{group_name}/attachments/query"));
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -727,11 +833,16 @@ impl MitoHttpClient {
         &mut self,
         uuid: Uuid,
     ) -> crate::error::Result<WorkerQueryResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("workers/{uuid}"));
         let resp = self
             .http_client
             .get(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -750,11 +861,16 @@ impl MitoHttpClient {
         &mut self,
         req: WorkersQueryReq,
     ) -> crate::error::Result<WorkersQueryResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("workers/query");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -774,11 +890,16 @@ impl MitoHttpClient {
         &mut self,
         group_name: &str,
     ) -> crate::error::Result<GroupQueryInfo> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("groups/{group_name}"));
         let resp = self
             .http_client
             .get(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -794,11 +915,16 @@ impl MitoHttpClient {
     }
 
     pub async fn get_user_groups_roles(&mut self) -> crate::error::Result<GroupsQueryResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("users/groups");
         let resp = self
             .http_client
             .get(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -817,11 +943,16 @@ impl MitoHttpClient {
         &mut self,
         req: SubmitTaskReq,
     ) -> crate::error::Result<SubmitTaskResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("tasks");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -853,11 +984,16 @@ impl MitoHttpClient {
         uuid: Uuid,
         req: UploadArtifactReq,
     ) -> crate::error::Result<UploadArtifactResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("tasks/{uuid}/artifacts"));
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -878,12 +1014,17 @@ impl MitoHttpClient {
         group_name: &str,
         req: UploadAttachmentReq,
     ) -> crate::error::Result<UploadAttachmentResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url
             .set_path(&format!("groups/{group_name}/attachments"));
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -904,6 +1045,11 @@ impl MitoHttpClient {
         uuid: Uuid,
         force: bool,
     ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("workers/{uuid}"));
         if force {
             self.url.set_query(Some("op=force"))
@@ -911,7 +1057,7 @@ impl MitoHttpClient {
         let resp = self
             .http_client
             .delete(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -926,11 +1072,16 @@ impl MitoHttpClient {
         &mut self,
         req: WorkersShutdownByFilterReq,
     ) -> crate::error::Result<WorkersShutdownByFilterResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("workers/shutdown");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -950,11 +1101,16 @@ impl MitoHttpClient {
         &mut self,
         req: WorkersShutdownByUuidsReq,
     ) -> crate::error::Result<WorkersShutdownByUuidsResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("workers/shutdown/list");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -975,11 +1131,16 @@ impl MitoHttpClient {
         uuid: Uuid,
         req: ReplaceWorkerTagsReq,
     ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("workers/{uuid}/tags"));
         let resp = self
             .http_client
             .put(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -996,11 +1157,16 @@ impl MitoHttpClient {
         uuid: Uuid,
         req: ReplaceWorkerLabelsReq,
     ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("workers/{uuid}/labels"));
         let resp = self
             .http_client
             .put(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1017,11 +1183,16 @@ impl MitoHttpClient {
         uuid: Uuid,
         req: UpdateGroupWorkerRoleReq,
     ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("workers/{uuid}/groups"));
         let resp = self
             .http_client
             .put(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1038,6 +1209,11 @@ impl MitoHttpClient {
         uuid: Uuid,
         req: RemoveGroupWorkerRoleReq,
     ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("workers/{uuid}/groups"));
         let params = req
             .groups
@@ -1047,7 +1223,7 @@ impl MitoHttpClient {
         let resp = self
             .http_client
             .delete(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .query(&params)
             .send()
             .await
@@ -1060,11 +1236,16 @@ impl MitoHttpClient {
     }
 
     pub async fn cancel_task_by_uuid(&mut self, uuid: Uuid) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("tasks/{uuid}"));
         let resp = self
             .http_client
             .delete(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -1079,11 +1260,16 @@ impl MitoHttpClient {
         &mut self,
         req: TasksCancelByFilterReq,
     ) -> crate::error::Result<TasksCancelByFilterResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("tasks/cancel");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1103,11 +1289,16 @@ impl MitoHttpClient {
         &mut self,
         req: TasksCancelByUuidsReq,
     ) -> crate::error::Result<TasksCancelByUuidsResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("tasks/cancel/list");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1128,11 +1319,16 @@ impl MitoHttpClient {
         uuid: Uuid,
         req: UpdateTaskLabelsReq,
     ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("tasks/{uuid}/labels"));
         let resp = self
             .http_client
             .put(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1149,11 +1345,16 @@ impl MitoHttpClient {
         uuid: Uuid,
         req: ChangeTaskReq,
     ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("tasks/{uuid}"));
         let resp = self
             .http_client
             .put(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1170,11 +1371,16 @@ impl MitoHttpClient {
         group_name: &str,
         req: UpdateUserGroupRoleReq,
     ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("groups/{group_name}/users"));
         let resp = self
             .http_client
             .put(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1191,6 +1397,11 @@ impl MitoHttpClient {
         group_name: &str,
         req: RemoveUserGroupRoleReq,
     ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("groups/{group_name}/users"));
         let params = req
             .users
@@ -1200,7 +1411,7 @@ impl MitoHttpClient {
         let resp = self
             .http_client
             .delete(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .query(&params)
             .send()
             .await
@@ -1216,11 +1427,16 @@ impl MitoHttpClient {
         &mut self,
         req: ArtifactsDeleteByFilterReq,
     ) -> crate::error::Result<ArtifactsDeleteByFilterResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("tasks/delete/artifacts");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1240,11 +1456,16 @@ impl MitoHttpClient {
         &mut self,
         req: ArtifactsDeleteByUuidsReq,
     ) -> crate::error::Result<ArtifactsDeleteByUuidsResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("tasks/delete/artifacts/list");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1265,12 +1486,17 @@ impl MitoHttpClient {
         group_name: &str,
         req: AttachmentsDeleteByFilterReq,
     ) -> crate::error::Result<AttachmentsDeleteByFilterResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url
             .set_path(&format!("groups/{group_name}/delete/attachments"));
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1291,12 +1517,17 @@ impl MitoHttpClient {
         group_name: &str,
         req: AttachmentsDeleteByKeysReq,
     ) -> crate::error::Result<AttachmentsDeleteByKeysResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url
             .set_path(&format!("groups/{group_name}/delete/attachments/list"));
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1316,11 +1547,16 @@ impl MitoHttpClient {
         &mut self,
         req: TasksSubmitReq,
     ) -> crate::error::Result<TasksSubmitResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("tasks/submit");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1340,11 +1576,16 @@ impl MitoHttpClient {
         &mut self,
         req: ShutdownReq,
     ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("admin/shutdown");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1360,11 +1601,16 @@ impl MitoHttpClient {
         &mut self,
         req: CreateTaskSuiteReq,
     ) -> crate::error::Result<CreateTaskSuiteResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("suites");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1384,11 +1630,16 @@ impl MitoHttpClient {
         &mut self,
         req: TaskSuitesQueryReq,
     ) -> crate::error::Result<TaskSuitesQueryResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("suites/query");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1405,11 +1656,16 @@ impl MitoHttpClient {
     }
 
     pub async fn get_task_suite(&mut self, uuid: Uuid) -> crate::error::Result<TaskSuiteQueryResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("suites/{uuid}"));
         let resp = self
             .http_client
             .get(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -1425,11 +1681,16 @@ impl MitoHttpClient {
     }
 
     pub async fn close_task_suite(&mut self, uuid: Uuid) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("suites/{uuid}/close"));
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -1441,6 +1702,11 @@ impl MitoHttpClient {
     }
 
     pub async fn cancel_task_suite(&mut self, uuid: Uuid, force: bool) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("suites/{uuid}"));
         if force {
             self.url.set_query(Some("op=force"));
@@ -1448,7 +1714,7 @@ impl MitoHttpClient {
         let resp = self
             .http_client
             .delete(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -1468,12 +1734,17 @@ impl MitoHttpClient {
         suite_uuid: Uuid,
         overrides: HashMap<Uuid, SuiteAgentOverrideAction>,
     ) -> crate::error::Result<SuiteAgentOverrideResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url
             .set_path(&format!("suites/{suite_uuid}/agents/override"));
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&SuiteAgentOverrideReq { overrides })
             .send()
             .await

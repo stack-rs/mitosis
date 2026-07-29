@@ -84,14 +84,9 @@ impl MitoClient {
 
     pub async fn setup(config: ClientConfig) -> crate::error::Result<Self> {
         tracing::debug!("Client is setting up");
-        let mut http_client = MitoHttpClient::new(config.coordinator_addr);
+        let mut http_client = MitoHttpClient::new(config.coordinator_addr, config.credential_path)?;
         let username = http_client
-            .connect(
-                config.credential_path,
-                config.user,
-                config.password,
-                config.refresh,
-            )
+            .connect(config.user, config.password, config.refresh)
             .await?;
 
         Ok(MitoClient {

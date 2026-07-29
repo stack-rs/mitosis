@@ -63,20 +63,7 @@ impl GetPathBuf for std::path::Path {
 // }
 
 // The return value is a tuple of username and token
-pub async fn get_user_credential(
-    cred_path: Option<&RelativePathBuf>,
-    client: &Client,
-    url: Url,
-    user: Option<String>,
-    password: Option<String>,
-    refresh: bool,
-) -> crate::error::Result<(String, String)> {
-    let credential_store = CredentialStore::new(cred_path.map(|cred_path| cred_path.relative()))?;
-
-    get_user_credential_with_store(&credential_store, client, url, user, password, refresh).await
-}
-
-pub(crate) async fn get_user_credential_with_store(
+pub(crate) async fn get_user_credential(
     credential_store: &CredentialStore,
     client: &Client,
     mut url: Url,

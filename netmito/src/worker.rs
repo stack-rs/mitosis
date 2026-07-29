@@ -32,7 +32,7 @@ use crate::{
     config::{WorkerConfig, WorkerConfigCli},
     error::{Error, ErrorMsg},
     schema::{RegisterWorkerReq, RegisterWorkerResp},
-    service::auth::cred::get_user_credential,
+    service::auth::{cred::get_user_credential, credential_store::CredentialStore},
     signal::shutdown_signal,
 };
 
@@ -251,8 +251,14 @@ impl MitoWorker {
     pub async fn setup(mut config: WorkerConfig) -> crate::error::Result<(Self, TracingGuard)> {
         tracing::debug!("Worker is setting up");
         let http_client = Client::new();
+        let credential_store = CredentialStore::new(
+            config
+                .credential_path
+                .as_ref()
+                .map(|credential_path| credential_path.relative()),
+        )?;
         let (_, credential) = get_user_credential(
-            config.credential_path.as_ref(),
+            &credential_store,
             &http_client,
             config.coordinator_addr.clone(),
             config.user.take(),

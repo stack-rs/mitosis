@@ -7,42 +7,43 @@ use crate::{
     entity::content::ArtifactContentType,
     error::{get_error_from_resp, map_reqwest_err, RequestError},
     schema::*,
-    service::auth::{cred::get_user_credential_with_store, credential_store::CredentialStore},
+    service::auth::{cred::get_user_credential, credential_store::CredentialStore},
 };
 
 pub struct MitoHttpClient {
     http_client: Client,
     url: Url,
     credential: String,
-    credential_store: Option<CredentialStore>,
+    credential_store: CredentialStore,
 }
 
 impl MitoHttpClient {
-    pub fn new(mut coordinator_addr: Url) -> Self {
+    pub fn new(
+        mut coordinator_addr: Url,
+        credential_path: Option<RelativePathBuf>,
+    ) -> crate::error::Result<Self> {
         let http_client = Client::new();
+        let credential_store = CredentialStore::new(
+            credential_path.map(|credential_path| credential_path.relative()),
+        )?;
         coordinator_addr.set_path("/");
-        Self {
+
+        Ok(Self {
             http_client,
             url: coordinator_addr,
             credential: String::new(),
-            credential_store: None,
-        }
+            credential_store,
+        })
     }
 
     pub async fn connect(
         &mut self,
-        credential_path: Option<RelativePathBuf>,
         user: Option<String>,
         password: Option<String>,
         refresh: bool,
     ) -> crate::error::Result<String> {
-        let credential_store = CredentialStore::new(
-            credential_path
-                .as_ref()
-                .map(|credential_path| credential_path.relative()),
-        )?;
-        let (username, credential) = get_user_credential_with_store(
-            &credential_store,
+        let (username, credential) = get_user_credential(
+            &self.credential_store,
             &self.http_client,
             self.url.clone(),
             user,
@@ -51,7 +52,6 @@ impl MitoHttpClient {
         )
         .await?;
 
-        self.credential_store = Some(credential_store);
         self.credential = credential;
         Ok(username)
     }
@@ -124,11 +124,9 @@ impl MitoHttpClient {
                 .await
                 .map_err(RequestError::from)?;
             self.credential = resp.token;
-            if let Some(credential_store) = &self.credential_store {
-                credential_store
-                    .write_jwt(&self.url, &req.username, &self.credential)
-                    .await?;
-            }
+            self.credential_store
+                .write_jwt(&self.url, &req.username, &self.credential)
+                .await?;
             Ok(())
         } else {
             Err(get_error_from_resp(resp).await.into())
@@ -153,11 +151,9 @@ impl MitoHttpClient {
 
             self.credential = resp.token;
 
-            if let Some(credential_store) = &self.credential_store {
-                credential_store
-                    .write_jwt(&self.url, username, &self.credential)
-                    .await?;
-            }
+            self.credential_store
+                .write_jwt(&self.url, username, &self.credential)
+                .await?;
 
             Ok(())
         } else {
@@ -178,10 +174,8 @@ impl MitoHttpClient {
         if resp.status().is_success() {
             self.credential.clear();
 
-            if let Some(credential_store) = &self.credential_store {
-                if let Err(e) = credential_store.remove_jwt(&self.url, username).await {
-                    tracing::warn!("Failed to remove local credential for {username}: {e}");
-                }
+            if let Err(e) = self.credential_store.remove_jwt(&self.url, username).await {
+                tracing::warn!("Failed to remove local credential for {username}: {e}");
             }
 
             Ok(())
@@ -232,11 +226,9 @@ impl MitoHttpClient {
                 .await
                 .map_err(RequestError::from)?;
             self.credential = resp.token;
-            if let Some(credential_store) = &self.credential_store {
-                credential_store
-                    .write_jwt(&self.url, &username, &self.credential)
-                    .await?;
-            }
+            self.credential_store
+                .write_jwt(&self.url, &username, &self.credential)
+                .await?;
             Ok(())
         } else {
             Err(get_error_from_resp(resp).await.into())

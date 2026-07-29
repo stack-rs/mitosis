@@ -27,12 +27,13 @@ use crate::entity::content::ArtifactContentType;
 use crate::entity::state::TaskExecState;
 use crate::error::RequestError;
 use crate::schema::*;
+use crate::service::auth::get_and_prompt_username;
 use crate::service::s3::download_file;
 use crate::{
     config::{WorkerConfig, WorkerConfigCli},
     error::{Error, ErrorMsg},
     schema::{RegisterWorkerReq, RegisterWorkerResp},
-    service::auth::cred::get_user_credential,
+    service::auth::{cred::get_user_credential, credential_guard::CredentialGuard},
     signal::shutdown_signal,
 };
 
@@ -251,11 +252,23 @@ impl MitoWorker {
     pub async fn setup(mut config: WorkerConfig) -> crate::error::Result<(Self, TracingGuard)> {
         tracing::debug!("Worker is setting up");
         let http_client = Client::new();
+        let mut credential_guard = CredentialGuard::new(
+            config
+                .credential_path
+                .as_ref()
+                .map(|credential_path| credential_path.relative()),
+            &config.coordinator_addr,
+        )
+        .await;
+        let username = match &config.user {
+            Some(name) => name.to_string(),
+            None => get_and_prompt_username(None, "Please input username")?,
+        };
         let (_, credential) = get_user_credential(
-            config.credential_path.as_ref(),
+            &mut credential_guard,
             &http_client,
             config.coordinator_addr.clone(),
-            config.user.take(),
+            username,
             config.password.take(),
             false,
         )

@@ -1,4 +1,5 @@
 pub mod cred;
+pub(crate) mod credential_guard;
 pub mod token;
 
 use std::{io::Write, net::SocketAddr};
@@ -88,7 +89,7 @@ pub(crate) fn get_and_prompt_password(
 ) -> crate::error::Result<[u8; 16]> {
     let md5_password = password
         .map(|p| {
-            println!("{prompt} Already Given");
+            // println!("{prompt} Already Given");
             Ok::<_, std::io::Error>(md5::compute(p.as_bytes()).0)
         })
         .unwrap_or_else(|| {
@@ -98,26 +99,15 @@ pub(crate) fn get_and_prompt_password(
     Ok(md5_password)
 }
 
-fn fill_user_login_fields(
-    username: Option<String>,
-    password: Option<String>,
-) -> crate::error::Result<(String, [u8; 16])> {
-    match (username, password) {
-        (Some(username), Some(password)) => Ok((username, md5::compute(password.as_bytes()).0)),
-        (username, password) => {
-            let username = get_and_prompt_username(username, "Username")?;
-            let md5_password = get_and_prompt_password(password, "Password")?;
-            Ok((username, md5_password))
-        }
-    }
-}
-
 pub(crate) fn fill_user_login(
-    username: Option<String>,
+    username: String,
     password: Option<String>,
     refresh: bool,
 ) -> crate::error::Result<UserLoginReq> {
-    let (username, md5_password) = fill_user_login_fields(username, password)?;
+    let md5_password = match password {
+        Some(password) => md5::compute(password.as_bytes()).0,
+        None => get_and_prompt_password(password, &format!("Password for {}", username))?,
+    };
     Ok(UserLoginReq {
         username,
         md5_password,

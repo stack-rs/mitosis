@@ -3,24 +3,12 @@ use std::path::PathBuf;
 use figment::value::magic::RelativePathBuf;
 use reqwest::Client;
 
-use tokio::io::AsyncBufReadExt;
 use url::Url;
 
 use crate::{
     error::{ApiError, Error, ErrorMsg, RequestError},
-    schema::UserLoginReq,
-    service::auth::fill_user_login,
+    service::auth::{credential_guard::CredentialGuard, fill_user_login},
 };
-
-macro_rules! expect_two {
-    ($iter:expr) => {{
-        let mut i = $iter;
-        match (i.next(), i.next(), i.next()) {
-            (Some(first), Some(second), None) => Some((first, second)),
-            _ => None,
-        }
-    }};
-}
 
 pub trait GetPathBuf {
     fn get_path_buf(&self) -> PathBuf;
@@ -73,169 +61,56 @@ impl GetPathBuf for std::path::Path {
 //     }
 // }
 
-async fn read_lines<P>(
-    filename: P,
-) -> std::io::Result<tokio::io::Lines<tokio::io::BufReader<tokio::fs::File>>>
-where
-    P: AsRef<std::path::Path>,
-{
-    let file = tokio::fs::File::open(filename).await?;
-    Ok(tokio::io::BufReader::new(file).lines())
-}
-
-async fn extract_credential(
-    user: Option<&String>,
-    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::fs::File>>,
-) -> std::io::Result<Option<(String, String)>> {
-    match user {
-        // Specify the user, let us try to find the credential for the user
-        Some(user) => {
-            let prefix = format!("{user}:");
-            while let Some(line) = lines.next_line().await? {
-                if line.starts_with(&prefix) {
-                    if let Some((username, token)) = expect_two!(line.splitn(2, ':')) {
-                        return Ok(Some((username.to_owned(), token.to_owned())));
-                    }
-                }
-            }
-            Ok(None)
-        }
-        // No user specified, just use the first line
-        None => {
-            if let Some(line) = lines.next_line().await? {
-                if let Some((username, token)) = expect_two!(line.splitn(2, ':')) {
-                    return Ok(Some((username.to_owned(), token.to_owned())));
-                }
-            }
-            Ok(None)
-        }
-    }
-}
-
-// TODO: we might upgrade our credential storage format to include the coordinator address to avoid
-// conflict
-pub(crate) async fn modify_or_append_credential(
-    cred_path: &std::path::PathBuf,
-    username: &String,
-    token: &String,
-) -> std::io::Result<()> {
-    if let Some(parent) = cred_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    if cred_path.exists() {
-        let mut lines = read_lines(cred_path).await?;
-        let mut new_lines = Vec::new();
-        let prefix = format!("{username}:");
-        let mut found = false;
-        while let Some(line) = lines.next_line().await? {
-            if line.starts_with(&prefix) {
-                new_lines.push(format!("{username}:{token}"));
-                found = true;
-            } else {
-                new_lines.push(line);
-            }
-        }
-        if !found {
-            new_lines.push(format!("{username}:{token}"));
-        }
-        tokio::fs::write(cred_path, new_lines.join("\n")).await?;
-    } else {
-        tokio::fs::write(cred_path, format!("{username}:{token}")).await?;
-    }
-    Ok(())
-}
-
-pub(crate) async fn remove_credential(
-    cred_path: &std::path::PathBuf,
-    username: &str,
-) -> std::io::Result<()> {
-    if !cred_path.exists() {
-        return Ok(());
-    }
-
-    let mut lines = read_lines(cred_path).await?;
-    let prefix = format!("{username}:");
-    let mut new_lines = Vec::new();
-
-    while let Some(line) = lines.next_line().await? {
-        if !line.starts_with(&prefix) {
-            new_lines.push(line);
-        }
-    }
-
-    if new_lines.is_empty() {
-        tokio::fs::remove_file(cred_path).await?;
-    } else {
-        tokio::fs::write(cred_path, new_lines.join("\n")).await?;
-    }
-
-    Ok(())
-}
-
 // The return value is a tuple of username and token
-pub async fn get_user_credential(
-    cred_path: Option<&RelativePathBuf>,
+pub(crate) async fn get_user_credential(
+    credential_guard: &mut CredentialGuard,
     client: &Client,
     mut url: Url,
-    user: Option<String>,
+    user: String,
     password: Option<String>,
     refresh: bool,
 ) -> crate::error::Result<(String, String)> {
-    // Try to load credential from file
-    let cred_path = cred_path
-        .map(|p| p.relative())
-        .or_else(|| {
-            dirs::config_dir().map(|mut p| {
-                p.push("mitosis");
-                p.push("credentials");
-                p
-            })
-        })
-        .ok_or(Error::ConfigError(Box::new(figment::Error::from(
-            "credential path not found",
-        ))))?;
-    // Check if the credential is valid
-    if cred_path.exists() {
-        if let Ok(mut lines) = read_lines(&cred_path).await {
-            if let Some((username, cred)) = extract_credential(user.as_ref(), &mut lines).await? {
-                let request = if refresh {
-                    url.set_path("refresh");
-                    client.post(url.as_str())
-                } else {
-                    url.set_path("auth");
-                    client.get(url.as_str())
-                };
-                let resp = request.bearer_auth(&cred).send().await.map_err(|e| {
-                    if e.is_request() && e.is_connect() {
-                        url.set_path("");
-                        RequestError::ConnectionError(url.to_string())
-                    } else {
-                        e.into()
-                    }
-                })?;
-                let status = resp.status();
-                if status.is_success() {
-                    if refresh {
-                        let resp = resp
-                            .json::<crate::schema::UserLoginResp>()
-                            .await
-                            .map_err(RequestError::from)?;
-                        let token = resp.token;
-                        modify_or_append_credential(&cred_path, &username, &token).await?;
-                        return Ok((username, token));
-                    } else {
-                        let resp_name = resp.text().await.map_err(RequestError::from)?;
-                        if resp_name == username {
-                            return Ok((username, cred));
-                        }
-                    }
-                } else if status.is_server_error() {
-                    return Err(ApiError::InternalServerError.into());
+    if let Some((username, cred)) = credential_guard
+        .load_credential(user.clone())
+        .await
+        .map(|cred| (cred.username, cred.token))
+    {
+        let request = if refresh {
+            url.set_path("refresh");
+            client.post(url.as_str())
+        } else {
+            url.set_path("auth");
+            client.get(url.as_str())
+        };
+        let resp = request.bearer_auth(&cred).send().await.map_err(|e| {
+            if e.is_request() && e.is_connect() {
+                url.set_path("");
+                RequestError::ConnectionError(url.to_string())
+            } else {
+                e.into()
+            }
+        })?;
+        let status = resp.status();
+        if status.is_success() {
+            if refresh {
+                let resp = resp
+                    .json::<crate::schema::UserLoginResp>()
+                    .await
+                    .map_err(RequestError::from)?;
+                let token = resp.token;
+                credential_guard.save_credential(None, &token).await;
+                return Ok((username, token));
+            } else {
+                let resp_name = resp.text().await.map_err(RequestError::from)?;
+                if resp_name == username {
+                    return Ok((username, cred));
                 }
             }
+        } else if status.is_server_error() {
+            return Err(ApiError::InternalServerError.into());
         }
     }
-    // Local credential not found or invalid, need to login
+
     tracing::warn!("Local credential not found or invalid, need to login");
     let req = fill_user_login(user, password, refresh)?;
     url.set_path("login");
@@ -258,7 +133,7 @@ pub async fn get_user_credential(
             .await
             .map_err(RequestError::from)?;
         let token = resp.token;
-        modify_or_append_credential(&cred_path, &req.username, &token).await?;
+        credential_guard.save_credential(None, &token).await;
         Ok((req.username, token))
     } else {
         let resp = resp.json::<ErrorMsg>().await.map_err(RequestError::from)?;
@@ -267,42 +142,44 @@ pub async fn get_user_credential(
 }
 
 // This function is currently nowhere used, but it is kept for future potential use
-pub async fn refresh_user_credential<T>(
-    cred_path: Option<&T>,
-    client: &Client,
-    url: &mut Url,
-    user_login: &UserLoginReq,
-) -> crate::error::Result<String>
-where
-    T: GetPathBuf,
-{
-    url.set_path("login");
-    let resp = client
-        .post(url.as_str())
-        .json(&user_login)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_request() && e.is_connect() {
-                url.set_path("");
-                RequestError::ConnectionError(url.to_string())
-            } else {
-                e.into()
-            }
-        })?;
-    if resp.status().is_success() {
-        let resp = resp
-            .json::<crate::schema::UserLoginResp>()
-            .await
-            .map_err(RequestError::from)?;
-        let token = resp.token;
-        if let Some(cred_path) = cred_path {
-            let cred_path = cred_path.get_path_buf();
-            modify_or_append_credential(&cred_path, &user_login.username, &token).await?;
-        }
-        Ok(token)
-    } else {
-        let resp = resp.json::<ErrorMsg>().await.map_err(RequestError::from)?;
-        Err(Error::Custom(resp.msg))
-    }
-}
+// pub async fn refresh_user_credential<T>(
+//     cred_path: Option<&T>,
+//     client: &Client,
+//     url: &mut Url,
+//     user_login: &UserLoginReq,
+// ) -> crate::error::Result<String>
+// where
+//     T: GetPathBuf,
+// {
+//     url.set_path("login");
+//     let resp = client
+//         .post(url.as_str())
+//         .json(&user_login)
+//         .send()
+//         .await
+//         .map_err(|e| {
+//             if e.is_request() && e.is_connect() {
+//                 url.set_path("");
+//                 RequestError::ConnectionError(url.to_string())
+//             } else {
+//                 e.into()
+//             }
+//         })?;
+//     if resp.status().is_success() {
+//         let resp = resp
+//             .json::<crate::schema::UserLoginResp>()
+//             .await
+//             .map_err(RequestError::from)?;
+//         let token = resp.token;
+//         if let Some(cred_path) = cred_path {
+//             let credential_guard = CredentialStore::new(Some(cred_path.get_path_buf()))?;
+//             credential_guard
+//                 .write_jwt(&*url, &user_login.username, &token)
+//                 .await?;
+//         }
+//         Ok(token)
+//     } else {
+//         let resp = resp.json::<ErrorMsg>().await.map_err(RequestError::from)?;
+//         Err(Error::Custom(resp.msg))
+//     }
+// }

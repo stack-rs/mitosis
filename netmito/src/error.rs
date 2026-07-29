@@ -57,6 +57,8 @@ pub enum Error {
     ParseSizeError(#[from] parse_size::Error),
     #[error("Parse int error: {0}")]
     ParseIntError(#[from] ParseIntError),
+    #[error("Credential guard error: {0}")]
+    CredentialGuardError(#[from] CredentialGuardError),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -137,6 +139,12 @@ pub enum ApiError {
     QuotaExceeded,
     #[error(transparent)]
     PresignS3Error(Box<S3Error>),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum CredentialGuardError {
+    #[error("Credential not found")]
+    CredentialNotFound,
 }
 
 #[derive(Serialize, Debug, Deserialize, Clone)]

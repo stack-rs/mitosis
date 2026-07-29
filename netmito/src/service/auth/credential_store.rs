@@ -1,6 +1,5 @@
 use std::{io, path::PathBuf};
 
-use base64::{engine::general_purpose, Engine as _};
 use tokio::io::AsyncBufReadExt;
 use url::Url;
 
@@ -10,67 +9,28 @@ pub(crate) struct CredentialStore {
     credential_path: PathBuf,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CredentialKind {
-    Jwt,
-    Login,
-}
-
 struct ParsedCredential<'a> {
-    encoded_origin: &'a str,
+    origin: &'a str,
     username: &'a str,
-    value: ParsedCredentialValue<'a>,
+    token: &'a str,
 }
 
-enum ParsedCredentialValue<'a> {
-    Jwt(&'a str),
-    Login([u8; 16]),
-}
-
-impl ParsedCredentialValue<'_> {
-    fn kind(&self) -> CredentialKind {
-        match self {
-            Self::Jwt(_) => CredentialKind::Jwt,
-            Self::Login(_) => CredentialKind::Login,
-        }
-    }
-}
-
-enum StoredCredential {
-    Jwt { username: String, token: String },
-    Login([u8; 16]),
-}
-
-fn encode_origin(coordinator_url: &Url) -> String {
-    general_purpose::STANDARD.encode(coordinator_url.origin().ascii_serialization())
+fn normalize_origin(coordinator_url: &Url) -> String {
+    coordinator_url.origin().ascii_serialization()
 }
 
 fn parse_credential(line: &str) -> Option<ParsedCredential<'_>> {
-    let mut fields = line.split(':');
-    let (Some(encoded_origin), Some(username), Some(typed_credential), None) =
+    let mut fields = line.split(',');
+    let (Some(origin), Some(username), Some(token), None) =
         (fields.next(), fields.next(), fields.next(), fields.next())
     else {
         return None;
     };
 
-    let (kind, value) = typed_credential.split_once('=')?;
-    let value = match kind {
-        "jwt" => ParsedCredentialValue::Jwt(value),
-        "login" => {
-            let md5_password = general_purpose::STANDARD
-                .decode(value)
-                .ok()?
-                .try_into()
-                .ok()?;
-            ParsedCredentialValue::Login(md5_password)
-        }
-        _ => return None,
-    };
-
     Some(ParsedCredential {
-        encoded_origin,
+        origin,
         username,
-        value,
+        token,
     })
 }
 
@@ -96,13 +56,7 @@ impl CredentialStore {
         coordinator_url: &Url,
         username: Option<&str>,
     ) -> io::Result<Option<(String, String)>> {
-        match self
-            .read(coordinator_url, username, CredentialKind::Jwt)
-            .await?
-        {
-            Some(StoredCredential::Jwt { username, token }) => Ok(Some((username, token))),
-            _ => Ok(None),
-        }
+        self.read(coordinator_url, username).await
     }
 
     pub(crate) async fn write_jwt(
@@ -111,71 +65,28 @@ impl CredentialStore {
         username: &str,
         token: &str,
     ) -> io::Result<()> {
-        let encoded_origin = encode_origin(coordinator_url);
-        let replacement = format!("{encoded_origin}:{username}:jwt={token}");
+        let origin = normalize_origin(coordinator_url);
+        let replacement = format!("{origin},{username},{token}");
 
-        self.rewrite(
-            &encoded_origin,
-            username,
-            CredentialKind::Jwt,
-            Some(replacement),
-        )
-        .await
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn read_login(
-        &self,
-        coordinator_url: &Url,
-        username: &str,
-    ) -> io::Result<Option<[u8; 16]>> {
-        match self
-            .read(coordinator_url, Some(username), CredentialKind::Login)
-            .await?
-        {
-            Some(StoredCredential::Login(md5_password)) => Ok(Some(md5_password)),
-            _ => Ok(None),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn write_login(
-        &self,
-        coordinator_url: &Url,
-        username: &str,
-        md5_password: &[u8; 16],
-    ) -> io::Result<()> {
-        let encoded_origin = encode_origin(coordinator_url);
-        let md5_password = general_purpose::STANDARD.encode(md5_password);
-        let replacement = format!("{encoded_origin}:{username}:login={md5_password}");
-
-        self.rewrite(
-            &encoded_origin,
-            username,
-            CredentialKind::Login,
-            Some(replacement),
-        )
-        .await
+        self.rewrite(&origin, username, Some(replacement)).await
     }
 
     pub(crate) async fn remove_jwt(&self, coordinator_url: &Url, username: &str) -> io::Result<()> {
-        let encoded_origin = encode_origin(coordinator_url);
+        let origin = normalize_origin(coordinator_url);
 
-        self.rewrite(&encoded_origin, username, CredentialKind::Jwt, None)
-            .await
+        self.rewrite(&origin, username, None).await
     }
 
     async fn read(
         &self,
         coordinator_url: &Url,
         requested_username: Option<&str>,
-        kind: CredentialKind,
-    ) -> io::Result<Option<StoredCredential>> {
+    ) -> io::Result<Option<(String, String)>> {
         let Ok(file) = tokio::fs::File::open(&self.credential_path).await else {
             return Ok(None);
         };
 
-        let encoded_origin = encode_origin(coordinator_url);
+        let origin = normalize_origin(coordinator_url);
         let mut lines = tokio::io::BufReader::new(file).lines();
 
         while let Some(line) = lines.next_line().await? {
@@ -184,12 +95,12 @@ impl CredentialStore {
             };
 
             let ParsedCredential {
-                encoded_origin: stored_origin,
+                origin: stored_origin,
                 username,
-                value,
+                token,
             } = credential;
 
-            if stored_origin != encoded_origin.as_str() || value.kind() != kind {
+            if stored_origin != origin.as_str() {
                 continue;
             }
 
@@ -199,13 +110,7 @@ impl CredentialStore {
                 }
             }
 
-            return Ok(Some(match value {
-                ParsedCredentialValue::Jwt(token) => StoredCredential::Jwt {
-                    username: username.to_owned(),
-                    token: token.to_owned(),
-                },
-                ParsedCredentialValue::Login(md5_password) => StoredCredential::Login(md5_password),
-            }));
+            return Ok(Some((username.to_owned(), token.to_owned())));
         }
 
         Ok(None)
@@ -213,9 +118,8 @@ impl CredentialStore {
 
     async fn rewrite(
         &self,
-        encoded_origin: &str,
+        origin: &str,
         username: &str,
-        kind: CredentialKind,
         replacement: Option<String>,
     ) -> io::Result<()> {
         if replacement.is_some() {
@@ -245,11 +149,7 @@ impl CredentialStore {
 
         while let Some(line) = lines.next_line().await? {
             let matches = match parse_credential(&line) {
-                Some(credential) => {
-                    credential.encoded_origin == encoded_origin
-                        && credential.username == username
-                        && credential.value.kind() == kind
-                }
+                Some(credential) => credential.origin == origin && credential.username == username,
                 None => false,
             };
 
@@ -276,5 +176,72 @@ impl CredentialStore {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn normalized_origin(url: &str) -> String {
+        normalize_origin(&Url::parse(url).expect("test URL should be valid"))
+    }
+
+    #[test]
+    fn normalize_equivalent_http_origins() {
+        for url in [
+            "http://127.0.0.1/",
+            "http://127.0.0.1",
+            "http://127.0.0.1:80",
+            "http://127.0.0.1:80/",
+        ] {
+            assert_eq!(normalized_origin(url), "http://127.0.0.1");
+        }
+    }
+
+    #[test]
+    fn normalize_origin_preserves_identity_differences() {
+        assert_eq!(
+            normalized_origin("https://example.com:443/"),
+            "https://example.com"
+        );
+        assert_eq!(
+            normalized_origin("http://example.com:5000/"),
+            "http://example.com:5000"
+        );
+        assert_ne!(
+            normalized_origin("http://example.com"),
+            normalized_origin("https://example.com")
+        );
+        assert_ne!(
+            normalized_origin("http://example.com"),
+            normalized_origin("http://example.org")
+        );
+        assert_eq!(
+            normalized_origin("http://example.com/path?q=1#section"),
+            "http://example.com"
+        );
+        assert_ne!(
+            normalized_origin("http://example.com:5000"),
+            normalized_origin("http://example.com:5001")
+        );
+        assert_ne!(
+            normalized_origin("http://localhost"),
+            normalized_origin("http://127.0.0.1")
+        );
+    }
+
+    #[test]
+    fn parse_comma_separated_credential() {
+        let credential = parse_credential("http://127.0.0.1,user_a,encoded-token==")
+            .expect("credential should be valid");
+
+        assert_eq!(credential.origin, "http://127.0.0.1");
+        assert_eq!(credential.username, "user_a");
+        assert_eq!(credential.token, "encoded-token==");
+
+        assert!(parse_credential("user_a:legacy-token").is_none());
+        assert!(parse_credential("http://127.0.0.1,user_a").is_none());
+        assert!(parse_credential("http://127.0.0.1,user_a,token,extra").is_none());
     }
 }

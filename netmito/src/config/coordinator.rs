@@ -65,8 +65,8 @@ pub struct CoordinatorConfig {
     pub(crate) heartbeat_timeout: std::time::Duration,
     /// How often to send a WebSocket keepalive to a connected agent, so idle
     /// notification sockets are not culled by intermediate proxies.
-    #[serde(with = "humantime_serde", default = "default_ws_ping_interval")]
-    pub(crate) ws_ping_interval: std::time::Duration,
+    #[serde(with = "humantime_serde", default = "default_ws_keepalive_interval")]
+    pub(crate) ws_keepalive_interval: std::time::Duration,
     /// How long a suite may go without a new task before the coordinator sweeps
     /// it out of `Open`. It is also how long an agent holds a drained job open
     /// waiting for more work, so raising it trades idle machine time for fewer
@@ -77,7 +77,7 @@ pub struct CoordinatorConfig {
     pub(crate) file_log: bool,
 }
 
-fn default_ws_ping_interval() -> std::time::Duration {
+fn default_ws_keepalive_interval() -> std::time::Duration {
     std::time::Duration::from_secs(30)
 }
 
@@ -173,7 +173,7 @@ pub struct CoordinatorConfigCli {
     /// The agent WebSocket keepalive interval, default to 30 seconds
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-    pub ws_ping_interval: Option<String>,
+    pub ws_keepalive_interval: Option<String>,
     /// How long a suite may go without a new task before it is swept out of
     /// Open, and how long an agent holds a drained job. Default 60 seconds
     #[arg(long)]
@@ -220,7 +220,7 @@ impl Default for CoordinatorConfig {
             access_token_public_path: "public.pem".to_string().into(),
             access_token_expires_in: std::time::Duration::from_secs(60 * 60 * 24 * 7),
             heartbeat_timeout: std::time::Duration::from_secs(600),
-            ws_ping_interval: default_ws_ping_interval(),
+            ws_keepalive_interval: default_ws_keepalive_interval(),
             suite_auto_close_timeout: default_suite_auto_close_timeout(),
             log_path: None,
             file_log: false,
@@ -387,7 +387,7 @@ impl CoordinatorConfig {
             agent_heartbeat_queue_tx,
             ws_router_tx,
             boot_uuid: uuid::Uuid::new_v4(),
-            ws_ping_interval: self.ws_ping_interval,
+            ws_keepalive_interval: self.ws_keepalive_interval,
         })
     }
 
@@ -507,7 +507,7 @@ pub struct InfraPool {
     /// `boot_id` in a `CounterSync` to notice a restart and reset the
     /// notification sequence they are tracking.
     pub boot_uuid: uuid::Uuid,
-    pub ws_ping_interval: std::time::Duration,
+    pub ws_keepalive_interval: std::time::Duration,
 }
 
 #[derive(Debug)]

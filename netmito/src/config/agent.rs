@@ -32,14 +32,18 @@ pub struct AgentConfig {
     pub(crate) labels: HashSet<String>,
     #[serde(with = "humantime_serde")]
     pub(crate) heartbeat_interval: Duration,
-    /// How long to wait before retrying a failed coordinator call.
+    /// How long to wait before retrying a coordinator call that could not
+    /// connect.
     #[serde(with = "humantime_serde")]
-    pub(crate) polling_interval: Duration,
+    pub(crate) connect_retry_interval: Duration,
     /// How often an idle agent asks the coordinator for a suite rather than
     /// waiting to be told about one. Unset disables polling and agent only
     /// picks up suite after a heartbeat or upon a WebSocket notification.
     #[serde(with = "humantime_serde")]
     pub(crate) idle_poll_interval: Option<Duration>,
+    /// How long to wait before reopening a notification WebSocket that dropped.
+    #[serde(with = "humantime_serde")]
+    pub(crate) ws_reconnect_interval: Duration,
     #[serde(default)]
     pub(crate) no_ws: bool,
     #[serde(with = "humantime_serde")]
@@ -96,15 +100,20 @@ pub struct AgentConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub heartbeat_interval: Option<String>,
-    /// The interval to retry failed coordinator calls (e.g. "30s")
+    /// The interval between retries of a coordinator call that could not
+    /// connect (e.g. "30s")
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-    pub polling_interval: Option<String>,
+    pub connect_retry_interval: Option<String>,
     /// The interval for an idle agent to poll for a suite (e.g. "5s"). Waits to
     /// be notified of one instead if unset
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub idle_poll_interval: Option<String>,
+    /// The interval before reopening a dropped notification WebSocket (e.g. "5s")
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub ws_reconnect_interval: Option<String>,
     /// Whether to take notifications from the heartbeat only, without opening
     /// the notification WebSocket
     #[arg(long)]
@@ -141,8 +150,9 @@ impl Default for AgentConfig {
             tags: HashSet::new(),
             labels: HashSet::new(),
             heartbeat_interval: Duration::from_secs(60),
-            polling_interval: Duration::from_secs(30),
+            connect_retry_interval: Duration::from_secs(30),
             idle_poll_interval: None,
+            ws_reconnect_interval: Duration::from_secs(5),
             no_ws: false,
             lifetime: None,
             retain: false,

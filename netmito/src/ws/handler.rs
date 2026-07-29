@@ -44,9 +44,9 @@ async fn handle_agent_socket(socket: WebSocket, agent_uuid: Uuid, pool: InfraPoo
     AgentWsRouter::register(&pool.ws_router_tx, agent_uuid, tx);
 
     // Keepalive so idle connections survive intermediate proxies.
-    let mut ping_interval = tokio::time::interval(pool.ws_ping_interval);
-    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    ping_interval.tick().await; // the first tick fires immediately
+    let mut keepalive = tokio::time::interval(pool.ws_keepalive_interval);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    keepalive.tick().await; // the first tick fires immediately
 
     loop {
         tokio::select! {
@@ -73,7 +73,7 @@ async fn handle_agent_socket(socket: WebSocket, agent_uuid: Uuid, pool: InfraPoo
                 None => break,
             },
 
-            _ = ping_interval.tick() => {
+            _ = keepalive.tick() => {
                 if let Err(e) = sender.send(Message::Ping(Vec::new().into())).await {
                     tracing::debug!(agent_uuid = %agent_uuid, "Keepalive ping failed: {e}");
                     break;

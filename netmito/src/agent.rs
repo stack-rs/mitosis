@@ -48,9 +48,6 @@ const WATCH_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// the latency a task submitted into a warm job pays before it starts.
 const HOLD_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// How long to wait before retrying a dropped WebSocket.
-const WS_RECONNECT_DELAY: Duration = Duration::from_secs(5);
-
 pub struct MitoAgent;
 
 /// What the agent should claim next, recorded by a notification and consumed in
@@ -76,10 +73,12 @@ struct AgentClient {
     assigned_suite_uuid: Option<Uuid>,
     pending_suite: Option<PendingSuite>,
     heartbeat_interval: Duration,
-    polling_interval: Duration,
+    connect_retry_interval: Duration,
     /// How often an idle agent asks for a suite unprompted; `None` waits for a
     /// notification instead.
     idle_poll_interval: Option<Duration>,
+    /// How long to wait before reopening a notification socket that dropped.
+    ws_reconnect_interval: Duration,
     /// Skip the notification socket and take everything from the heartbeat.
     no_ws: bool,
     /// Root of this agent's working directories; one subtree per job.
@@ -211,8 +210,9 @@ impl MitoAgent {
             // could not have notified us before we existed.
             pending_suite: Some(PendingSuite::Any),
             heartbeat_interval: config.heartbeat_interval,
-            polling_interval: config.polling_interval,
+            connect_retry_interval: config.connect_retry_interval,
             idle_poll_interval: config.idle_poll_interval,
+            ws_reconnect_interval: config.ws_reconnect_interval,
             no_ws: config.no_ws,
             cache_path,
             http_client,
@@ -410,6 +410,7 @@ impl AgentClient {
         url.set_path("ws/agents");
         let ws_url = url.to_string();
         let token = self.token.clone();
+        let reconnect_interval = self.ws_reconnect_interval;
 
         tokio::spawn(async move {
             while !cancel_token.is_cancelled() {
@@ -422,7 +423,7 @@ impl AgentClient {
                 }
                 tokio::select! {
                     _ = cancel_token.cancelled() => break,
-                    _ = tokio::time::sleep(WS_RECONNECT_DELAY) => {}
+                    _ = tokio::time::sleep(reconnect_interval) => {}
                 }
             }
             tracing::debug!("Agent WebSocket task stopped");
@@ -574,7 +575,7 @@ impl AgentClient {
                     http_client: self.http_client.clone(),
                     token: self.token.clone(),
                     coordinator_addr: self.coordinator_addr.clone(),
-                    polling_interval: self.polling_interval,
+                    connect_retry_interval: self.connect_retry_interval,
                     cache_path: self.cache_path.join("job"),
                     job_token,
                     drain_token,
@@ -653,7 +654,7 @@ struct SuiteRunner {
     http_client: reqwest::Client,
     token: String,
     coordinator_addr: Url,
-    polling_interval: Duration,
+    connect_retry_interval: Duration,
     /// This job's working subtree
     cache_path: PathBuf,
     /// Cancelled when the suite is cancelled, preempted, or the agent stops.
@@ -845,7 +846,7 @@ impl SuiteRunner {
         reset_workspace(slot).await?;
         let mut executor = Executor {
             cancel_token: self.job_token.clone(),
-            polling_interval: self.polling_interval,
+            polling_interval: self.connect_retry_interval,
             cache_path: slot.to_path_buf(),
             http_client: self.http_client.clone(),
             client: Box::new(AgentTaskClient {
@@ -885,7 +886,7 @@ impl SuiteRunner {
         let outcome = HookOutcome::default();
         let mut executor = Executor {
             cancel_token,
-            polling_interval: self.polling_interval,
+            polling_interval: self.connect_retry_interval,
             cache_path: dir,
             http_client: self.http_client.clone(),
             client: Box::new(AgentHookClient {
@@ -955,7 +956,7 @@ impl SuiteRunner {
             http_client: self.http_client.clone(),
             token: self.token.clone(),
             coordinator_addr: self.coordinator_addr.clone(),
-            polling_interval: self.polling_interval,
+            connect_retry_interval: self.connect_retry_interval,
             job_token: self.job_token.clone(),
         }
     }
@@ -1055,7 +1056,7 @@ struct AgentConnection {
     http_client: reqwest::Client,
     token: String,
     coordinator_addr: Url,
-    polling_interval: Duration,
+    connect_retry_interval: Duration,
     /// The job's token. Cancelling it stops every unit of this job at once,
     /// which is how a 409 ("this job is closed") propagates.
     job_token: CancellationToken,
@@ -1097,11 +1098,11 @@ impl AgentConnection {
                 Err(e) if e.is_connect() && e.is_request() => {
                     tracing::warn!(
                         "{what} failed to connect ({e}); retrying in {:?}",
-                        self.polling_interval
+                        self.connect_retry_interval
                     );
                     tokio::select! {
                         _ = self.job_token.cancelled() => return Ok(None),
-                        _ = tokio::time::sleep(self.polling_interval) => {}
+                        _ = tokio::time::sleep(self.connect_retry_interval) => {}
                     }
                     continue;
                 }

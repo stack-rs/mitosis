@@ -55,6 +55,17 @@ heartbeat_interval = "1m"
 # polling_interval is how long to wait before retrying a failed coordinator call
 polling_interval = "30s"
 lifetime = "30d"
+# idle_poll_interval is not set. When set, an agent holding no suite asks the
+#   coordinator for one that often, instead of waiting to be told about one.
+#   Pickup is signal-driven without it: a notification, or the nudge that every
+#   heartbeat answer carries — so with no_ws and a slow heartbeat, waiting for
+#   work costs up to a whole heartbeat_interval. Each poll costs the coordinator
+#   a lookup, so keep it off unless the latency matters.
+# no_ws is not set, default to false. When enabled the agent never opens the
+#   notification WebSocket and takes its notifications from heartbeat answers
+#   alone. Nothing is lost — the coordinator buffers each notification until it
+#   is acknowledged — only delivery latency changes. For hosts where the socket
+#   cannot be opened or held, a proxy in the way being the usual reason.
 # credential_path is not set
 # user is not set
 # password is not set

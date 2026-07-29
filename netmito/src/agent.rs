@@ -2,16 +2,15 @@
 //! coordinator and runs them.
 //!
 //! ```text
-//!  register ─▶ ws connect ─┐
-//!                          ├─▶ main loop ─▶ (idle + work available) ─▶ accept suite
-//!  heartbeat every N ──────┘                                                     │
-//!                                                                                ▼
+//!  register ─▶ ws connect (unless --no-ws) ─┐
+//!  heartbeat every N ───────────────────────┼─▶ main loop ─▶ (idle + work) ─▶ accept suite
+//!  idle poll every N (if configured) ───────┘                                      │
+//!                                                                                  ▼
 //!                        complete ◀─ cleanup hook ◀─ cleanup ◀─ tasks ◀─ start ◀─ provision hook
 //! ```
 //!
 //! The main loop only ever services heartbeats and notifications; a claimed
 //! suite runs in a spawned [`SuiteRunner`] so neither starves the other.
-//!
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -78,6 +77,11 @@ struct AgentClient {
     pending_suite: Option<PendingSuite>,
     heartbeat_interval: Duration,
     polling_interval: Duration,
+    /// How often an idle agent asks for a suite unprompted; `None` waits for a
+    /// notification instead.
+    idle_poll_interval: Option<Duration>,
+    /// Skip the notification socket and take everything from the heartbeat.
+    no_ws: bool,
     /// Root of this agent's working directories; one subtree per job.
     cache_path: PathBuf,
     http_client: reqwest::Client,
@@ -208,6 +212,8 @@ impl MitoAgent {
             pending_suite: Some(PendingSuite::Any),
             heartbeat_interval: config.heartbeat_interval,
             polling_interval: config.polling_interval,
+            idle_poll_interval: config.idle_poll_interval,
+            no_ws: config.no_ws,
             cache_path,
             http_client,
             job_token: None,
@@ -300,11 +306,39 @@ impl AgentClient {
             signal_token.cancel();
         });
 
+        // `no_ws` opens no socket at all and disables the branch that reads it.
+        // The channel is built either way: `select!` evaluates a branch's
+        // expression even when its guard is false, so `ws_rx` has to exist.
+        let ws_enabled = !self.no_ws;
         let (ws_tx, mut ws_rx) = mpsc::channel::<WsNotificationEvent>(32);
-        let ws_handle = self.spawn_websocket_client(ws_tx, cancel_token.clone());
+        let ws_handle = if ws_enabled {
+            Some(self.spawn_websocket_client(ws_tx, cancel_token.clone()))
+        } else {
+            tracing::info!("WebSocket disabled; Notifications rely purely on heartbeat");
+            None
+        };
 
         let mut heartbeat_timer = tokio::time::interval(self.heartbeat_interval);
         heartbeat_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let (idle_poll_enabled, mut idle_poll_timer) = match self.idle_poll_interval {
+            Some(interval) => {
+                tracing::info!(
+                    "Idle agent will poll for a suite every {}s",
+                    interval.as_secs()
+                );
+                let mut timer = tokio::time::interval(interval);
+                timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                (true, timer)
+            }
+            None => {
+                // When idle_pool_enabled is false, the timer's select branch will be disabled so
+                // this timer never fires.
+                let mut timer = tokio::time::interval(self.heartbeat_interval);
+                timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                (false, timer)
+            }
+        };
 
         tracing::info!("Agent entering its main loop");
         loop {
@@ -320,7 +354,7 @@ impl AgentClient {
                     break;
                 }
 
-                Some(event) = ws_rx.recv() => {
+                Some(event) = ws_rx.recv(), if ws_enabled => {
                     self.notification_counter = self.notification_counter.max(event.id);
                     self.handle_notification(event.event);
                 }
@@ -328,6 +362,17 @@ impl AgentClient {
                 _ = heartbeat_timer.tick() => {
                     if let Err(e) = self.send_heartbeat().await {
                         tracing::error!("Heartbeat failed: {e}");
+                    }
+                }
+
+                _ = idle_poll_timer.tick(), if idle_poll_enabled => {
+                    // This arm fires and exit the select, entering the self.advance that fetches a new
+                    // suite.
+                    //
+                    // When the agent is in busy state, the self.advance returns almost immediately,
+                    // which shouldn't cause any trouble.
+                    if self.state == AgentState::Idle && !self.stop_after_current {
+                        self.note_pending_suite(None);
                     }
                 }
             }
@@ -359,14 +404,14 @@ impl AgentClient {
         &self,
         notification_tx: mpsc::Sender<WsNotificationEvent>,
         cancel_token: CancellationToken,
-    ) -> Option<JoinHandle<()>> {
+    ) -> JoinHandle<()> {
         let mut url = self.coordinator_addr.clone();
         let _ = url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" });
         url.set_path("ws/agents");
         let ws_url = url.to_string();
         let token = self.token.clone();
 
-        Some(tokio::spawn(async move {
+        tokio::spawn(async move {
             while !cancel_token.is_cancelled() {
                 tracing::debug!("Connecting to {ws_url}");
                 match websocket_session(&ws_url, &token, &notification_tx, &cancel_token).await {
@@ -381,7 +426,7 @@ impl AgentClient {
                 }
             }
             tracing::debug!("Agent WebSocket task stopped");
-        }))
+        })
     }
 
     fn note_pending_suite(&mut self, suite_uuid: Option<Uuid>) {
@@ -403,9 +448,6 @@ impl AgentClient {
                 priority,
             } => {
                 tracing::debug!(?suite_uuid, priority, "Suite available");
-                // Recording this while busy is fine — it is only acted on once
-                // we are idle again, which gives back-to-back pickup without
-                // waiting for the next heartbeat.
                 self.note_pending_suite(suite_uuid);
             }
             AgentNotification::PreemptSuite {
@@ -466,7 +508,7 @@ impl AgentClient {
                     self.notification_counter = counter;
                 }
             }
-        }
+        };
     }
 
     async fn send_heartbeat(&mut self) -> Result<()> {
@@ -502,8 +544,8 @@ impl AgentClient {
                 if self.stop_after_current {
                     return Ok(());
                 }
-                // Act only on a signal: the coordinator re-checks availability
-                // on every heartbeat and re-notifies.
+                // Act only on a signal: a notification, the re-check the
+                // coordinator runs on every heartbeat, or the idle poll.
                 let target = match self.pending_suite.take() {
                     None => return Ok(()),
                     Some(PendingSuite::Any) => None,
@@ -513,7 +555,7 @@ impl AgentClient {
                 // One attempt per signal: the slot was cleared above, so
                 // "nothing available" leaves us idle until the next
                 // notification rather than spinning.
-                let Some((suite, job, job_id)) = self.accept_suite(target).await? else {
+                let Some((suite, job, job_id)) = self.fetch_suite(target).await? else {
                     return Ok(());
                 };
                 tracing::info!("Accepted suite {} as job {job_id}", suite.uuid);
@@ -579,7 +621,7 @@ impl AgentClient {
     ///
     /// The suite handed back need not be the one asked for: a stale hint is
     /// answered with the best available instead.
-    async fn accept_suite(
+    async fn fetch_suite(
         &self,
         suite_uuid: Option<Uuid>,
     ) -> Result<Option<(TaskSuiteSpec, i64, i32)>> {
@@ -593,7 +635,7 @@ impl AgentClient {
             .map_err(error::map_reqwest_err)?;
         let resp: AcceptSuiteResp = parse_json(resp, "accept suite").await?;
         if !resp.accepted {
-            tracing::info!("No suite accepted: {}", resp.reason.unwrap_or_default());
+            tracing::debug!("No suite accepted: {}", resp.reason.unwrap_or_default());
             return Ok(None);
         }
         let Some(suite) = resp.suite else {

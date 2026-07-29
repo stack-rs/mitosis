@@ -35,6 +35,13 @@ pub struct AgentConfig {
     /// How long to wait before retrying a failed coordinator call.
     #[serde(with = "humantime_serde")]
     pub(crate) polling_interval: Duration,
+    /// How often an idle agent asks the coordinator for a suite rather than
+    /// waiting to be told about one. Unset disables polling and agent only
+    /// picks up suite after a heartbeat or upon a WebSocket notification.
+    #[serde(with = "humantime_serde")]
+    pub(crate) idle_poll_interval: Option<Duration>,
+    #[serde(default)]
+    pub(crate) no_ws: bool,
     #[serde(with = "humantime_serde")]
     pub(crate) lifetime: Option<Duration>,
     #[serde(default)]
@@ -93,6 +100,16 @@ pub struct AgentConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub polling_interval: Option<String>,
+    /// The interval for an idle agent to poll for a suite (e.g. "5s"). Waits to
+    /// be notified of one instead if unset
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub idle_poll_interval: Option<String>,
+    /// Whether to take notifications from the heartbeat only, without opening
+    /// the notification WebSocket
+    #[arg(long)]
+    #[serde(skip_serializing_if = "<&bool>::not")]
+    pub no_ws: bool,
     /// The lifetime of the agent token (e.g. "7d", "24h"). Never expires if unset
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -125,6 +142,8 @@ impl Default for AgentConfig {
             labels: HashSet::new(),
             heartbeat_interval: Duration::from_secs(60),
             polling_interval: Duration::from_secs(30),
+            idle_poll_interval: None,
+            no_ws: false,
             lifetime: None,
             retain: false,
             machine_code: None,

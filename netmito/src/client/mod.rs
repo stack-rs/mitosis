@@ -84,25 +84,23 @@ impl MitoClient {
 
     pub async fn setup(config: ClientConfig) -> crate::error::Result<Self> {
         tracing::debug!("Client is setting up");
-        let refresh = config.refresh;
         let mut http_client = MitoHttpClient::new(config.coordinator_addr);
         let username = http_client
-            .connect(config.credential_path, config.user, config.password)
+            .connect(
+                config.credential_path,
+                config.user,
+                config.password,
+                config.refresh,
+            )
             .await?;
 
-        let mut client = MitoClient {
+        Ok(MitoClient {
             http_client,
             username,
             redis_client: None,
             redis_pubsub_client: None,
             async_redis_client: None,
-        };
-
-        if refresh {
-            client.refresh_token().await?;
-        }
-
-        Ok(client)
+        })
     }
 
     pub fn http_client(&self) -> &http::MitoHttpClient {

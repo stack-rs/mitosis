@@ -9,7 +9,7 @@ use std::ops::Not;
 use url::Url;
 
 use crate::entity::content::ArtifactContentType;
-use crate::schema::{RemoteResource, RemoteResourceDownload};
+use crate::schema::{ExecSpec, RemoteResource, RemoteResourceDownload};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -160,6 +160,20 @@ fn parse_artifact_content_type(
         )
         .into()),
     }
+}
+
+/// Parse a hook's `ExecSpec` from a JSON object, the same shape `POST /suites`
+/// takes: `{"args":["sh","-c","./setup.sh"],"terminal_output":true}`. Only
+/// `args` is required.
+fn parse_exec_spec(
+    s: &str,
+) -> Result<ExecSpec, Box<dyn std::error::Error + Send + Sync + 'static>> {
+    let spec: ExecSpec = serde_json::from_str(s)
+        .map_err(|e| format!("invalid hook spec: {e}. Expected a JSON object such as {{\"args\":[\"sh\",\"-c\",\"./setup.sh\"],\"terminal_output\":true}}"))?;
+    if spec.args.is_empty() {
+        return Err("invalid hook spec: `args` must not be empty".into());
+    }
+    Ok(spec)
 }
 
 /// Parse a resource string into RemoteResourceDownload

@@ -680,7 +680,10 @@ struct SuiteRunner {
     token: String,
     coordinator_addr: Url,
     connect_retry_interval: Duration,
-    /// The suite's own job number, as `suites jobs <suite> --job N` takes it.
+    /// The suite's own job number, and the only one that belongs in a log or on
+    /// screen: it is what `suites jobs <suite> --job N` takes. The `job` handle
+    /// threaded through the calls below is `suite_agent_jobs.id`, an internal
+    /// key the user never sees.
     job_id: i32,
     /// This job's working subtree
     cache_path: PathBuf,

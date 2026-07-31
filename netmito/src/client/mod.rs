@@ -2107,7 +2107,7 @@ impl MitoClient {
                 },
             },
             ClientCommand::Suites(args) => match args.command {
-                SuitesCommands::Create(args) => match self.suites_create(args).await {
+                SuitesCommands::Create(args) => match self.suites_create(*args).await {
                     Ok(resp) => {
                         tracing::info!("Suite created with uuid {}", resp.uuid);
                     }

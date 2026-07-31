@@ -4,8 +4,13 @@ use uuid::Uuid;
 
 use crate::{
     entity::state::{SuiteJobState, TaskSuiteState},
-    schema::{CreateTaskSuiteReq, SuiteJobsQueryReq, TaskSuitesQueryReq, WorkerSchedulePlan},
+    schema::{
+        CreateTaskSuiteReq, ExecHooks, ExecSpec, SuiteJobsQueryReq, TaskSuitesQueryReq,
+        WorkerSchedulePlan,
+    },
 };
+
+use super::parse_exec_spec;
 
 #[derive(Serialize, Debug, Deserialize, Args, derive_more::From, Clone)]
 pub struct SuitesArgs {
@@ -16,7 +21,8 @@ pub struct SuitesArgs {
 #[derive(Subcommand, Serialize, Debug, Deserialize, Clone)]
 pub enum SuitesCommands {
     /// Create a new task suite
-    Create(CreateSuiteArgs),
+    // Boxed: the three optional hook specs make this variant far larger than the rest.
+    Create(Box<CreateSuiteArgs>),
     /// Query task suites subject to a filter
     Query(QuerySuitesArgs),
     /// Get the details of a task suite
@@ -57,10 +63,30 @@ pub struct CreateSuiteArgs {
     /// Number of tasks each worker prefetches locally
     #[arg(long, default_value_t = 16)]
     pub prefetch: u32,
+    /// Provision hook, as a JSON exec spec: '{"args":["sh","-c","./setup.sh"],"terminal_output":true}'.
+    /// Runs once before any task; a non-zero exit fails the job and its tasks never start
+    #[arg(long, value_parser = parse_exec_spec)]
+    pub provision: Option<ExecSpec>,
+    /// Cleanup hook, same JSON shape. Runs once after the tasks drain, even when the job already failed
+    #[arg(long, value_parser = parse_exec_spec)]
+    pub cleanup: Option<ExecSpec>,
+    /// Background hook, same JSON shape. Runs alongside the tasks and is expected to outlive them
+    #[arg(long, value_parser = parse_exec_spec)]
+    pub background: Option<ExecSpec>,
 }
 
 impl From<CreateSuiteArgs> for CreateTaskSuiteReq {
     fn from(args: CreateSuiteArgs) -> Self {
+        // A suite with no hook at all keeps `exec_hooks` absent rather than
+        // carrying three nulls.
+        let exec_hooks = match (args.provision, args.cleanup, args.background) {
+            (None, None, None) => None,
+            (provision, cleanup, background) => Some(ExecHooks {
+                provision,
+                cleanup,
+                background,
+            }),
+        };
         Self {
             name: args.name,
             description: args.description,
@@ -73,7 +99,7 @@ impl From<CreateSuiteArgs> for CreateTaskSuiteReq {
                 cpu_binding: None,
                 task_prefetch_count: args.prefetch,
             },
-            exec_hooks: None,
+            exec_hooks,
         }
     }
 }

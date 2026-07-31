@@ -38,10 +38,18 @@ use crate::service::auth::{
     cred::get_user_credential, credential_guard::CredentialGuard, get_and_prompt_username,
 };
 
-/// How many task slots one job runs at a time. A slot is a working directory
-/// plus an [`Executor`]; two concurrent tasks must never share one, since the
+/// How many task slots a job runs at a time. A slot is a working directory plus
+/// an [`Executor`]; two concurrent tasks must never share one, since the
 /// process's `result/` directory is what becomes its artifact.
-const TASK_SLOTS: usize = 1;
+///
+/// This is the suite's `FixedWorkers.worker_count` — the plan asks for that many
+/// workers, and the agent gives it that many slots. A count of zero would leave
+/// the job with nothing to drain it, so it is floored at one.
+fn task_slots(suite: &TaskSuiteSpec) -> usize {
+    match suite.worker_schedule {
+        WorkerSchedulePlan::FixedWorkers { worker_count, .. } => (worker_count as usize).max(1),
+    }
+}
 
 /// How often a poll-based `watch` re-asks the coordinator.
 const WATCH_POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -592,6 +600,7 @@ impl AgentClient {
                     token: self.token.clone(),
                     coordinator_addr: self.coordinator_addr.clone(),
                     connect_retry_interval: self.connect_retry_interval,
+                    job_id,
                     cache_path: self.cache_path.join("job"),
                     job_token,
                     drain_token,
@@ -671,6 +680,8 @@ struct SuiteRunner {
     token: String,
     coordinator_addr: Url,
     connect_retry_interval: Duration,
+    /// The suite's own job number, as `suites jobs <suite> --job N` takes it.
+    job_id: i32,
     /// This job's working subtree
     cache_path: PathBuf,
     /// Cancelled when the suite is cancelled, preempted, or the agent stops.
@@ -721,7 +732,10 @@ impl SuiteRunner {
 
         if failure.is_none() {
             background = self.spawn_background_hook(job, &suite, background_token.clone());
-            if let Err(e) = self.execute_tasks(suite_uuid, job).await {
+            if let Err(e) = self
+                .execute_tasks(suite_uuid, job, task_slots(&suite))
+                .await
+            {
                 tracing::error!("Task execution failed for suite {suite_uuid}: {e}");
                 failure = Some(JobFailureReason {
                     kind: JobFailureKind::ExecutionError,
@@ -771,7 +785,8 @@ impl SuiteRunner {
         let next_available = match self.report_complete(job, outcome).await {
             Ok(next_available) => {
                 tracing::info!(
-                    "Finished suite {suite_uuid} (job handle {job}); more work waiting: {next_available}"
+                    "Finished suite {suite_uuid} (job {}); more work waiting: {next_available}",
+                    self.job_id
                 );
                 next_available
             }
@@ -800,27 +815,67 @@ impl SuiteRunner {
         Ok(())
     }
 
-    /// Claim and run the suite's tasks, one slot at a time.
+    /// Claim and run the suite's tasks across `slots` task slots.
     ///
-    /// TODO: currently we run one task at a time. need to support task parallel
-    async fn execute_tasks(&self, suite_uuid: Uuid, job: i64) -> Result<()> {
-        let slot = self.cache_path.join("task-0");
+    /// One slot is one worker of the suite's `FixedWorkers` plan: its own
+    /// working directory and its own claim loop, so a slow task holds up only
+    /// the slot running it.
+    ///
+    /// TODO: `task_prefetch_count` is not honored yet — a slot claims one task
+    /// at a time rather than a local batch.
+    async fn execute_tasks(&self, suite_uuid: Uuid, job: i64, slots: usize) -> Result<()> {
+        tracing::info!("Running the tasks of suite {suite_uuid} across {slots} slot(s)");
+        let mut running = tokio::task::JoinSet::new();
+        for slot in 0..slots {
+            let runner = self.clone();
+            running.spawn(async move { runner.run_slot(suite_uuid, job, slot).await });
+        }
+
+        // Every slot is joined before the job moves on, so one that fails never
+        // strands the task another still has in flight.
+        let mut failure: Option<error::Error> = None;
+        while let Some(joined) = running.join_next().await {
+            match joined {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::error!("A task slot of suite {suite_uuid} failed: {e}");
+                    failure.get_or_insert(e);
+                }
+                Err(e) => {
+                    tracing::error!("A task slot of suite {suite_uuid} panicked: {e}");
+                    failure.get_or_insert(error::Error::Custom(format!("task slot panicked: {e}")));
+                }
+            }
+        }
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// One task slot: claim a task, run it in `task-{slot}`, repeat until the
+    /// suite drains and stops holding the job open.
+    async fn run_slot(&self, suite_uuid: Uuid, job: i64, slot: usize) -> Result<()> {
+        let dir = self.cache_path.join(format!("task-{slot}"));
         let mut holding = false;
         loop {
             if self.job_token.is_cancelled() {
-                tracing::info!("Suite {suite_uuid} cancelled; stopping the task loop");
+                tracing::info!("Suite {suite_uuid} cancelled; stopping task slot {slot}");
                 return Ok(());
             }
 
-            let resp = self.fetch_tasks(suite_uuid, TASK_SLOTS as u32).await?;
+            let resp = self.fetch_tasks(suite_uuid, 1).await?;
             if resp.tasks.is_empty() {
                 if !resp.hold_job_open {
-                    tracing::info!("Suite {suite_uuid} is idle and has no more tasks");
+                    tracing::info!(
+                        "Suite {suite_uuid} is idle and has no more tasks for slot {slot}"
+                    );
                     return Ok(());
                 }
                 if !holding {
                     tracing::info!(
-                        "Suite {suite_uuid} is drained but still open; holding job {job} open for more work"
+                        "Suite {suite_uuid} is drained but still open; slot {slot} holds job {} open for more work",
+                        self.job_id
                     );
                     holding = true;
                 }
@@ -830,7 +885,10 @@ impl SuiteRunner {
                     _ = self.job_token.cancelled() => return Ok(()),
                     // Stops the wait, not the wind-down: cleanup still runs.
                     _ = self.drain_token.cancelled() => {
-                        tracing::info!("Asked to wind down; releasing job {job}");
+                        tracing::info!(
+                            "Asked to wind down; releasing slot {slot} of job {}",
+                            self.job_id
+                        );
                         return Ok(());
                     }
                     _ = tokio::time::sleep(HOLD_POLL_INTERVAL) => {}
@@ -838,7 +896,10 @@ impl SuiteRunner {
                 continue;
             }
             if holding {
-                tracing::info!("Suite {suite_uuid} has work again; job {job} resumes");
+                tracing::info!(
+                    "Suite {suite_uuid} has work again; slot {slot} of job {} resumes",
+                    self.job_id
+                );
                 holding = false;
             }
 
@@ -847,7 +908,7 @@ impl SuiteRunner {
                     return Ok(());
                 }
                 let uuid = task.uuid;
-                if let Err(e) = self.run_task(job, task, &slot).await {
+                if let Err(e) = self.run_task(job, task, &dir).await {
                     // One task must not take the job down: the coordinator
                     // reclaims anything left uncommitted.
                     tracing::error!("Failed to run task {uuid}: {e}");

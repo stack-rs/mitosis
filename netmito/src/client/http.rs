@@ -1766,12 +1766,17 @@ impl MitoHttpClient {
         suite_uuid: Uuid,
         req: SuiteJobsQueryReq,
     ) -> crate::error::Result<SuiteJobsQueryResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url
             .set_path(&format!("suites/{suite_uuid}/jobs/query"));
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1793,12 +1798,17 @@ impl MitoHttpClient {
         suite_uuid: Uuid,
         job_id: i32,
     ) -> crate::error::Result<SuiteJobQueryResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url
             .set_path(&format!("suites/{suite_uuid}/jobs/{job_id}"));
         let resp = self
             .http_client
             .get(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;
@@ -1817,11 +1827,16 @@ impl MitoHttpClient {
         &mut self,
         req: AgentsQueryReq,
     ) -> crate::error::Result<AgentsQueryResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path("agents/query");
         let resp = self
             .http_client
             .post(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .json(&req)
             .send()
             .await
@@ -1840,6 +1855,11 @@ impl MitoHttpClient {
     /// Shut an agent down. The agent row is never deleted — it is marked
     /// `Offline`; see `service::agent::user_shutdown_agent_by_uuid`.
     pub async fn shutdown_agent(&mut self, uuid: Uuid, force: bool) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
         self.url.set_path(&format!("agents/{uuid}"));
         if force {
             self.url.set_query(Some("op=force"));
@@ -1847,7 +1867,7 @@ impl MitoHttpClient {
         let resp = self
             .http_client
             .delete(self.url.as_str())
-            .bearer_auth(&self.credential)
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(map_reqwest_err)?;

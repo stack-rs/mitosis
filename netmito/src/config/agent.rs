@@ -46,10 +46,9 @@ pub struct AgentConfig {
     pub(crate) ws_reconnect_interval: Duration,
     #[serde(default)]
     pub(crate) no_ws: bool,
-    #[serde(with = "humantime_serde")]
+    /// The lifetime of the agent token. `None` means the token never expires.
+    #[serde(default, with = "humantime_serde")]
     pub(crate) lifetime: Option<Duration>,
-    #[serde(default)]
-    pub(crate) retain: bool,
     /// Explicit machine code. When unset the agent resolves one from its cache,
     /// `/etc/machine-id`, or a freshly generated value.
     #[serde(default)]
@@ -119,14 +118,13 @@ pub struct AgentConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "<&bool>::not")]
     pub no_ws: bool,
-    /// The lifetime of the agent token (e.g. "7d", "24h"). Never expires if unset
-    #[arg(long)]
-    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-    pub lifetime: Option<String>,
-    /// Whether to retain the previous login state without refreshing the credential
-    #[arg(long)]
-    #[serde(skip_serializing_if = "<&bool>::not")]
-    pub retain: bool,
+    /// The lifetime of the agent token (e.g., 7d, 1year). If not given, the agent token is valid forever
+    #[arg(long, value_parser = humantime_serde::re::humantime::parse_duration)]
+    #[serde(
+        with = "humantime_serde",
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    pub lifetime: Option<Duration>,
     /// Explicit machine code (overrides /etc/machine-id auto-detection)
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -155,7 +153,6 @@ impl Default for AgentConfig {
             ws_reconnect_interval: Duration::from_secs(5),
             no_ws: false,
             lifetime: None,
-            retain: false,
             machine_code: None,
         }
     }

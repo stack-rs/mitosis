@@ -34,7 +34,9 @@ use crate::entity::state::{AgentState, TaskExecState};
 use crate::error::{self, Result};
 use crate::executor::{execute, reset_workspace, ExecClient, Executor, UploadTarget};
 use crate::schema::*;
-use crate::service::auth::cred::get_user_credential;
+use crate::service::auth::{
+    cred::get_user_credential, credential_guard::CredentialGuard, get_and_prompt_username,
+};
 
 /// How many task slots one job runs at a time. A slot is a working directory
 /// plus an [`Executor`]; two concurrent tasks must never share one, since the
@@ -136,13 +138,27 @@ impl MitoAgent {
         );
 
         let http_client = reqwest::Client::new();
+        let mut credential_guard = CredentialGuard::new(
+            config
+                .credential_path
+                .as_ref()
+                .map(|credential_path| credential_path.relative()),
+            &config.coordinator_addr,
+        )
+        .await;
+        let username = match &config.user {
+            Some(name) => name.to_string(),
+            None => get_and_prompt_username(None, "Please input username")?,
+        };
+        // Like the worker: an agent restart must not rotate the user's auth
+        // signature, which would invalidate every token minted before it.
         let (_, user_credential) = get_user_credential(
-            config.credential_path.as_ref(),
+            &mut credential_guard,
             &http_client,
             config.coordinator_addr.clone(),
-            config.user.take(),
+            username,
             config.password.take(),
-            config.retain,
+            false,
         )
         .await?;
 

@@ -2856,10 +2856,10 @@ components:
           minItems: 16
           maxItems: 16
           description: MD5 hash of password as byte array
-        retain:
+        refresh:
           type: boolean
-          default: true
-          description: Whether to retain existing login state. Defaults to true. Set to false to refresh the login state and invalidate previously issued tokens.
+          default: false
+          description: Whether to refresh the login state, invalidating previously issued tokens. Defaults to false, which keeps the existing login state.
 
     UserLoginResp:
       type: object

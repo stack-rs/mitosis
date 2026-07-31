@@ -84,7 +84,6 @@ ws_reconnect_interval = "5s"
 # machine_code is not set. It is resolved from the cached value, then
 #   /etc/machine-id, then a generated UUID. It keys the agent's record, so a
 #   machine that comes back with a different code strands its old record.
-# retain is not set, default to false
 
 [client]
 # user = "mitosis_admin"

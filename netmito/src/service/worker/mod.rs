@@ -724,6 +724,9 @@ pub async fn report_task(
                 .await?;
             let _ = remove_task(task_id, pool)
                 .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
+            if let Some(suite_id) = task.task_suite_id {
+                service::suite::decrement_incomplete_tasks(&pool.db, suite_id, 1, now).await?;
+            }
             if let Some(uuid) = task.downstream_task_uuid {
                 service::task::worker_trigger_pending_task(pool, uuid).await?;
             }

@@ -206,10 +206,13 @@ pub async fn agent_has_in_flight_job<C: ConnectionTrait>(db: &C, agent_id: i64) 
     Ok(count > 0)
 }
 
-/// Reclaim an agent's executed-but-uncommitted tasks: every `Running` **and**
-/// `Finished` task still owned by `agent_uuid` goes back to `Ready` with its
-/// `runner_uuid` cleared, so another agent re-runs it. A `Finished` task counts
-/// because its result was never committed. Returns how many were reclaimed.
+/// Reclaim an agent's executed-but-uncommitted tasks: every `Running`,
+/// `Finished` **and** `Cancelled` task still owned by `agent_uuid` goes back to
+/// `Ready` with its `runner_uuid` cleared, so another agent re-runs it.
+/// `Finished` and `Cancelled` count because a task's result reaches the
+/// coordinator only with its `Commit`, which never arrived — and the state alone
+/// is not terminal, so a row left in it would never be archived by anything.
+/// Returns how many were reclaimed.
 pub async fn reclaim_agent_tasks(
     pool: &InfraPool,
     agent_uuid: Uuid,
@@ -220,7 +223,11 @@ pub async fn reclaim_agent_tasks(
         .col_expr(ActiveTasks::Column::RunnerUuid, Expr::value(None::<Uuid>))
         .col_expr(ActiveTasks::Column::UpdatedAt, Expr::value(now))
         .filter(ActiveTasks::Column::RunnerUuid.eq(agent_uuid))
-        .filter(ActiveTasks::Column::State.is_in([TaskState::Running, TaskState::Finished]))
+        .filter(ActiveTasks::Column::State.is_in([
+            TaskState::Running,
+            TaskState::Finished,
+            TaskState::Cancelled,
+        ]))
         .exec_with_returning(&pool.db)
         .await?;
     if !reclaimed.is_empty() {

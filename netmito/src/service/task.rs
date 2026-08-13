@@ -3,8 +3,8 @@ use sea_orm::sea_query::{
     InsertStatement, PgFunc, Query,
 };
 use sea_orm::ActiveValue::NotSet;
-use sea_orm::{prelude::*, FromQueryResult, Set, TransactionTrait};
-use std::collections::HashSet;
+use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, Set, TransactionTrait};
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::entity::role::{GroupWorkerRole, UserGroupRole};
@@ -704,6 +704,7 @@ pub async fn user_cancel_task(
                     }
                 }
                 let now = TimeDateTimeWithTimeZone::now_utc();
+                let suite_id = task.task_suite_id;
                 let res = TaskResultSpec {
                     exit_status: 0,
                     msg: Some(crate::schema::TaskResultMessage::UserCancellation),
@@ -731,6 +732,12 @@ pub async fn user_cancel_task(
                 };
                 archived_task.insert(txn).await?;
                 ActiveTasks::Entity::delete_by_id(task.id).exec(txn).await?;
+                // A cancelled suite task never reaches an agent `Commit`, so
+                // this is the only chance to give the suite its count back.
+                if let Some(suite_id) = suite_id {
+                    crate::service::suite::decrement_incomplete_tasks(txn, suite_id, 1, now)
+                        .await?;
+                }
                 Ok(task.id)
             })
         })
@@ -1335,6 +1342,27 @@ pub async fn query_tasks_by_filter(
 #[derive(FromQueryResult)]
 struct IdResult {
     id: i64,
+    task_suite_id: Option<i64>,
+}
+
+/// Tick `incomplete_tasks` down once per cancelled task, for every suite a
+/// batch cancel touched.
+///
+/// The rows come straight from the archive's `RETURNING`, so this counts what
+/// was actually cancelled rather than what was asked for.
+async fn decrement_incomplete_tasks_by_suite<C: ConnectionTrait>(
+    txn: &C,
+    suite_ids: impl IntoIterator<Item = Option<i64>>,
+    now: TimeDateTimeWithTimeZone,
+) -> crate::error::Result<()> {
+    let mut per_suite: HashMap<i64, i32> = HashMap::new();
+    for suite_id in suite_ids.into_iter().flatten() {
+        *per_suite.entry(suite_id).or_default() += 1;
+    }
+    for (suite_id, count) in per_suite {
+        crate::service::suite::decrement_incomplete_tasks(txn, suite_id, count, now).await?;
+    }
+    Ok(())
 }
 
 /// Cancel multiple tasks by filter criteria.
@@ -1455,6 +1483,7 @@ pub async fn cancel_tasks_by_filter(
                     .expr(Expr::value(result.clone()))
                     .expr(Expr::col(Alias::new("upstream_task_uuid")))
                     .expr(Expr::col(Alias::new("downstream_task_uuid")))
+                    .expr(Expr::col(Alias::new("task_suite_id")))
                     .from(Alias::new("deleted"))
                     .to_owned();
 
@@ -1479,21 +1508,28 @@ pub async fn cancel_tasks_by_filter(
                         ArchivedTasks::Column::Result,
                         ArchivedTasks::Column::UpstreamTaskUuid,
                         ArchivedTasks::Column::DownstreamTaskUuid,
+                        // Without this the archived copy of a suite task loses
+                        // its suite, and the count below has nothing to key on.
+                        ArchivedTasks::Column::TaskSuiteId,
                     ])
                     .to_owned();
 
                 insert_stmt.select_from(select_from_cte).unwrap();
-                insert_stmt.returning_col(ArchivedTasks::Column::Id);
+                insert_stmt.returning_all();
                 let insert_with_cte = insert_stmt.with(cte.into());
 
                 let stmt = builder.build(&insert_with_cte);
 
-                let task_ids: Vec<i64> = IdResult::find_by_statement(stmt)
-                    .all(txn)
-                    .await?
-                    .into_iter()
-                    .map(|r| r.id)
-                    .collect();
+                let cancelled: Vec<IdResult> = IdResult::find_by_statement(stmt).all(txn).await?;
+
+                decrement_incomplete_tasks_by_suite(
+                    txn,
+                    cancelled.iter().map(|r| r.task_suite_id),
+                    now,
+                )
+                .await?;
+
+                let task_ids: Vec<i64> = cancelled.into_iter().map(|r| r.id).collect();
 
                 Ok(task_ids)
             })
@@ -1516,6 +1552,7 @@ pub async fn cancel_tasks_by_filter(
 struct IdUuidResult {
     id: i64,
     uuid: Uuid,
+    task_suite_id: Option<i64>,
 }
 
 pub async fn cancel_tasks_by_uuids(
@@ -1624,6 +1661,7 @@ pub async fn cancel_tasks_by_uuids(
                         .expr(Expr::value(result.clone()))
                         .expr(Expr::col(Alias::new("upstream_task_uuid")))
                         .expr(Expr::col(Alias::new("downstream_task_uuid")))
+                        .expr(Expr::col(Alias::new("task_suite_id")))
                         .from(Alias::new("deleted"))
                         .to_owned();
 
@@ -1648,6 +1686,10 @@ pub async fn cancel_tasks_by_uuids(
                             ArchivedTasks::Column::Result,
                             ArchivedTasks::Column::UpstreamTaskUuid,
                             ArchivedTasks::Column::DownstreamTaskUuid,
+                            // Without this the archived copy of a suite task
+                            // loses its suite, and the count below has nothing
+                            // to key on.
+                            ArchivedTasks::Column::TaskSuiteId,
                         ])
                         .to_owned();
 
@@ -1659,6 +1701,13 @@ pub async fn cancel_tasks_by_uuids(
 
                     let results: Vec<IdUuidResult> =
                         IdUuidResult::find_by_statement(stmt).all(txn).await?;
+
+                    decrement_incomplete_tasks_by_suite(
+                        txn,
+                        results.iter().map(|r| r.task_suite_id),
+                        now,
+                    )
+                    .await?;
 
                     let task_ids: Vec<i64> = results.iter().map(|r| r.id).collect();
                     let found_uuids: HashSet<Uuid> = results.into_iter().map(|r| r.uuid).collect();

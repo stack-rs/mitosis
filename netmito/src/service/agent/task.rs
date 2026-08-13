@@ -246,7 +246,8 @@ pub async fn agent_report_task(
                 .await?;
 
             if let Some(suite_id) = task.task_suite_id {
-                commit_suite_task(pool, suite_id, now).await?;
+                crate::service::suite::decrement_incomplete_tasks(&pool.db, suite_id, 1, now)
+                    .await?;
             }
 
             // Task chaining: a child registered by an earlier Submit goes
@@ -302,48 +303,4 @@ pub async fn agent_report_task(
     }
 
     Ok(None)
-}
-
-/// Tick a suite's `incomplete_tasks` down after a commit, and complete it if
-/// that was the last task of an already-`Closed` suite.
-///
-/// Draining an `Open` suite does not complete it: it stays `Open` until it has
-/// also been quiet for `suite_auto_close_timeout`, which is what lets the agent
-/// hold its job — and its provisioned environment — open for a late arrival.
-/// `service::suite::sweep_inactive_suites` settles it afterwards. A `Closed`
-/// suite has no such window to wait out, so it is completed here.
-async fn commit_suite_task(
-    pool: &InfraPool,
-    suite_id: i64,
-    now: TimeDateTimeWithTimeZone,
-) -> Result<()> {
-    TaskSuites::Entity::update_many()
-        .col_expr(
-            TaskSuites::Column::IncompleteTasks,
-            Expr::col(TaskSuites::Column::IncompleteTasks).sub(1),
-        )
-        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
-        .filter(TaskSuites::Column::Id.eq(suite_id))
-        .filter(TaskSuites::Column::IncompleteTasks.gt(0))
-        .exec(&pool.db)
-        .await?;
-
-    // Conditional on the state and the count, which is what makes a second
-    // statement safe without a transaction around the pair: a submission racing
-    // it either lands first and leaves a non-zero count, or lands after and sets
-    // `Open` itself.
-    TaskSuites::Entity::update_many()
-        .col_expr(
-            TaskSuites::Column::State,
-            Expr::value(TaskSuiteState::Complete),
-        )
-        .col_expr(TaskSuites::Column::CompletedAt, Expr::value(Some(now)))
-        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
-        .filter(TaskSuites::Column::Id.eq(suite_id))
-        .filter(TaskSuites::Column::State.eq(TaskSuiteState::Closed))
-        .filter(TaskSuites::Column::IncompleteTasks.eq(0))
-        .exec(&pool.db)
-        .await?;
-
-    Ok(())
 }

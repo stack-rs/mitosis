@@ -42,9 +42,9 @@ struct GroupIdResult {
 /// | `Open` | idle, nothing left | `Complete` |
 /// | `Closed` | nothing left | `Complete` |
 ///
-/// The last rule is a backstop: `agent::task::commit_suite_task` completes a
-/// `Closed` suite as its last task commits, leaving this to catch the ones
-/// closed after their work had already drained.
+/// The last rule is a backstop: `decrement_incomplete_tasks` completes a `Closed`
+/// suite as its last task commits, leaving this to catch the ones closed after
+/// their work had already drained.
 ///
 /// Idleness is measured from the last submission, falling back to creation, so a
 /// suite that never received a task closes too rather than sitting `Open`
@@ -102,6 +102,76 @@ pub async fn sweep_inactive_suites(
         );
     }
     Ok(completed + closed)
+}
+
+/// Hand `count` finished tasks back to a suite: tick `incomplete_tasks` down,
+/// and complete the suite if that empties an already-`Closed` one.
+///
+/// Every path that takes an active task out of a suite ends here. A path that
+/// archives a suite task without calling this parks the
+/// suite short of `Complete` and leaves agents cycling over work that is no
+/// longer there.
+///
+/// The subtraction is deliberately unguarded. Every caller has just removed
+/// exactly `count` rows from `active_tasks`, and each of those rows added one to
+/// the counter when it was submitted, so the arithmetic cannot legitimately go
+/// below zero. Clamping it would only turn a bug elsewhere into a suite that
+/// looks fine; a negative counter is reported instead, loudly.
+///
+/// Draining an `Open` suite does not complete it: it stays `Open` until it has
+/// also been quiet for `suite_auto_close_timeout`, which is what lets the agent
+/// hold its job — and its provisioned environment — open for a late arrival.
+/// [`sweep_inactive_suites`] settles it afterwards. A `Closed` suite has no such
+/// window to wait out, so it is completed here.
+pub(crate) async fn decrement_incomplete_tasks<C: ConnectionTrait>(
+    db: &C,
+    suite_id: i64,
+    count: i32,
+    now: TimeDateTimeWithTimeZone,
+) -> Result<()> {
+    if count <= 0 {
+        return Ok(());
+    }
+
+    let updated = TaskSuites::Entity::update_many()
+        .col_expr(
+            TaskSuites::Column::IncompleteTasks,
+            Expr::col(TaskSuites::Column::IncompleteTasks).sub(count),
+        )
+        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+        .filter(TaskSuites::Column::Id.eq(suite_id))
+        .exec_with_returning(db)
+        .await?;
+
+    // Nothing here can repair it, and swallowing it would leave a suite that
+    // never completes and never gets claimed, with no trace of why.
+    for suite in updated.iter().filter(|s| s.incomplete_tasks < 0) {
+        tracing::error!(
+            suite_id = suite.id,
+            incomplete_tasks = suite.incomplete_tasks,
+            decremented = count,
+            "A suite's incomplete_tasks went negative: more tasks were taken off it than were ever counted"
+        );
+    }
+
+    // Conditional on the state and the count, which is what makes a second
+    // statement safe without a transaction around the pair: a submission racing
+    // it either lands first and leaves a non-zero count, or lands after and sets
+    // `Open` itself.
+    TaskSuites::Entity::update_many()
+        .col_expr(
+            TaskSuites::Column::State,
+            Expr::value(TaskSuiteState::Complete),
+        )
+        .col_expr(TaskSuites::Column::CompletedAt, Expr::value(Some(now)))
+        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+        .filter(TaskSuites::Column::Id.eq(suite_id))
+        .filter(TaskSuites::Column::State.eq(TaskSuiteState::Closed))
+        .filter(TaskSuites::Column::IncompleteTasks.eq(0))
+        .exec(db)
+        .await?;
+
+    Ok(())
 }
 
 pub async fn user_create_task_suite(
@@ -643,13 +713,17 @@ pub async fn user_cancel_task_suite(
                 })
                 .inspect_err(|e| tracing::error!("{}", e))?;
 
-                // Archive every non-terminal task of the suite as Cancelled:
+                // Archive every task of the suite as Cancelled. `Cancelled` rows
+                // are included deliberately: that state means an agent reported
+                // `Cancel` and has not yet sent the `Commit` that would archive
+                // the task. Leaving them behind stalls them in `active_tasks`
+                // forever — the `Commit` is about to be refused by a terminal
+                // job, no other agent can claim a non-`Ready` task, and nothing
+                // reclaims that state. Taking them here is what lets the counter
+                // below be exact.
                 let tasks = ActiveTasks::Entity::delete_many()
                     .filter(ActiveTasks::Column::TaskSuiteId.eq(suite.id))
-                    .filter(
-                        ActiveTasks::Column::State
-                            .is_not_in([TaskState::Cancelled, TaskState::Unknown]),
-                    )
+                    .filter(ActiveTasks::Column::State.is_not_in([TaskState::Unknown]))
                     .exec_with_returning(txn)
                     .await?;
 
@@ -658,7 +732,12 @@ pub async fn user_cancel_task_suite(
                 // stop rather than reporting against rows we just archived.
                 let cancelled_task_uuids: Vec<Uuid> = tasks
                     .iter()
-                    .filter(|t| matches!(t.state, TaskState::Running | TaskState::Finished))
+                    .filter(|t| {
+                        matches!(
+                            t.state,
+                            TaskState::Running | TaskState::Finished | TaskState::Cancelled
+                        )
+                    })
                     .map(|t| t.uuid)
                     .collect();
 
@@ -695,6 +774,11 @@ pub async fn user_cancel_task_suite(
 
                 let mut suite: TaskSuites::ActiveModel = suite.into();
                 suite.state = Set(TaskSuiteState::Cancelled);
+                // Exact, not an assumption: the delete above took every active
+                // row of this suite in this transaction, so nothing is left to
+                // be incomplete, and no later `Commit` can find a row to
+                // decrement against.
+                suite.incomplete_tasks = Set(0);
                 suite.updated_at = Set(now);
                 suite.completed_at = Set(Some(now));
                 suite.update(txn).await?;

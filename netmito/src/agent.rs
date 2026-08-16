@@ -323,10 +323,14 @@ impl AgentClient {
     async fn run_loop(&mut self) -> Result<()> {
         let cancel_token = self.shutdown_token.clone();
 
+        // SIGTERM matters as much as SIGINT: systemd, `docker stop`, and a group-wide
+        // kill from a task's cleanup all arrive that way. Under the default disposition
+        // SIGTERM killed the process outright — no drain, no log line, and every task it
+        // was running left orphaned. `shutdown_signal` covers both signals and reports
+        // which one arrived, matching what the coordinator and worker already do.
         let signal_token = cancel_token.clone();
         tokio::spawn(async move {
-            tokio::signal::ctrl_c().await.ok();
-            tracing::info!("Received SIGINT, shutting down");
+            crate::signal::shutdown_signal(signal_token.clone()).await;
             signal_token.cancel();
         });
 

@@ -424,6 +424,13 @@ pub async fn execute(
         .env("MITO_EXEC_DIR", executor.cache_path.join("exec"))
         .env("MITO_RESOURCE_DIR", executor.cache_path.join("resource"))
         .stdin(std::process::Stdio::null());
+    // Give the task its own process group. Otherwise it shares the agent's, and a
+    // group-wide kill from the task's own teardown (rattan and coralroot run as root
+    // and tear down namespaces on exit) lands on the agent too. It also means the
+    // timeout SIGTERM below can be aimed at the whole task tree rather than just the
+    // `env` process at its root.
+    #[cfg(unix)]
+    command.process_group(0);
     if executor.client.supports_child_tasks() {
         command.env("MITO_NEW_TASK", &new_task_path);
     }
@@ -480,6 +487,13 @@ pub async fn execute(
         biased;
         _ = executor.cancel_token.cancelled() => {
             tracing::info!("Execution interrupted by shutdown signal");
+            // The task leads its own process group, so a Ctrl-C typed at the terminal
+            // reaches the agent but not the task. Tear the group down explicitly, or the
+            // job's children (rattan, coralroot, the app under test) outlive the agent.
+            #[cfg(unix)]
+            if let Some(id) = child.id() {
+                let _ = signal::kill(Pid::from_raw(-(id as i32)), Signal::SIGKILL);
+            }
             child.kill().await.inspect_err(|e| {
                 tracing::error!("Failed to kill the process: {}", e);
             })?;
@@ -497,9 +511,14 @@ pub async fn execute(
                 // TODO: we may change this when once the `linux_pidfd` is stabilized in standard library
                 // Tracking issue for std lib: [rust-lang/rust #82971](https://github.com/rust-lang/rust/issues/82971)
                 // Tracking issue for tokio: [tokio-rs/tokio #6281](https://github.com/tokio-rs/tokio/issues/6281)
-                let _ = signal::kill(Pid::from_raw(id as i32), Signal::SIGTERM).inspect_err(|e| {
-                    tracing::error!("Failed to send SIGTERM to the process: {}", e);
-                });
+                // Negative pid targets the process group. The child is spawned with
+                // `process_group(0)`, so it leads a group of its own and this reaches the
+                // whole task tree — a bare `id` would only signal the `env` process at the
+                // root and leave its children running past the deadline.
+                let _ =
+                    signal::kill(Pid::from_raw(-(id as i32)), Signal::SIGTERM).inspect_err(|e| {
+                        tracing::error!("Failed to send SIGTERM to the task process group: {}", e);
+                    });
             }
             tokio::select! {
                 biased;

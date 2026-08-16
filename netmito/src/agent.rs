@@ -13,6 +13,7 @@
 //! suite runs in a spawned [`SuiteRunner`] so neither starves the other.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -49,6 +50,14 @@ fn task_slots(suite: &TaskSuiteSpec) -> usize {
     match suite.worker_schedule {
         WorkerSchedulePlan::FixedWorkers { worker_count, .. } => (worker_count as usize).max(1),
     }
+}
+
+/// What a finished job tells the main loop.
+struct JobSummary {
+    /// `complete`'s answer to "is there more for this agent".
+    next_available: bool,
+    /// Tasks the job claimed and ran.
+    tasks_run: usize,
 }
 
 /// How often a poll-based `watch` re-asks the coordinator.
@@ -98,9 +107,9 @@ struct AgentClient {
     job_token: Option<CancellationToken>,
     /// Releases a *held* suite without aborting its wind-down; `None` while idle.
     drain_token: Option<CancellationToken>,
-    /// The suite in flight. Resolves to `complete`'s answer to "is there more
-    /// for this agent".
-    current_run: Option<JoinHandle<bool>>,
+    /// The suite in flight. Resolves to what its job did and what `complete`
+    /// said was next.
+    current_run: Option<JoinHandle<JobSummary>>,
     /// Cancelling this exits the main loop.
     shutdown_token: CancellationToken,
     /// Set by a graceful `Shutdown` notification or `--run-once`: finish the
@@ -618,9 +627,19 @@ impl AgentClient {
                 if finished {
                     if let Some(handle) = self.current_run.take() {
                         match handle.await {
-                            // `complete` said more work is waiting for us.
-                            Ok(true) => self.note_pending_suite(None),
-                            Ok(false) => {}
+                            // `complete` said more work is waiting for us. A job
+                            // that ran nothing does not act on that: accepting
+                            // again right away is how an empty suite turns into a
+                            // hot accept/complete loop. The heartbeat and the idle
+                            // poll still bring us back.
+                            Ok(summary) if summary.next_available && summary.tasks_run > 0 => {
+                                self.note_pending_suite(None)
+                            }
+                            Ok(summary) if summary.next_available => tracing::info!(
+                                "The job ran no task; waiting for the next poll before \
+                                 accepting again"
+                            ),
+                            Ok(_) => {}
                             Err(e) => tracing::error!("The suite runner task failed: {e}"),
                         }
                     }
@@ -705,9 +724,7 @@ impl SuiteRunner {
 
     /// Every phase logs and continues on error rather than bailing: only the
     /// agent can walk the job to a terminal state and release itself.
-    ///
-    /// Returns whether `complete` said this agent has more work waiting.
-    async fn run(self, suite: TaskSuiteSpec, job: i64) -> bool {
+    async fn run(self, suite: TaskSuiteSpec, job: i64) -> JobSummary {
         let suite_uuid = suite.uuid;
         let mut failure: Option<JobFailureReason> = None;
 
@@ -733,12 +750,14 @@ impl SuiteRunner {
         let background_token = CancellationToken::new();
         let mut background = None;
 
+        let mut tasks_run = 0;
         if failure.is_none() {
             background = self.spawn_background_hook(job, &suite, background_token.clone());
-            if let Err(e) = self
+            let (ran, result) = self
                 .execute_tasks(suite_uuid, job, task_slots(&suite))
-                .await
-            {
+                .await;
+            tasks_run = ran;
+            if let Err(e) = result {
                 tracing::error!("Task execution failed for suite {suite_uuid}: {e}");
                 failure = Some(JobFailureReason {
                     kind: JobFailureKind::ExecutionError,
@@ -802,7 +821,10 @@ impl SuiteRunner {
 
         // Everything worth keeping has been uploaded by now
         let _ = tokio::fs::remove_dir_all(&self.cache_path).await;
-        next_available
+        JobSummary {
+            next_available,
+            tasks_run,
+        }
     }
 
     /// The directory the provision hook, the tasks and the cleanup hook all see
@@ -826,12 +848,17 @@ impl SuiteRunner {
     ///
     /// TODO: `task_prefetch_count` is not honored yet — a slot claims one task
     /// at a time rather than a local batch.
-    async fn execute_tasks(&self, suite_uuid: Uuid, job: i64, slots: usize) -> Result<()> {
+    ///
+    /// Reports how many tasks the slots ran between them, counted through a
+    /// shared cell so a slot that fails still contributes what it did run.
+    async fn execute_tasks(&self, suite_uuid: Uuid, job: i64, slots: usize) -> (usize, Result<()>) {
         tracing::info!("Running the tasks of suite {suite_uuid} across {slots} slot(s)");
+        let ran = Arc::new(AtomicUsize::new(0));
         let mut running = tokio::task::JoinSet::new();
         for slot in 0..slots {
             let runner = self.clone();
-            running.spawn(async move { runner.run_slot(suite_uuid, job, slot).await });
+            let ran = ran.clone();
+            running.spawn(async move { runner.run_slot(suite_uuid, job, slot, &ran).await });
         }
 
         // Every slot is joined before the job moves on, so one that fails never
@@ -850,15 +877,23 @@ impl SuiteRunner {
                 }
             }
         }
-        match failure {
+        let result = match failure {
             Some(e) => Err(e),
             None => Ok(()),
-        }
+        };
+        (ran.load(Ordering::Relaxed), result)
     }
 
     /// One task slot: claim a task, run it in `task-{slot}`, repeat until the
-    /// suite drains and stops holding the job open.
-    async fn run_slot(&self, suite_uuid: Uuid, job: i64, slot: usize) -> Result<()> {
+    /// suite drains and stops holding the job open. Every task it runs is
+    /// counted into `ran`.
+    async fn run_slot(
+        &self,
+        suite_uuid: Uuid,
+        job: i64,
+        slot: usize,
+        ran: &AtomicUsize,
+    ) -> Result<()> {
         let dir = self.cache_path.join(format!("task-{slot}"));
         let mut holding = false;
         loop {
@@ -911,6 +946,7 @@ impl SuiteRunner {
                     return Ok(());
                 }
                 let uuid = task.uuid;
+                ran.fetch_add(1, Ordering::Relaxed);
                 if let Err(e) = self.run_task(job, task, &dir).await {
                     // One task must not take the job down: the coordinator
                     // reclaims anything left uncommitted.

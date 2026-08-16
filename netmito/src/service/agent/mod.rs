@@ -768,7 +768,7 @@ async fn lock_runnable_suite<C: ConnectionTrait>(
     // Same predicate as `matching::suite_has_work`, which is what the picker
     // filters on.
     if !matches!(suite.state, TaskSuiteState::Open | TaskSuiteState::Closed)
-        || suite.incomplete_tasks == 0
+        || !matching::suite_has_claimable_task(txn, suite.id).await?
     {
         return Ok(None);
     }

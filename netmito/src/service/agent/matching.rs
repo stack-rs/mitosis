@@ -26,11 +26,11 @@ use sea_orm::{ConnectionTrait, FromQueryResult};
 use uuid::Uuid;
 
 use crate::entity::role::GroupAgentRole;
-use crate::entity::state::{AgentState, TaskSuiteState};
+use crate::entity::state::{AgentState, TaskState, TaskSuiteState};
 use crate::entity::task_suite_agent::SuiteAgentOverrideType;
 use crate::entity::{
-    agents as Agent, group_agent as GroupAgent, task_suite_agent as TaskSuiteAgent,
-    task_suites as TaskSuites,
+    active_tasks as ActiveTasks, agents as Agent, group_agent as GroupAgent,
+    task_suite_agent as TaskSuiteAgent, task_suites as TaskSuites,
 };
 
 fn suite_col(col: TaskSuites::Column) -> Expr {
@@ -97,13 +97,51 @@ pub fn eligibility_predicate() -> SimpleExpr {
         .and(excluded.not())
 }
 
-/// A suite is worth handing to an agent when it can still take work: not
-/// cancelled, and with at least one task left to finish. `Complete` suites are
-/// excluded — they have nothing to run until a new task reopens them.
+/// The suite holds at least one task an agent could claim right now.
+pub fn has_claimable_task() -> SimpleExpr {
+    Expr::exists(
+        Query::select()
+            .expr(Expr::val(1))
+            .from(ActiveTasks::Entity)
+            .and_where(
+                Expr::col((ActiveTasks::Entity, ActiveTasks::Column::TaskSuiteId))
+                    .equals((TaskSuites::Entity, TaskSuites::Column::Id)),
+            )
+            .and_where(
+                Expr::col((ActiveTasks::Entity, ActiveTasks::Column::State)).eq(TaskState::Ready),
+            )
+            .to_owned(),
+    )
+}
+
+/// [`has_claimable_task`] for one suite, for callers that hold the row rather
+/// than a `(suite, agent)` query.
+pub async fn suite_has_claimable_task<C: ConnectionTrait>(
+    db: &C,
+    suite_id: i64,
+) -> crate::error::Result<bool> {
+    use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
+
+    Ok(ActiveTasks::Entity::find()
+        .filter(ActiveTasks::Column::TaskSuiteId.eq(suite_id))
+        .filter(ActiveTasks::Column::State.eq(TaskState::Ready))
+        .count(db)
+        .await?
+        > 0)
+}
+
+/// A suite is worth handing to an agent when it is not cancelled and has a
+/// `Ready` task to claim. `Complete` suites are excluded — they have nothing to
+/// run until a new task reopens them.
+///
+/// The claimable check is what an agent can act on. `incomplete_tasks > 0` also
+/// counts tasks already running elsewhere, so a suite whose work is all claimed
+/// keeps drawing agents that accept it, find nothing, and complete straight
+/// away.
 pub fn suite_has_work() -> SimpleExpr {
     suite_col(TaskSuites::Column::State)
         .is_in([TaskSuiteState::Open, TaskSuiteState::Closed])
-        .and(suite_col(TaskSuites::Column::IncompleteTasks).gt(0))
+        .and(has_claimable_task())
 }
 
 /// Base `SELECT … FROM task_suites, agents WHERE <eligible>` that callers extend
@@ -218,4 +256,39 @@ pub async fn idle_eligible_agent_uuids<C: ConnectionTrait>(
         .into_iter()
         .map(|r| r.uuid)
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::sea_query::PostgresQueryBuilder;
+    use sea_orm::ActiveEnum;
+
+    fn has_work_sql() -> String {
+        Query::select()
+            .expr(Expr::val(1))
+            .from(TaskSuites::Entity)
+            .and_where(suite_has_work())
+            .to_owned()
+            .to_string(PostgresQueryBuilder)
+    }
+
+    #[test]
+    fn a_suite_offers_work_only_when_a_task_is_claimable() {
+        let sql = has_work_sql();
+        assert!(
+            sql.contains("active_tasks") && !sql.contains("incomplete_tasks"),
+            "the predicate must ask for a claimable task: {sql}"
+        );
+    }
+
+    #[test]
+    fn only_ready_tasks_count_as_claimable() {
+        let sql = has_work_sql();
+        let ready = TaskState::Ready.into_value().to_string();
+        assert!(
+            sql.contains(&format!(r#""state" = {ready}"#)),
+            "only Ready is claimable: {sql}"
+        );
+    }
 }

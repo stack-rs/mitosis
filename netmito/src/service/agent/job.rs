@@ -8,7 +8,6 @@
 use sea_orm::{prelude::*, QueryOrder, QuerySelect, Set};
 use uuid::Uuid;
 
-use crate::config::InfraPool;
 use crate::entity::{
     active_tasks as ActiveTasks,
     state::{SuiteJobState, TaskState},
@@ -213,22 +212,19 @@ pub async fn agent_has_in_flight_job<C: ConnectionTrait>(db: &C, agent_id: i64) 
 /// coordinator only with its `Commit`, which never arrived — and the state alone
 /// is not terminal, so a row left in it would never be archived by anything.
 /// Returns how many were reclaimed.
-pub async fn reclaim_agent_tasks(
-    pool: &InfraPool,
+///
+/// `suite_id` scopes the sweep: `None` takes back everything the agent holds,
+/// `Some(id)` only what it holds in that suite.
+///
+/// Runs on any connection, including the caller's transaction.
+pub async fn reclaim_agent_tasks<C: ConnectionTrait>(
+    db: &C,
     agent_uuid: Uuid,
+    suite_id: Option<i64>,
     now: TimeDateTimeWithTimeZone,
 ) -> Result<usize> {
-    let reclaimed = ActiveTasks::Entity::update_many()
-        .col_expr(ActiveTasks::Column::State, Expr::value(TaskState::Ready))
-        .col_expr(ActiveTasks::Column::RunnerUuid, Expr::value(None::<Uuid>))
-        .col_expr(ActiveTasks::Column::UpdatedAt, Expr::value(now))
-        .filter(ActiveTasks::Column::RunnerUuid.eq(agent_uuid))
-        .filter(ActiveTasks::Column::State.is_in([
-            TaskState::Running,
-            TaskState::Finished,
-            TaskState::Cancelled,
-        ]))
-        .exec_with_returning(&pool.db)
+    let reclaimed = reclaim_query(agent_uuid, suite_id, now)
+        .exec_with_returning(db)
         .await?;
     if !reclaimed.is_empty() {
         tracing::info!(
@@ -238,4 +234,80 @@ pub async fn reclaim_agent_tasks(
         );
     }
     Ok(reclaimed.len())
+}
+
+/// The statement [`reclaim_agent_tasks`] runs.
+fn reclaim_query(
+    agent_uuid: Uuid,
+    suite_id: Option<i64>,
+    now: TimeDateTimeWithTimeZone,
+) -> sea_orm::UpdateMany<ActiveTasks::Entity> {
+    let query = ActiveTasks::Entity::update_many()
+        .col_expr(ActiveTasks::Column::State, Expr::value(TaskState::Ready))
+        .col_expr(ActiveTasks::Column::RunnerUuid, Expr::value(None::<Uuid>))
+        .col_expr(ActiveTasks::Column::UpdatedAt, Expr::value(now))
+        .filter(ActiveTasks::Column::RunnerUuid.eq(agent_uuid))
+        .filter(ActiveTasks::Column::State.is_in([
+            TaskState::Running,
+            TaskState::Finished,
+            TaskState::Cancelled,
+        ]));
+    match suite_id {
+        Some(suite_id) => query.filter(ActiveTasks::Column::TaskSuiteId.eq(suite_id)),
+        None => query,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::sea_query::PostgresQueryBuilder;
+    use sea_orm::QueryTrait;
+
+    fn sql(suite_id: Option<i64>) -> String {
+        reclaim_query(Uuid::nil(), suite_id, TimeDateTimeWithTimeZone::now_utc())
+            .into_query()
+            .to_string(PostgresQueryBuilder)
+    }
+
+    #[test]
+    fn a_job_scoped_reclaim_only_touches_that_suite() {
+        let sql = sql(Some(7));
+        assert!(sql.contains("task_suite_id"), "{sql}");
+        assert!(sql.contains('7'), "{sql}");
+    }
+
+    #[test]
+    fn an_agent_wide_reclaim_is_not_scoped_to_a_suite() {
+        let sql = sql(None);
+        assert!(!sql.contains("task_suite_id"), "{sql}");
+    }
+
+    #[test]
+    fn every_uncommitted_state_is_reclaimed_and_ready_is_not() {
+        use sea_orm::ActiveEnum;
+        let sql = sql(None);
+        let discriminant = |state: TaskState| state.into_value().to_string();
+
+        let selected = sql
+            .split_once("\"state\" IN (")
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map(|(states, _)| states.to_string())
+            .unwrap_or_else(|| panic!("no state filter in: {sql}"));
+
+        for state in [
+            TaskState::Running,
+            TaskState::Finished,
+            TaskState::Cancelled,
+        ] {
+            assert!(
+                selected.contains(&discriminant(state)),
+                "{state} missing from: {sql}"
+            );
+        }
+        assert!(
+            !selected.contains(&discriminant(TaskState::Ready)),
+            "Ready is claimable, not reclaimable: {sql}"
+        );
+    }
 }

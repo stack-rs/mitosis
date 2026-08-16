@@ -454,7 +454,8 @@ pub async fn user_shutdown_agent_by_uuid(
             heartbeat::mark_offline(pool, agent.id, now).await?;
             let killed =
                 job::terminate_agent_jobs(&pool.db, agent.id, SuiteJobState::Killed, now).await?;
-            job::reclaim_agent_tasks(pool, agent.uuid, now).await?;
+            // Take back everything the agent holds, in every suite.
+            job::reclaim_agent_tasks(&pool.db, agent.uuid, None, now).await?;
             let _ = pool
                 .agent_heartbeat_queue_tx
                 .send(AgentHeartbeatOp::Remove(agent.id));
@@ -858,6 +859,10 @@ async fn advance_job(
 /// transaction: a half-applied pair would leave the agent pointing at a finished
 /// suite, which `agent_accept_suite` reads as "still busy" and which nothing
 /// short of a restart would clear.
+///
+/// The same transaction reclaims whatever this agent still holds uncommitted in
+/// the suite: those tasks go back to `Ready` for a re-run, and that run's
+/// results are dropped.
 pub async fn agent_complete_job(
     agent_id: i64,
     pool: &InfraPool,
@@ -866,9 +871,9 @@ pub async fn agent_complete_job(
     let now = TimeDateTimeWithTimeZone::now_utc();
     let job_handle = req.job;
 
-    let (job_id, terminal, released) = pool
+    let (job_id, terminal, released, reclaimed) = pool
         .db
-        .transaction::<_, (i32, SuiteJobState, bool), Error>(|txn| {
+        .transaction::<_, (i32, SuiteJobState, bool, usize), Error>(|txn| {
             Box::pin(async move {
                 // Locked, so the terminal check and the write below cannot
                 // straddle a `Killed`/`Lost` written by teardown.
@@ -912,7 +917,27 @@ pub async fn agent_complete_job(
                     .rows_affected
                     > 0;
 
-                Ok((job_id, terminal, released))
+                // Scoped to this suite; what the agent holds elsewhere is left
+                // alone.
+                let agent_uuid = Agent::Entity::find_by_id(agent_id)
+                    .one(txn)
+                    .await?
+                    .map(|agent| agent.uuid);
+                let reclaimed = match agent_uuid {
+                    Some(uuid) => job::reclaim_agent_tasks(txn, uuid, Some(suite_id), now).await?,
+                    None => {
+                        // No agent row, so nothing is reclaimed.
+                        tracing::warn!(
+                            agent_id,
+                            job_id,
+                            "Agent row vanished while completing its job; \
+                             skipped reclaiming its uncommitted tasks"
+                        );
+                        0
+                    }
+                };
+
+                Ok((job_id, terminal, released, reclaimed))
             })
         })
         .await?;
@@ -926,6 +951,15 @@ pub async fn agent_complete_job(
             agent_id,
             job_id,
             "Agent was no longer assigned to the completed job's suite; left its state alone"
+        );
+    }
+    if reclaimed > 0 {
+        tracing::warn!(
+            agent_id,
+            job_id,
+            reclaimed,
+            "Agent completed its job holding uncommitted tasks; they were returned to Ready \
+             and will be re-run, and that run's results are lost"
         );
     }
 

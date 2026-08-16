@@ -701,12 +701,18 @@ pub async fn report_task(
                 assigned_task_id: Set(None),
                 ..Default::default()
             };
+            let suite_id = task.task_suite_id;
+            // Archiving and the suite's counter go together in one transaction.
             let (worker_id, worker_state) = pool
                 .db
-                .transaction(|txn| {
+                .transaction::<_, (i64, WorkerState), Error>(|txn| {
                     Box::pin(async move {
                         archived_task.insert(txn).await?;
                         ActiveTask::Entity::delete_by_id(task_id).exec(txn).await?;
+                        if let Some(suite_id) = suite_id {
+                            service::suite::decrement_incomplete_tasks(txn, suite_id, 1, now)
+                                .await?;
+                        }
                         let worker = worker.update(txn).await?;
                         let worker_id = worker.id;
                         let worker_state = worker.state;
@@ -724,9 +730,6 @@ pub async fn report_task(
                 .await?;
             let _ = remove_task(task_id, pool)
                 .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
-            if let Some(suite_id) = task.task_suite_id {
-                service::suite::decrement_incomplete_tasks(&pool.db, suite_id, 1, now).await?;
-            }
             if let Some(uuid) = task.downstream_task_uuid {
                 service::task::worker_trigger_pending_task(pool, uuid).await?;
             }

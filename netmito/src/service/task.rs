@@ -56,6 +56,36 @@ enum Submitter {
     },
 }
 
+/// Take one more task onto a suite: both counters up by column expression, the
+/// submission clock reset, the suite back to `Open`. Matches no row, and so
+/// returns none, when the suite is `Cancelled`.
+fn accept_task_into_suite_query(
+    suite_id: i64,
+    now: TimeDateTimeWithTimeZone,
+) -> sea_orm::UpdateMany<TaskSuites::Entity> {
+    TaskSuites::Entity::update_many()
+        .col_expr(
+            TaskSuites::Column::TotalTasks,
+            Expr::col(TaskSuites::Column::TotalTasks).add(1),
+        )
+        .col_expr(
+            TaskSuites::Column::IncompleteTasks,
+            Expr::col(TaskSuites::Column::IncompleteTasks).add(1),
+        )
+        .col_expr(
+            TaskSuites::Column::LastTaskSubmittedAt,
+            Expr::value(Some(now)),
+        )
+        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+        .col_expr(TaskSuites::Column::State, Expr::value(TaskSuiteState::Open))
+        .col_expr(
+            TaskSuites::Column::CompletedAt,
+            Expr::value(None::<TimeDateTimeWithTimeZone>),
+        )
+        .filter(TaskSuites::Column::Id.eq(suite_id))
+        .filter(TaskSuites::Column::State.ne(TaskSuiteState::Cancelled))
+}
+
 async fn internal_submit_task(
     pool: &InfraPool,
     creator_id: i64,
@@ -300,18 +330,21 @@ async fn internal_submit_task(
 
                     let suite = match suite {
                         None => None,
-                        Some(suite) => {
-                            let prev_total_tasks = suite.total_tasks;
-                            let prev_incomplete_tasks = suite.incomplete_tasks;
-                            let mut suite: TaskSuites::ActiveModel = suite.into();
-                            suite.total_tasks = Set(prev_total_tasks + 1);
-                            suite.incomplete_tasks = Set(prev_incomplete_tasks + 1);
-                            suite.last_task_submitted_at = Set(Some(now));
-                            suite.updated_at = Set(now);
-                            suite.state = Set(TaskSuiteState::Open);
-                            suite.completed_at = Set(None);
-                            Some(suite.update(txn).await?)
-                        }
+                        Some(suite) => Some(
+                            accept_task_into_suite_query(suite.id, now)
+                                .exec_with_returning(txn)
+                                .await?
+                                .into_iter()
+                                .next()
+                                .ok_or_else(|| {
+                                    Error::ApiError(crate::error::ApiError::InvalidRequest(
+                                        format!(
+                                            "Suite {} was cancelled and cannot accept new tasks",
+                                            suite.uuid
+                                        ),
+                                    ))
+                                })?,
+                        ),
                     };
 
                     let task_uuid = Uuid::new_v4();
@@ -1783,4 +1816,39 @@ pub async fn user_batch_submit_tasks(
     }
 
     Ok(crate::schema::TasksSubmitResp { results })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::sea_query::PostgresQueryBuilder;
+    use sea_orm::QueryTrait;
+
+    fn accept_sql() -> String {
+        accept_task_into_suite_query(7, TimeDateTimeWithTimeZone::now_utc())
+            .into_query()
+            .to_string(PostgresQueryBuilder)
+    }
+
+    #[test]
+    fn accepting_a_task_moves_both_counters_by_column_expression() {
+        let sql = accept_sql();
+        for column in ["total_tasks", "incomplete_tasks"] {
+            assert!(
+                sql.contains(&format!(r#""{column}" = "{column}" + 1"#)),
+                "{column} must be incremented in SQL: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepting_a_task_never_reopens_a_cancelled_suite() {
+        use sea_orm::ActiveEnum;
+        let sql = accept_sql();
+        let cancelled = TaskSuiteState::Cancelled.into_value().to_string();
+        assert!(
+            sql.contains(&format!(r#""state" <> {cancelled}"#)),
+            "a cancelled suite must not match: {sql}"
+        );
+    }
 }

@@ -15,15 +15,23 @@
 //! `suite_agent_jobs` row whose opaque id the agent echoes on every later call.
 //! `start`/`cleanup`/`complete` advance that row and the agent state in step.
 //!
-//! ## No preemption (yet)
+//! ## No automatic preemption (yet)
 //!
 //! An agent that has accepted a suite runs it to completion; nothing takes it
-//! away for a higher-priority suite. Priority only orders the *choice* made in
-//! [`matching::best_available_suite_id`]. The pieces a future preemption needs
-//! are already in place and unused: the `PreemptSuite` notification, the agent's
-//! handling of it, and the fact that `accept` records the job so the coordinator
-//! can address a specific in-flight run. Turning it on means emitting that
-//! notification here — no schema or protocol change.
+//! away for a higher-priority suite on its own. Priority only orders the
+//! *choice* made in [`matching::best_available_suite_id`], which is made once,
+//! when the agent goes looking for work.
+//!
+//! [`user_stop_agent_job`] is the manual stand-in: stopping a job sends the
+//! agent straight back through that choice, so it lands on whatever outranks
+//! everything now. Because the agent re-picks *after* winding down rather than
+//! being handed a target, the answer is as fresh as it can be.
+//!
+//! The pieces automatic preemption needs are in place and unused: the
+//! `PreemptSuite` notification, the agent's handling of it, and the fact that
+//! `accept` records the job so the coordinator can address a specific in-flight
+//! run. Turning it on means emitting that notification here — no schema or
+//! protocol change.
 
 pub mod heartbeat;
 pub mod hook;
@@ -35,7 +43,7 @@ use std::collections::HashSet;
 
 use sea_orm::sea_query::extension::postgres::PgExpr;
 use sea_orm::sea_query::{Alias, PgFunc, Query};
-use sea_orm::{prelude::*, FromQueryResult, QuerySelect, Set, TransactionTrait};
+use sea_orm::{prelude::*, FromQueryResult, QueryOrder, QuerySelect, Set, TransactionTrait};
 use uuid::Uuid;
 
 use crate::config::InfraPool;
@@ -51,8 +59,8 @@ use crate::error::{ApiError, AuthError, Error, Result};
 use crate::schema::{
     AcceptSuiteReq, AcceptSuiteResp, AgentHeartbeatReq, AgentHeartbeatResp, AgentInfo,
     AgentNotification, AgentShutdownOp, AgentsQueryReq, AgentsQueryResp, CompleteJobReq,
-    CompleteJobResp, CountQuery, ExecHooks, RegisterAgentReq, RegisterAgentResp, SuiteJobOutcome,
-    TaskSuiteSpec, WorkerSchedulePlan,
+    CompleteJobResp, CountQuery, ExecHooks, RegisterAgentReq, RegisterAgentResp, StopAgentJobResp,
+    StopJobOp, SuiteJobOutcome, TaskSuiteSpec, WorkerSchedulePlan,
 };
 use crate::service::auth::token::generate_worker_token;
 use crate::ws::AgentWsRouter;
@@ -423,8 +431,10 @@ pub async fn user_query_agents(
 /// Shut an agent down.
 ///
 /// - `Graceful`: ask the agent to stop. An idle agent is parked `Offline` now; a
-///   busy one keeps its job and finishes it, going `Offline` when its heartbeat
-///   stops.
+///   busy one winds its job down — the tasks it is running finish and commit,
+///   cleanup runs, whatever it had claimed but not started is reclaimed — and it
+///   goes `Offline` when its heartbeat stops. It does *not* drain the rest of
+///   the suite first; other agents pick that up.
 /// - `Force`: park it `Offline` immediately, kill its in-flight jobs, and
 ///   reclaim its uncommitted tasks so other agents re-run them.
 pub async fn user_shutdown_agent_by_uuid(
@@ -488,6 +498,149 @@ pub async fn user_shutdown_agent_by_uuid(
     );
 
     Ok(())
+}
+
+/// Stop the job `agent_uuid` is running now, leaving the agent up.
+///
+/// Authorized like a shutdown: only an Admin of the agent's admin group. The
+/// suite-scoped route ([`crate::service::suite::user_stop_suite_job`]) reaches
+/// the same core through the suite's owner instead.
+pub async fn user_stop_agent_job(
+    user_id: i64,
+    agent_uuid: Uuid,
+    op: StopJobOp,
+    pool: &InfraPool,
+) -> Result<StopAgentJobResp> {
+    let agent = Agent::Entity::find()
+        .join_rev(sea_orm::JoinType::Join, GroupAgent::Relation::Agents.def())
+        .join(sea_orm::JoinType::Join, GroupAgent::Relation::Groups.def())
+        .join(sea_orm::JoinType::Join, Group::Relation::UserGroup.def())
+        .filter(Agent::Column::Uuid.eq(agent_uuid))
+        .filter(GroupAgent::Column::Role.eq(GroupAgentRole::Admin))
+        .filter(UserGroup::Column::UserId.eq(user_id))
+        .filter(UserGroup::Column::Role.eq(UserGroupRole::Admin))
+        .one(&pool.db)
+        .await?
+        .ok_or(Error::ApiError(ApiError::NotFound(format!(
+            "User doesn't have permission or agent with uuid {agent_uuid}"
+        ))))?;
+
+    // At most one by construction — `accept` refuses a busy agent — so the
+    // ordering only makes the answer deterministic if that ever slips.
+    let job = SuiteAgentJobs::Entity::find()
+        .filter(SuiteAgentJobs::Column::AgentId.eq(agent.id))
+        .filter(SuiteAgentJobs::Column::State.is_in(job::IN_FLIGHT))
+        .order_by_desc(SuiteAgentJobs::Column::Id)
+        .one(&pool.db)
+        .await?;
+    let Some(job) = job else {
+        return Ok(StopAgentJobResp {
+            stopped: false,
+            suite_uuid: None,
+            job_id: None,
+        });
+    };
+
+    let suite_uuid = TaskSuites::Entity::find_by_id(job.task_suite_id)
+        .one(&pool.db)
+        .await?
+        .map(|s| s.uuid)
+        .ok_or_else(|| Error::Custom(format!("Job {} points at a missing suite", job.id)))?;
+
+    stop_agent_job(pool, &agent, &job, suite_uuid, op).await
+}
+
+/// Stop one in-flight job, whoever asked. Both stop routes end here.
+///
+/// The agent is left `Idle` rather than `Offline`: the point of a stop is that
+/// it goes back and picks a suite again, which is how a user preempts one onto
+/// work that outranks what it started.
+///
+/// `Force` writes the terminal here so no later agent report is accepted;
+/// `Graceful` writes nothing and lets the agent walk its own job to `Completed`,
+/// which is what lets its running tasks commit.
+pub(crate) async fn stop_agent_job(
+    pool: &InfraPool,
+    agent: &Agent::Model,
+    job: &SuiteAgentJobs::Model,
+    suite_uuid: Uuid,
+    op: StopJobOp,
+) -> Result<StopAgentJobResp> {
+    let now = TimeDateTimeWithTimeZone::now_utc();
+    let (agent_id, agent_uuid) = (agent.id, agent.uuid);
+    let (job_handle, job_id) = (job.id, job.job_id);
+
+    if op == StopJobOp::Force {
+        let stopped = pool
+            .db
+            .transaction::<_, bool, Error>(|txn| {
+                Box::pin(async move {
+                    // Locked, so the terminal check and the write below cannot
+                    // straddle the agent's own `complete`.
+                    let job_row = job::load_validate_job_locked(txn, job_handle, agent_id).await?;
+                    // It finished under us — nothing to stop, and no error either.
+                    if job_row.state.is_terminal() {
+                        return Ok(false);
+                    }
+
+                    let suite_id = job_row.task_suite_id;
+                    let mut job_row: SuiteAgentJobs::ActiveModel = job_row.into();
+                    job_row.state = Set(SuiteJobState::Killed);
+                    job_row.updated_at = Set(now);
+                    job_row.update(txn).await?;
+
+                    // Same guard as `agent_complete_job`: only release an agent
+                    // still bound to this job's suite, never one teardown has
+                    // already unassigned.
+                    Agent::Entity::update_many()
+                        .col_expr(Agent::Column::State, Expr::value(AgentState::Idle))
+                        .col_expr(Agent::Column::AssignedTaskSuiteId, Expr::value(None::<i64>))
+                        .col_expr(Agent::Column::UpdatedAt, Expr::value(now))
+                        .filter(Agent::Column::Id.eq(agent_id))
+                        .filter(Agent::Column::AssignedTaskSuiteId.eq(suite_id))
+                        .exec(txn)
+                        .await?;
+
+                    // The kill is the last moment we know these will never be
+                    // committed; scoped to this suite, as `complete` does.
+                    job::reclaim_agent_tasks(txn, agent_uuid, Some(suite_id), now).await?;
+
+                    Ok(true)
+                })
+            })
+            .await?;
+
+        if !stopped {
+            return Ok(StopAgentJobResp {
+                stopped: false,
+                suite_uuid: None,
+                job_id: None,
+            });
+        }
+    }
+
+    tracing::info!(
+        agent_uuid = %agent_uuid,
+        job_id,
+        %suite_uuid,
+        graceful = op == StopJobOp::Graceful,
+        "Stopping an agent's job on request"
+    );
+
+    AgentWsRouter::notify(
+        &pool.ws_router_tx,
+        agent_uuid,
+        AgentNotification::StopJob {
+            suite_uuid,
+            graceful: op == StopJobOp::Graceful,
+        },
+    );
+
+    Ok(StopAgentJobResp {
+        stopped: true,
+        suite_uuid: Some(suite_uuid),
+        job_id: Some(job_id),
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

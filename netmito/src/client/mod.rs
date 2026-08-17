@@ -2175,6 +2175,16 @@ impl MitoClient {
                     self.suites_override_agents(args).await;
                 }
                 SuitesCommands::Jobs(args) => self.suites_jobs(args).await,
+                SuitesCommands::StopJob(args) => {
+                    match self
+                        .http_client
+                        .stop_suite_job(args.uuid, args.job, args.force)
+                        .await
+                    {
+                        Ok(resp) => report_stopped_job(resp),
+                        Err(e) => tracing::error!("{}", e),
+                    }
+                }
             },
             ClientCommand::Agents(args) => match args.command {
                 AgentsCommands::Query(args) => {
@@ -2208,6 +2218,12 @@ impl MitoClient {
                 AgentsCommands::Shutdown(args) => {
                     match self.http_client.shutdown_agent(args.uuid, args.force).await {
                         Ok(_) => tracing::info!("Agent {} asked to shut down", args.uuid),
+                        Err(e) => tracing::error!("{}", e),
+                    }
+                }
+                AgentsCommands::StopJob(args) => {
+                    match self.http_client.stop_agent_job(args.uuid, args.force).await {
+                        Ok(resp) => report_stopped_job(resp),
                         Err(e) => tracing::error!("{}", e),
                     }
                 }
@@ -2245,5 +2261,16 @@ impl MitoClient {
             }
         });
         req
+    }
+}
+
+/// Shared by both stop-job commands. "Nothing to stop" is a normal answer, not
+/// an error, so it is reported rather than logged as a failure.
+fn report_stopped_job(resp: StopAgentJobResp) {
+    match (resp.stopped, resp.suite_uuid, resp.job_id) {
+        (true, Some(suite_uuid), Some(job_id)) => tracing::info!(
+            "Asked the agent to stop job {job_id} of suite {suite_uuid}; it will pick a suite again"
+        ),
+        _ => tracing::info!("No job was running to stop"),
     }
 }

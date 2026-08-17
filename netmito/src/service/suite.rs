@@ -17,10 +17,10 @@ use crate::entity::{
 use crate::error::{ApiError, Error, ResolveError, Result};
 use crate::schema::{
     AgentNotification, CancelTaskSuiteOp, CountQuery, CreateTaskSuiteReq, CreateTaskSuiteResp,
-    ExecHooks, HookTaskInfo, ParsedTaskSuiteInfo, SuiteAgentOverrideReq, SuiteAgentOverrideResp,
-    SuiteJobInfo, SuiteJobQueryResp, SuiteJobsQueryReq, SuiteJobsQueryResp, TaskResultMessage,
-    TaskResultSpec, TaskSuiteInfo, TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp,
-    WorkerSchedulePlan,
+    ExecHooks, HookTaskInfo, ParsedTaskSuiteInfo, StopAgentJobResp, StopJobOp,
+    SuiteAgentOverrideReq, SuiteAgentOverrideResp, SuiteJobInfo, SuiteJobQueryResp,
+    SuiteJobsQueryReq, SuiteJobsQueryResp, TaskResultMessage, TaskResultSpec, TaskSuiteInfo,
+    TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp, WorkerSchedulePlan,
 };
 use crate::service::task::{parse_operators_with_number, OperatorWithNumber};
 
@@ -1026,4 +1026,47 @@ pub async fn user_get_suite_job(
         },
         hooks,
     })
+}
+
+/// Stop one of the suite's jobs, addressed by its per-suite job number.
+///
+/// Same behaviour as the agent-scoped route, reached through the suite's owner
+/// (Write on its group) instead of the agent's admin: the agent stays up and
+/// picks a suite again, which may well be this one.
+pub async fn user_stop_suite_job(
+    user_id: i64,
+    pool: &InfraPool,
+    suite_uuid: Uuid,
+    job_id: i32,
+    op: StopJobOp,
+) -> Result<StopAgentJobResp> {
+    let suite = match authorize_suite(&pool.db, user_id, suite_uuid, UserGroupRole::Write).await {
+        Ok(suite) => suite,
+        Err(ResolveError::Item(e)) => return Err(Error::ApiError(ApiError::NotFound(e.msg))),
+        Err(ResolveError::Fatal(e)) => return Err(e),
+    };
+
+    let job = SuiteAgentJobs::Entity::find()
+        .filter(SuiteAgentJobs::Column::TaskSuiteId.eq(suite.id))
+        .filter(SuiteAgentJobs::Column::JobId.eq(job_id))
+        .one(&pool.db)
+        .await?
+        .ok_or(Error::ApiError(ApiError::NotFound(format!(
+            "Job {job_id} of suite {suite_uuid}"
+        ))))?;
+
+    // A job that already ended, or one no agent owns, has nothing to stop.
+    let agent = match (job.state.is_terminal(), job.agent_id) {
+        (false, Some(agent_id)) => Agent::Entity::find_by_id(agent_id).one(&pool.db).await?,
+        _ => None,
+    };
+    let Some(agent) = agent else {
+        return Ok(StopAgentJobResp {
+            stopped: false,
+            suite_uuid: None,
+            job_id: None,
+        });
+    };
+
+    crate::service::agent::stop_agent_job(pool, &agent, &job, suite_uuid, op).await
 }

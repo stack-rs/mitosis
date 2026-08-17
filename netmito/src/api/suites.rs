@@ -11,9 +11,10 @@ use crate::{
     config::InfraPool,
     error::ApiError,
     schema::{
-        CancelTaskSuiteParam, CreateTaskSuiteReq, CreateTaskSuiteResp, SuiteAgentOverrideReq,
-        SuiteAgentOverrideResp, SuiteJobQueryResp, SuiteJobsQueryReq, SuiteJobsQueryResp,
-        TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp,
+        CancelTaskSuiteParam, CreateTaskSuiteReq, CreateTaskSuiteResp, StopAgentJobReq,
+        StopAgentJobResp, SuiteAgentOverrideReq, SuiteAgentOverrideResp, SuiteJobQueryResp,
+        SuiteJobsQueryReq, SuiteJobsQueryResp, TaskSuiteQueryResp, TaskSuitesQueryReq,
+        TaskSuitesQueryResp,
     },
     service::{
         self,
@@ -29,7 +30,10 @@ pub fn suites_router(st: InfraPool) -> Router<InfraPool> {
         .route("/{uuid}/close", post(close_suite))
         .route("/{uuid}/agents/override", post(override_agents_for_suite))
         .route("/{uuid}/jobs/query", post(query_suite_jobs))
-        .route("/{uuid}/jobs/{job_id}", get(get_suite_job))
+        .route(
+            "/{uuid}/jobs/{job_id}",
+            get(get_suite_job).delete(stop_suite_job),
+        )
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -125,6 +129,20 @@ pub async fn get_suite_job(
     Path((uuid, job_id)): Path<(Uuid, i32)>,
 ) -> Result<Json<SuiteJobQueryResp>, ApiError> {
     let resp = service::suite::user_get_suite_job(u.id, &pool, uuid, job_id)
+        .await
+        .map_err(map_service_error)?;
+    Ok(Json(resp))
+}
+
+/// `DELETE /suites/{uuid}/jobs/{job_id}?op=graceful|force` — stop this job. The
+/// agent running it stays up and picks a suite again, this one included.
+pub async fn stop_suite_job(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path((uuid, job_id)): Path<(Uuid, i32)>,
+    Query(req): Query<StopAgentJobReq>,
+) -> Result<Json<StopAgentJobResp>, ApiError> {
+    let resp = service::suite::user_stop_suite_job(u.id, &pool, uuid, job_id, req.op)
         .await
         .map_err(map_service_error)?;
     Ok(Json(resp))

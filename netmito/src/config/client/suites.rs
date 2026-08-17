@@ -35,6 +35,8 @@ pub enum SuitesCommands {
     Override(AgentsForSuiteOverrideArgs),
     /// Inspect the suite's jobs — one per agent attempt at running it
     Jobs(SuiteJobsArgs),
+    /// Stop one of the suite's jobs, sending its agent back to pick a suite again
+    StopJob(StopSuiteJobArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -208,6 +210,23 @@ pub struct SuiteJobsArgs {
     /// Report the number of matching jobs instead of listing them
     #[arg(long)]
     pub count: bool,
+}
+
+/// The suite-side twin of `agents stop-job`: same wind-down, addressed by job
+/// number and authorized on the suite's group. The agent may re-accept this very
+/// suite, so it stops the *job*, it does not keep the agent away.
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct StopSuiteJobArgs {
+    /// The UUID of the suite
+    pub uuid: Uuid,
+    /// The suite's own job number, as shown by `suites jobs`
+    #[arg(long)]
+    pub job: i32,
+    /// Stop now: the job is killed without cleanup and its uncommitted tasks are
+    /// reclaimed. Without this the agent finishes the tasks it is running,
+    /// commits them, and cleans up first.
+    #[arg(short, long)]
+    pub force: bool,
 }
 
 impl From<&SuiteJobsArgs> for SuiteJobsQueryReq {

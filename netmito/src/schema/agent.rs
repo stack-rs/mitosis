@@ -146,6 +146,42 @@ pub enum AgentShutdownOp {
     Force,
 }
 
+/// Query parameters for the stop-job endpoints selecting the stop mode
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StopAgentJobReq {
+    #[serde(default)]
+    pub op: StopJobOp,
+}
+
+/// How to end a job the user asked to stop. The agent survives either way and
+/// goes straight back to picking a suite — stopping a job *is* how a user
+/// preempts an agent onto whatever is highest-priority now.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub enum StopJobOp {
+    /// Stop claiming tasks, let the running ones finish, then clean up. The
+    /// agent walks the job to `Completed` itself.
+    #[default]
+    #[serde(alias = "graceful")]
+    Graceful,
+    /// Stop now: the job goes `Killed` and its tasks are reclaimed. The cleanup
+    /// hook does not run.
+    #[serde(alias = "force")]
+    Force,
+}
+
+/// Response to a stop-job request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StopAgentJobResp {
+    /// False when the agent had no job to stop — an ordinary answer, not an error.
+    pub stopped: bool,
+    /// The suite whose job was stopped, when one was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suite_uuid: Option<Uuid>,
+    /// Per-suite job number of the stopped job, when one was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<i32>,
+}
+
 // ============================================================================
 // Execution loop (agent-authed)
 // ============================================================================
@@ -482,6 +518,19 @@ pub enum AgentNotification {
 
     /// Resync the notification counter (coordinator restart / wrap-around).
     CounterSync { counter: u64, boot_id: Uuid },
+
+    /// Stop the job the agent is running now; the agent itself stays up and
+    /// picks a suite again immediately. This is manual preemption: the agent
+    /// re-runs the match *after* winding down, so it lands on whatever is
+    /// highest-priority then — including the same suite, which re-provisions it.
+    ///
+    /// `suite_uuid` is the guard. An agent that has already moved on ignores the
+    /// event rather than killing the job it started in the meantime.
+    ///
+    /// New variants go **last**: `speedy` encodes the variant index in
+    /// declaration order, so appending is compatible with older agents and
+    /// inserting silently renumbers everything after it.
+    StopJob { suite_uuid: Uuid, graceful: bool },
 }
 
 /// Message from an agent to the coordinator over the WebSocket.

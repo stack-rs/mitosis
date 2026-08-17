@@ -16,7 +16,7 @@ use crate::{
         AgentsQueryReq, AgentsQueryResp, CompleteJobReq, CompleteJobResp, EnterCleanupReq,
         FetchTasksReq, FetchTasksResp, HookReportReq, HookReportResp, RegisterAgentReq,
         RegisterAgentResp, RemoteResourceDownloadResp, ReportAgentTaskReq, ReportTaskResp,
-        StartJobReq, TaskQueryResp,
+        StartJobReq, StopAgentJobReq, StopAgentJobResp, TaskQueryResp,
     },
     service::{
         self,
@@ -29,6 +29,7 @@ pub fn agents_router(st: InfraPool) -> Router<InfraPool> {
         .route("/", post(register_agent))
         .route("/query", post(query_agents))
         .route("/{uuid}", delete(shutdown_agent))
+        .route("/{uuid}/job/stop", post(stop_agent_job))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -102,6 +103,21 @@ async fn shutdown_agent(
         .await
         .map_err(map_service_error)?;
     Ok(())
+}
+
+/// `POST /agents/{uuid}/job/stop?op=graceful|force` — end the job the agent is
+/// running now. The agent stays up and picks a suite again, so this is how a
+/// user preempts one onto higher-priority work.
+async fn stop_agent_job(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Query(req): Query<StopAgentJobReq>,
+) -> Result<Json<StopAgentJobResp>, ApiError> {
+    let resp = service::agent::user_stop_agent_job(u.id, uuid, req.op, &pool)
+        .await
+        .map_err(map_service_error)?;
+    Ok(Json(resp))
 }
 
 // ── execution loop (agent-authed) ──

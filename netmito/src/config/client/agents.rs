@@ -16,6 +16,8 @@ pub enum AgentsCommands {
     Query(QueryAgentsArgs),
     /// Shut an agent down (the agent record itself is kept)
     Shutdown(ShutdownAgentArgs),
+    /// Stop the job an agent is running now, sending it back to pick a suite again
+    StopJob(StopAgentJobArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -66,8 +68,22 @@ pub struct ShutdownAgentArgs {
     /// The UUID of the agent
     pub uuid: Uuid,
     /// Stop now: the agent's in-flight job is killed without cleanup and its
-    /// uncommitted tasks are reclaimed. Without this the agent finishes its
-    /// current job first.
+    /// uncommitted tasks are reclaimed. Without this the agent finishes the
+    /// tasks it is running, cleans up, and then stops.
+    #[arg(short, long)]
+    pub force: bool,
+}
+
+/// Stopping a job is how you preempt an agent by hand: it winds the job down and
+/// immediately picks the highest-priority suite on offer, which may be the one it
+/// was already running — a way to force a re-provision.
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct StopAgentJobArgs {
+    /// The UUID of the agent
+    pub uuid: Uuid,
+    /// Stop now: the job is killed without cleanup and its uncommitted tasks are
+    /// reclaimed. Without this the agent finishes the tasks it is running,
+    /// commits them, and cleans up first.
     #[arg(short, long)]
     pub force: bool,
 }

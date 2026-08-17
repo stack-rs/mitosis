@@ -96,7 +96,8 @@ struct AgentClient {
     http_client: reqwest::Client,
     /// Cancels the running suite (notification-driven); `None` while idle.
     job_token: Option<CancellationToken>,
-    /// Releases a *held* suite without aborting its wind-down; `None` while idle.
+    /// Stops the running suite from claiming any more tasks, without aborting
+    /// its wind-down; `None` while idle.
     drain_token: Option<CancellationToken>,
     /// The suite in flight. Resolves to `complete`'s answer to "is there more
     /// for this agent".
@@ -508,13 +509,37 @@ impl AgentClient {
                 // that is gone answers 404 and the runner moves on.
                 tracing::debug!(count = task_uuids.len(), "Tasks cancelled");
             }
+            AgentNotification::StopJob {
+                suite_uuid,
+                graceful,
+            } => {
+                // Guarded on the suite: a stop that arrives after we moved on
+                // must not take down the job we started in the meantime.
+                if self.assigned_suite_uuid == Some(suite_uuid) {
+                    tracing::info!(
+                        "A user asked this agent to stop its job on suite {suite_uuid} \
+                         (graceful={graceful})"
+                    );
+                    // Deliberately no `stop_after_current`: the point of a stop
+                    // is to go straight back and pick a suite again, which is
+                    // how the agent lands on work that outranks this job.
+                    let token = if graceful {
+                        &self.drain_token
+                    } else {
+                        &self.job_token
+                    };
+                    if let Some(token) = token {
+                        token.cancel();
+                    }
+                }
+            }
             AgentNotification::Shutdown { graceful } => {
                 tracing::warn!("Coordinator asked this agent to shut down (graceful={graceful})");
                 if graceful {
                     self.stop_after_current = true;
                     self.pending_suite = None;
-                    // Stop waiting for more work, but let the job finish its
-                    // cleanup — that is exactly what `drain_token` separates.
+                    // Same wind-down as a graceful stop — running tasks finish
+                    // and cleanup runs — and then we stop instead of re-picking.
                     if let Some(token) = &self.drain_token {
                         token.cancel();
                     }
@@ -594,11 +619,6 @@ impl AgentClient {
                 self.job_token = Some(job_token.clone());
                 let drain_token = CancellationToken::new();
                 self.drain_token = Some(drain_token.clone());
-                // `--run-once` exits after this suite, so it never holds a
-                // drained one for the idle window.
-                if self.run_once {
-                    drain_token.cancel();
-                }
                 let runner = SuiteRunner {
                     http_client: self.http_client.clone(),
                     token: self.token.clone(),
@@ -608,6 +628,7 @@ impl AgentClient {
                     cache_path: self.cache_path.join("job"),
                     job_token,
                     drain_token,
+                    run_once: self.run_once,
                 };
                 self.current_run = Some(tokio::spawn(runner.run(suite, job)));
                 self.state = AgentState::Executing;
@@ -694,10 +715,15 @@ struct SuiteRunner {
     /// Cancelled when the suite is cancelled, preempted, or the agent stops.
     /// Everything the job runs (tasks, hooks, cleanup) runs under it.
     job_token: CancellationToken,
-    /// Cancelled to stop waiting without stopping the wind-down: a graceful
-    /// shutdown releases a held job, but its cleanup hook still has to run, and
-    /// that runs under `job_token`.
+    /// Cancelled to stop claiming without stopping the wind-down: the tasks
+    /// already executing finish and commit, then cleanup runs — under
+    /// `job_token`, which is why the two are separate. Whatever a slot claimed
+    /// but had not started is abandoned; the coordinator reclaims it on
+    /// `complete`.
     drain_token: CancellationToken,
+    /// `--run-once`: never hold a drained job open waiting for late work, since
+    /// this agent stops after this suite anyway.
+    run_once: bool,
 }
 
 impl SuiteRunner {
@@ -861,7 +887,8 @@ impl SuiteRunner {
     }
 
     /// One task slot: claim a task, run it in `task-{slot}`, repeat until the
-    /// suite drains and stops holding the job open.
+    /// suite drains and stops holding the job open, or until the job is asked to
+    /// wind down.
     async fn run_slot(&self, suite_uuid: Uuid, job: i64, slot: usize) -> Result<()> {
         let dir = self.cache_path.join(format!("task-{slot}"));
         let mut holding = false;
@@ -870,10 +897,22 @@ impl SuiteRunner {
                 tracing::info!("Suite {suite_uuid} cancelled; stopping task slot {slot}");
                 return Ok(());
             }
+            // Checked before the claim, not just while waiting for work: a
+            // wind-down has to stop a slot that still has tasks to claim, which
+            // is the whole difference between it and letting the suite drain.
+            if self.drain_token.is_cancelled() {
+                tracing::info!(
+                    "Asked to wind down; slot {slot} of job {} claims no more tasks",
+                    self.job_id
+                );
+                return Ok(());
+            }
 
             let resp = self.fetch_tasks(suite_uuid, 1).await?;
             if resp.tasks.is_empty() {
-                if !resp.hold_job_open {
+                // `--run-once` stops after this suite, so waiting out the idle
+                // window on the chance of late work buys nothing.
+                if !resp.hold_job_open || self.run_once {
                     tracing::info!(
                         "Suite {suite_uuid} is idle and has no more tasks for slot {slot}"
                     );
@@ -890,7 +929,9 @@ impl SuiteRunner {
                 // and we are Executing, so the poll is what finds late work.
                 tokio::select! {
                     _ = self.job_token.cancelled() => return Ok(()),
-                    // Stops the wait, not the wind-down: cleanup still runs.
+                    // The check at the top of the loop would catch this too;
+                    // waking on it here is what keeps a wind-down from sitting
+                    // out the poll interval first.
                     _ = self.drain_token.cancelled() => {
                         tracing::info!(
                             "Asked to wind down; releasing slot {slot} of job {}",
@@ -911,7 +952,9 @@ impl SuiteRunner {
             }
 
             for task in resp.tasks {
-                if self.job_token.is_cancelled() {
+                // A wind-down abandons the rest of the batch: these are claimed
+                // but unstarted, and `complete` hands them back to `Ready`.
+                if self.job_token.is_cancelled() || self.drain_token.is_cancelled() {
                     return Ok(());
                 }
                 let uuid = task.uuid;

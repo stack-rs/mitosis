@@ -8,7 +8,6 @@
 use sea_orm::{prelude::*, QueryOrder, QuerySelect, Set};
 use uuid::Uuid;
 
-use crate::config::InfraPool;
 use crate::entity::{
     active_tasks as ActiveTasks,
     state::{SuiteJobState, TaskState},
@@ -213,12 +212,17 @@ pub async fn agent_has_in_flight_job<C: ConnectionTrait>(db: &C, agent_id: i64) 
 /// coordinator only with its `Commit`, which never arrived — and the state alone
 /// is not terminal, so a row left in it would never be archived by anything.
 /// Returns how many were reclaimed.
-pub async fn reclaim_agent_tasks(
-    pool: &InfraPool,
+///
+/// `suite_id` scopes the sweep: `None` takes back everything the agent holds,
+/// `Some(id)` only what it holds in that suite. Runs on any connection,
+/// including the caller's transaction.
+pub async fn reclaim_agent_tasks<C: ConnectionTrait>(
+    db: &C,
     agent_uuid: Uuid,
+    suite_id: Option<i64>,
     now: TimeDateTimeWithTimeZone,
 ) -> Result<usize> {
-    let reclaimed = ActiveTasks::Entity::update_many()
+    let mut query = ActiveTasks::Entity::update_many()
         .col_expr(ActiveTasks::Column::State, Expr::value(TaskState::Ready))
         .col_expr(ActiveTasks::Column::RunnerUuid, Expr::value(None::<Uuid>))
         .col_expr(ActiveTasks::Column::UpdatedAt, Expr::value(now))
@@ -227,9 +231,11 @@ pub async fn reclaim_agent_tasks(
             TaskState::Running,
             TaskState::Finished,
             TaskState::Cancelled,
-        ]))
-        .exec_with_returning(&pool.db)
-        .await?;
+        ]));
+    if let Some(suite_id) = suite_id {
+        query = query.filter(ActiveTasks::Column::TaskSuiteId.eq(suite_id));
+    }
+    let reclaimed = query.exec_with_returning(db).await?;
     if !reclaimed.is_empty() {
         tracing::info!(
             agent_uuid = %agent_uuid,

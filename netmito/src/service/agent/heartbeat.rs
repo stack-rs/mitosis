@@ -135,7 +135,8 @@ impl AgentHeartbeatQueue {
 
         match tokio::time::timeout(
             DB_TIMEOUT,
-            job::reclaim_agent_tasks(&self.pool, agent.uuid, now),
+            // The agent is gone: take back what it holds in every suite.
+            job::reclaim_agent_tasks(&self.pool.db, agent.uuid, None, now),
         )
         .await
         {

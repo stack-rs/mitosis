@@ -162,7 +162,7 @@ async fn complete_job(
     State(pool): State<InfraPool>,
     Json(req): Json<CompleteJobReq>,
 ) -> Result<Json<CompleteJobResp>, ApiError> {
-    let resp = service::agent::agent_complete_job(a.id, &pool, req)
+    let resp = service::agent::agent_complete_job(a.id, a.uuid, &pool, req)
         .await
         .map_err(map_service_error)?;
     Ok(Json(resp))

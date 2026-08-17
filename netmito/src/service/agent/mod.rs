@@ -40,9 +40,10 @@ use uuid::Uuid;
 
 use crate::config::InfraPool;
 use crate::entity::{
-    agents as Agent, group_agent as GroupAgent, groups as Group, machines as Machines,
+    active_tasks as ActiveTasks, agents as Agent, group_agent as GroupAgent, groups as Group,
+    machines as Machines,
     role::{GroupAgentRole, UserGroupRole},
-    state::{AgentState, SuiteJobState, TaskSuiteState},
+    state::{AgentState, SuiteJobState, TaskState, TaskSuiteState},
     suite_agent_jobs as SuiteAgentJobs, task_suites as TaskSuites, user_group as UserGroup,
     users as User,
 };
@@ -454,7 +455,8 @@ pub async fn user_shutdown_agent_by_uuid(
             heartbeat::mark_offline(pool, agent.id, now).await?;
             let killed =
                 job::terminate_agent_jobs(&pool.db, agent.id, SuiteJobState::Killed, now).await?;
-            job::reclaim_agent_tasks(pool, agent.uuid, now).await?;
+            // Forced off: take back what it holds in every suite.
+            job::reclaim_agent_tasks(&pool.db, agent.uuid, None, now).await?;
             let _ = pool
                 .agent_heartbeat_queue_tx
                 .send(AgentHeartbeatOp::Remove(agent.id));
@@ -765,10 +767,16 @@ async fn lock_runnable_suite<C: ConnectionTrait>(
         return Ok(None);
     };
     // Same predicate as `matching::suite_has_work`, which is what the picker
-    // filters on.
-    if !matches!(suite.state, TaskSuiteState::Open | TaskSuiteState::Closed)
-        || suite.incomplete_tasks == 0
-    {
+    // filters on: runnable state, plus a task this agent could claim right now.
+    if !matches!(suite.state, TaskSuiteState::Open | TaskSuiteState::Closed) {
+        return Ok(None);
+    }
+    let claimable = ActiveTasks::Entity::find()
+        .filter(ActiveTasks::Column::TaskSuiteId.eq(suite.id))
+        .filter(ActiveTasks::Column::State.eq(TaskState::Ready))
+        .count(txn)
+        .await?;
+    if claimable == 0 {
         return Ok(None);
     }
     if !matching::is_agent_eligible(txn, suite.id, agent_id).await? {
@@ -858,17 +866,25 @@ async fn advance_job(
 /// transaction: a half-applied pair would leave the agent pointing at a finished
 /// suite, which `agent_accept_suite` reads as "still busy" and which nothing
 /// short of a restart would clear.
+///
+/// The same transaction reclaims whatever this agent still holds uncommitted in
+/// the suite. A task it ran but never committed is in no state anything else
+/// would move it out of — not terminal, so nothing archives it, and not `Ready`,
+/// so nobody can claim it — and the job ending is the last moment we know it
+/// will never be committed. Those tasks go back to `Ready` for a re-run, and
+/// that run's results are dropped.
 pub async fn agent_complete_job(
     agent_id: i64,
+    agent_uuid: Uuid,
     pool: &InfraPool,
     req: CompleteJobReq,
 ) -> Result<CompleteJobResp> {
     let now = TimeDateTimeWithTimeZone::now_utc();
     let job_handle = req.job;
 
-    let (job_id, terminal, released) = pool
+    let (job_id, terminal, released, reclaimed) = pool
         .db
-        .transaction::<_, (i32, SuiteJobState, bool), Error>(|txn| {
+        .transaction::<_, (i32, SuiteJobState, bool, usize), Error>(|txn| {
             Box::pin(async move {
                 // Locked, so the terminal check and the write below cannot
                 // straddle a `Killed`/`Lost` written by teardown.
@@ -912,7 +928,12 @@ pub async fn agent_complete_job(
                     .rows_affected
                     > 0;
 
-                Ok((job_id, terminal, released))
+                // Scoped to this suite; what the agent holds elsewhere is left
+                // alone.
+                let reclaimed =
+                    job::reclaim_agent_tasks(txn, agent_uuid, Some(suite_id), now).await?;
+
+                Ok((job_id, terminal, released, reclaimed))
             })
         })
         .await?;
@@ -926,6 +947,15 @@ pub async fn agent_complete_job(
             agent_id,
             job_id,
             "Agent was no longer assigned to the completed job's suite; left its state alone"
+        );
+    }
+    if reclaimed > 0 {
+        tracing::warn!(
+            agent_id,
+            job_id,
+            reclaimed,
+            "Agent completed its job holding uncommitted tasks; they were returned to Ready \
+             and will be re-run, and that run's results are lost"
         );
     }
 

@@ -26,11 +26,11 @@ use sea_orm::{ConnectionTrait, FromQueryResult};
 use uuid::Uuid;
 
 use crate::entity::role::GroupAgentRole;
-use crate::entity::state::{AgentState, TaskSuiteState};
+use crate::entity::state::{AgentState, TaskState, TaskSuiteState};
 use crate::entity::task_suite_agent::SuiteAgentOverrideType;
 use crate::entity::{
-    agents as Agent, group_agent as GroupAgent, task_suite_agent as TaskSuiteAgent,
-    task_suites as TaskSuites,
+    active_tasks as ActiveTasks, agents as Agent, group_agent as GroupAgent,
+    task_suite_agent as TaskSuiteAgent, task_suites as TaskSuites,
 };
 
 fn suite_col(col: TaskSuites::Column) -> Expr {
@@ -97,13 +97,33 @@ pub fn eligibility_predicate() -> SimpleExpr {
         .and(excluded.not())
 }
 
-/// A suite is worth handing to an agent when it can still take work: not
-/// cancelled, and with at least one task left to finish. `Complete` suites are
-/// excluded — they have nothing to run until a new task reopens them.
+/// A suite is worth handing to an agent when it is not cancelled and holds a
+/// task the agent could claim right now. `Complete` suites are excluded — they
+/// have nothing to run until a new task reopens them.
+///
+/// A claimable — that is, `Ready` — task is what an agent can actually act on.
+/// `incomplete_tasks > 0` also counts tasks already claimed and running
+/// elsewhere, so a suite whose remaining work is all in flight would keep
+/// drawing agents that accept it, find nothing to run, and complete straight
+/// away.
 pub fn suite_has_work() -> SimpleExpr {
+    let has_claimable_task = Expr::exists(
+        Query::select()
+            .expr(Expr::val(1))
+            .from(ActiveTasks::Entity)
+            .and_where(
+                Expr::col((ActiveTasks::Entity, ActiveTasks::Column::TaskSuiteId))
+                    .equals((TaskSuites::Entity, TaskSuites::Column::Id)),
+            )
+            .and_where(
+                Expr::col((ActiveTasks::Entity, ActiveTasks::Column::State)).eq(TaskState::Ready),
+            )
+            .to_owned(),
+    );
+
     suite_col(TaskSuites::Column::State)
         .is_in([TaskSuiteState::Open, TaskSuiteState::Closed])
-        .and(suite_col(TaskSuites::Column::IncompleteTasks).gt(0))
+        .and(has_claimable_task)
 }
 
 /// Base `SELECT … FROM task_suites, agents WHERE <eligible>` that callers extend

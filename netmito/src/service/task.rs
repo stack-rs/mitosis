@@ -1,9 +1,9 @@
 use sea_orm::sea_query::{
     extension::postgres::PgExpr, Alias, CommonTableExpression, DeleteStatement, ExprTrait,
-    InsertStatement, PgFunc, Query,
+    InsertStatement, LockType, PgFunc, Query,
 };
 use sea_orm::ActiveValue::NotSet;
-use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, Set, TransactionTrait};
+use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, QuerySelect, Set, TransactionTrait};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
@@ -150,6 +150,12 @@ async fn internal_submit_task(
                                     Expr::col((UserGroup::Entity, UserGroup::Column::UserId))
                                         .eq(creator_id),
                                 )
+                                // The counters below are bumped from this row's
+                                // values, and the `can_accept_tasks` check reads
+                                // its state, so the row must not move under us.
+                                // `OF task_suites` keeps the joined `user_group`
+                                // row out of the lock.
+                                .lock_with_tables(LockType::Update, [TaskSuites::Entity])
                                 .to_owned();
                             let suite =
                                 TaskSuites::Model::find_by_statement(builder.build(&suite_stmt))
@@ -172,6 +178,8 @@ async fn internal_submit_task(
                             TaskSuites::Entity::find()
                                 .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
                                 .filter(TaskSuites::Column::GroupId.eq(parent_group_id))
+                                // Same reason as the user path above.
+                                .lock_exclusive()
                                 .one(txn)
                                 .await?
                                 .ok_or_else(|| {
@@ -298,6 +306,11 @@ async fn internal_submit_task(
                         }
                     };
 
+                    // Safe as a read-modify-write only because the row was read
+                    // `FOR UPDATE` above: concurrent submits to the same suite
+                    // serialize on that lock, so neither can overwrite the
+                    // other's increment and undercount the suite into an early
+                    // `Complete`.
                     let suite = match suite {
                         None => None,
                         Some(suite) => {

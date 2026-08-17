@@ -233,6 +233,7 @@ pub async fn agent_report_task(
             };
 
             let inner_task_id = task.id;
+            let suite_id = task.task_suite_id;
             pool.db
                 .transaction::<_, (), Error>(|txn| {
                     Box::pin(async move {
@@ -240,15 +241,16 @@ pub async fn agent_report_task(
                         ActiveTasks::Entity::delete_by_id(inner_task_id)
                             .exec(txn)
                             .await?;
+                        if let Some(suite_id) = suite_id {
+                            crate::service::suite::decrement_incomplete_tasks(
+                                txn, suite_id, 1, now,
+                            )
+                            .await?;
+                        }
                         Ok(())
                     })
                 })
                 .await?;
-
-            if let Some(suite_id) = task.task_suite_id {
-                crate::service::suite::decrement_incomplete_tasks(&pool.db, suite_id, 1, now)
-                    .await?;
-            }
 
             // Task chaining: a child registered by an earlier Submit goes
             // Pending → Ready now that its parent has committed.

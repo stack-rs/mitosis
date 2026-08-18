@@ -725,6 +725,18 @@ struct SuiteRunner {
     drain_token: CancellationToken,
 }
 
+/// What every task slot of one job shares.
+#[derive(Clone, Default)]
+struct SlotState {
+    /// Tasks the slots have run between them.
+    ran: Arc<AtomicUsize>,
+    /// Slots currently running a task.
+    busy: Arc<AtomicUsize>,
+    /// The suite has no more work for this job, ever. Cancelled by whichever
+    /// slot establishes that, so the job winds down as a whole.
+    drained: CancellationToken,
+}
+
 impl SuiteRunner {
     fn api_url(&self, path: &str) -> Url {
         let mut url = self.coordinator_addr.clone();
@@ -866,12 +878,12 @@ impl SuiteRunner {
     /// shared cell so a slot that fails still contributes what it did run.
     async fn execute_tasks(&self, suite_uuid: Uuid, job: i64, slots: usize) -> (usize, Result<()>) {
         tracing::info!("Running the tasks of suite {suite_uuid} across {slots} slot(s)");
-        let ran = Arc::new(AtomicUsize::new(0));
+        let state = SlotState::default();
         let mut running = tokio::task::JoinSet::new();
         for slot in 0..slots {
             let runner = self.clone();
-            let ran = ran.clone();
-            running.spawn(async move { runner.run_slot(suite_uuid, job, slot, &ran).await });
+            let state = state.clone();
+            running.spawn(async move { runner.run_slot(suite_uuid, job, slot, &state).await });
         }
 
         // Every slot is joined before the job moves on, so one that fails never
@@ -894,18 +906,17 @@ impl SuiteRunner {
             Some(e) => Err(e),
             None => Ok(()),
         };
-        (ran.load(Ordering::Relaxed), result)
+        (state.ran.load(Ordering::Relaxed), result)
     }
 
     /// One task slot: claim a task, run it in `task-{slot}`, repeat until the
-    /// suite drains and stops holding the job open. Every task it runs is
-    /// counted into `ran`.
+    /// job drains. Every task it runs is counted into `state.ran`.
     async fn run_slot(
         &self,
         suite_uuid: Uuid,
         job: i64,
         slot: usize,
-        ran: &AtomicUsize,
+        state: &SlotState,
     ) -> Result<()> {
         let dir = self.cache_path.join(format!("task-{slot}"));
         let mut holding = false;
@@ -914,18 +925,30 @@ impl SuiteRunner {
                 tracing::info!("Suite {suite_uuid} cancelled; stopping task slot {slot}");
                 return Ok(());
             }
+            // Claiming after the job has been declared drained would strand the
+            // task: nothing is left to walk it to a terminal state.
+            if state.drained.is_cancelled() {
+                return Ok(());
+            }
 
             let resp = self.fetch_tasks(suite_uuid, 1).await?;
             if resp.tasks.is_empty() {
-                if !resp.hold_job_open {
+                // A closed suite with nothing left ends the job — but only once
+                // no sibling slot is still running a task, since a running task
+                // can put more work in the suite by spawning a child, and a slot
+                // that returned here would never come back for it. Whoever
+                // establishes that ends every slot, so the job's parallelism is
+                // never whittled down one slot at a time.
+                if !resp.hold_job_open && state.busy.load(Ordering::SeqCst) == 0 {
                     tracing::info!(
                         "Suite {suite_uuid} is idle and has no more tasks for slot {slot}"
                     );
+                    state.drained.cancel();
                     return Ok(());
                 }
                 if !holding {
                     tracing::info!(
-                        "Suite {suite_uuid} is drained but still open; slot {slot} holds job {} open for more work",
+                        "Suite {suite_uuid} has nothing for slot {slot} right now; it holds job {} open for more work",
                         self.job_id
                     );
                     holding = true;
@@ -934,6 +957,7 @@ impl SuiteRunner {
                 // and we are Executing, so the poll is what finds late work.
                 tokio::select! {
                     _ = self.job_token.cancelled() => return Ok(()),
+                    _ = state.drained.cancelled() => return Ok(()),
                     // Stops the wait, not the wind-down: cleanup still runs.
                     _ = self.drain_token.cancelled() => {
                         tracing::info!(
@@ -959,12 +983,14 @@ impl SuiteRunner {
                     return Ok(());
                 }
                 let uuid = task.uuid;
-                ran.fetch_add(1, Ordering::Relaxed);
+                state.ran.fetch_add(1, Ordering::Relaxed);
+                state.busy.fetch_add(1, Ordering::SeqCst);
                 if let Err(e) = self.run_task(job, task, &dir).await {
                     // One task must not take the job down: the coordinator
                     // reclaims anything left uncommitted.
                     tracing::error!("Failed to run task {uuid}: {e}");
                 }
+                state.busy.fetch_sub(1, Ordering::SeqCst);
             }
         }
     }

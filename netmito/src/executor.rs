@@ -11,8 +11,12 @@
 //! | `AgentTaskClient` | `agent.rs` | `POST /agents/tasks/report` |
 //! | `AgentHookClient` | `agent.rs` | `POST /agents/job/hook` |
 
+#[cfg(unix)]
+use std::fs::Permissions;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
 use async_compression::tokio::write::GzipEncoder;
@@ -172,13 +176,152 @@ impl Executor {
     }
 }
 
+/// The mode a directory the unit's process writes into gets: read/write/execute
+/// for everybody, plus the sticky bit so one user cannot remove another's files.
+///
+/// A task is free to switch user part-way through (`sudo`, a runtime that drops
+/// privileges, a nested container), but the workspace is created by whoever runs
+/// the agent or worker. Under the usual umask that leaves the task's second
+/// identity unable to write its own results, so the directories are opened up
+/// explicitly rather than left to the umask.
+#[cfg(unix)]
+const SHARED_DIR_MODE: u32 = 0o1777;
+
+/// The mode an ancestor of the workspace gets: owned and written by us, but
+/// traversable by everyone, so a task running as another user can reach the
+/// directories below without being handed the tree itself.
+#[cfg(unix)]
+const TRAVERSABLE_DIR_MODE: u32 = 0o755;
+
+/// The mode a fetched input gets. Executable as well as writable: an input is
+/// very often the binary the task then runs, and the user it runs as may not be
+/// the one that fetched it. No sticky bit — it means nothing on a file.
+#[cfg(unix)]
+const SHARED_FILE_MODE: u32 = 0o777;
+
+/// Create `path` and any missing parents, then let any user read and write it.
+///
+/// Only `path` itself is opened up — parents created along the way keep the
+/// process umask — so a caller wanting a whole subtree reachable builds it
+/// top-down, one call per level (see [`ensure_traversable_dir`] for the levels
+/// that only need to be walked through).
+pub async fn create_shared_dir(path: &Path) -> crate::error::Result<()> {
+    tokio::fs::create_dir_all(path).await?;
+    set_mode(path, SHARED_DIR_MODE).await;
+    Ok(())
+}
+
+/// Create `path` and any missing parents, then make sure every user can at
+/// least traverse it. For the bookkeeping directories above a workspace: a
+/// `0700` link anywhere in the chain blocks the task's other identity just as
+/// effectively as an unwritable `result/`.
+pub async fn ensure_traversable_dir(path: &Path) -> crate::error::Result<()> {
+    tokio::fs::create_dir_all(path).await?;
+    set_mode(path, TRAVERSABLE_DIR_MODE).await;
+    Ok(())
+}
+
+/// Apply `mode` to an existing path. A failure is logged rather than
+/// propagated: the usual cause is a directory this process does not own, and
+/// the run is still perfectly viable — only a task that switches user notices.
+///
+/// `Permissions` comes from `std` because that is the type
+/// `tokio::fs::set_permissions` takes — tokio wraps the syscall, not the
+/// permission bits — but the call itself goes through tokio's blocking pool.
+#[cfg(unix)]
+async fn set_mode(path: &Path, mode: u32) {
+    if let Err(e) = tokio::fs::set_permissions(path, Permissions::from_mode(mode)).await {
+        tracing::warn!(
+            "Failed to set mode {mode:o} on {}: {e}. A task that switches user may not be able to use it",
+            path.display()
+        );
+    }
+}
+
+#[cfg(not(unix))]
+async fn set_mode(_path: &Path, _mode: u32) {}
+
+/// Warn about any ancestor of `path` that a task running as another user could
+/// not walk through. Nothing here is fixable by us — `$HOME` at `0700` is the
+/// common case, and widening it is the operator's call — so this only reports.
+#[cfg(unix)]
+pub async fn warn_unreachable_ancestors(path: &Path) {
+    // Collected first: `ancestors()` borrows `path`, and holding that borrow
+    // across the awaits below would make the future non-`Send`.
+    let ancestors: Vec<PathBuf> = path.ancestors().skip(1).map(PathBuf::from).collect();
+    for ancestor in ancestors {
+        let Ok(meta) = tokio::fs::metadata(&ancestor).await else {
+            continue;
+        };
+        let mode = meta.permissions().mode();
+        if mode & 0o001 == 0 {
+            tracing::warn!(
+                "{} is mode {:o}: a task that switches user cannot reach the working directory \
+                 below it. Grant it at least o+x if such tasks are expected",
+                ancestor.display(),
+                mode & 0o7777
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub async fn warn_unreachable_ancestors(_path: &Path) {}
+
+/// Open a freshly fetched input up to every user, so a task that switched
+/// identity can still read, overwrite, or exec it. `download_file` writes it
+/// under the agent's umask, and it is shared with the client CLI — where a
+/// user's own downloads should stay private — so the widening happens here.
+///
+/// A `local_path` may name a nested file (`bin/tool`), and the directories
+/// `download_file` created for it are subject to the same umask, so they are
+/// widened too. Anything that is not a plain relative path is left alone
+/// beyond the file itself: `..` or an absolute path would walk the chmod out
+/// of `resource/` and into the tree above it.
+#[cfg(unix)]
+async fn share_fetched_resource(resource_root: &Path, file: &Path) {
+    set_mode(file, SHARED_FILE_MODE).await;
+
+    let Ok(nested) = file.strip_prefix(resource_root) else {
+        return;
+    };
+    if !nested
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        tracing::warn!(
+            "Not widening the directories of {}: it escapes the resource directory",
+            file.display()
+        );
+        return;
+    }
+    // Upwards from the file, stopping at `resource/` itself — that one is
+    // already shared by `reset_workspace`.
+    let dirs: Vec<PathBuf> = file
+        .ancestors()
+        .skip(1)
+        .take_while(|dir| *dir != resource_root)
+        .map(PathBuf::from)
+        .collect();
+    for dir in dirs {
+        set_mode(&dir, SHARED_DIR_MODE).await;
+    }
+}
+
+#[cfg(not(unix))]
+async fn share_fetched_resource(_resource_root: &Path, _file: &Path) {}
+
 /// Create (or recreate, discarding whatever the last unit left) the working
-/// directories a unit's process expects.
-pub async fn reset_workspace(cache_path: &std::path::Path) -> crate::error::Result<()> {
+/// directories a unit's process expects. All of them are world-writable: the
+/// process may hand them to a different user than the one that made them.
+pub async fn reset_workspace(cache_path: &Path) -> crate::error::Result<()> {
     let _ = tokio::fs::remove_dir_all(cache_path).await;
-    tokio::fs::create_dir_all(cache_path.join("result")).await?;
-    tokio::fs::create_dir_all(cache_path.join("exec")).await?;
-    tokio::fs::create_dir_all(cache_path.join("resource")).await?;
+    // The unit's own directory first: `new_task.json` is written by the process
+    // itself, so the slot is as much part of its writable set as `result/`.
+    create_shared_dir(cache_path).await?;
+    create_shared_dir(&cache_path.join("result")).await?;
+    create_shared_dir(&cache_path.join("exec")).await?;
+    create_shared_dir(&cache_path.join("resource")).await?;
     Ok(())
 }
 
@@ -284,17 +427,16 @@ async fn download_resource(
             .json::<RemoteResourceDownloadResp>()
             .await
             .map_err(|e| ResourceError::Other(RequestError::from(e).into()))?;
-        let local_path = executor
-            .cache_path
-            .join("resource")
-            .join(resource.local_path);
+        let resource_root = executor.cache_path.join("resource");
+        let local_path = resource_root.join(resource.local_path);
         tokio::select! {
             biased;
-            res = download_file(&executor.http_client, &download_resp, local_path, false) => {
+            res = download_file(&executor.http_client, &download_resp, &local_path, false) => {
                 if let Err(e) = res {
                     tracing::error!("Failed to download resource: {}", e);
                     return Err(ResourceError::DownloadFailed);
                 }
+                share_fetched_resource(&resource_root, &local_path).await;
                 Ok(())
             }
             _ = executor.cancel_token.cancelled() => Err(ResourceError::Cancelled),
@@ -936,5 +1078,125 @@ async fn submit_child_task_if_present(executor: &mut Executor) -> bool {
             tracing::warn!("Failed to submit new task: {}", e);
             false
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    async fn mode_of(path: &Path) -> u32 {
+        tokio::fs::metadata(path)
+            .await
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    }
+
+    /// The workspace must be world-writable whatever umask the agent or worker
+    /// was started under — that umask is the whole reason a task switching user
+    /// mid-run could not write its own results. The sticky bit is what makes
+    /// this umask-independent: `create_dir_all` can never produce `1777`, so
+    /// seeing it proves the explicit chmod ran.
+    #[tokio::test]
+    async fn reset_workspace_opens_the_tree_to_every_user() {
+        let root = std::env::temp_dir().join(format!("mito-perm-test-{}", Uuid::new_v4()));
+        let workspace = root.join("job").join("task-0");
+        reset_workspace(&workspace)
+            .await
+            .expect("workspace created");
+
+        for dir in ["", "result", "exec", "resource"] {
+            let path = workspace.join(dir);
+            assert_eq!(
+                mode_of(&path).await,
+                SHARED_DIR_MODE,
+                "unexpected mode on {}",
+                path.display()
+            );
+        }
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    /// Both helpers widen a directory that already exists too restrictively —
+    /// an agent that ran before this change leaves a `0700` tree behind.
+    #[tokio::test]
+    async fn existing_directories_are_widened() {
+        let root = std::env::temp_dir().join(format!("mito-perm-test-{}", Uuid::new_v4()));
+        let shared = root.join("share");
+        let ancestor = root.join("agent");
+        for path in [&shared, &ancestor] {
+            tokio::fs::create_dir_all(path).await.unwrap();
+            tokio::fs::set_permissions(path, Permissions::from_mode(0o700))
+                .await
+                .unwrap();
+        }
+
+        create_shared_dir(&shared).await.expect("shared dir");
+        ensure_traversable_dir(&ancestor).await.expect("ancestor");
+
+        assert_eq!(mode_of(&shared).await, SHARED_DIR_MODE);
+        assert_eq!(mode_of(&ancestor).await, TRAVERSABLE_DIR_MODE);
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    /// Stands in for what `download_file` leaves behind: the file, and any
+    /// directories it had to create for a nested `local_path`, both under the
+    /// process umask.
+    async fn fake_download(path: &Path) {
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(path, b"payload").await.unwrap();
+        for p in [path.parent().unwrap(), path] {
+            tokio::fs::set_permissions(p, Permissions::from_mode(0o700))
+                .await
+                .unwrap();
+        }
+    }
+
+    /// A fetched input is very often the binary the task execs, so it needs the
+    /// execute bit as well — and the directories a nested `local_path` created
+    /// are under the same umask as the file.
+    #[tokio::test]
+    async fn fetched_resources_are_readable_writable_and_executable() {
+        let root = std::env::temp_dir().join(format!("mito-perm-test-{}", Uuid::new_v4()));
+        let resource_root = root.join("resource");
+        let flat = resource_root.join("input.dat");
+        let nested = resource_root.join("bin").join("tool");
+        fake_download(&flat).await;
+        fake_download(&nested).await;
+
+        share_fetched_resource(&resource_root, &flat).await;
+        share_fetched_resource(&resource_root, &nested).await;
+
+        assert_eq!(mode_of(&flat).await, SHARED_FILE_MODE);
+        assert_eq!(mode_of(&nested).await, SHARED_FILE_MODE);
+        // The directory `bin/tool` needed, but not `resource/` itself, which
+        // `reset_workspace` already owns.
+        assert_eq!(mode_of(&resource_root.join("bin")).await, SHARED_DIR_MODE);
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    /// A `local_path` that climbs out of `resource/` must not drag the chmod up
+    /// the tree with it: the file is widened, its ancestors are not.
+    #[tokio::test]
+    async fn escaping_resource_paths_do_not_widen_the_tree_above() {
+        let root = std::env::temp_dir().join(format!("mito-perm-test-{}", Uuid::new_v4()));
+        let resource_root = root.join("resource");
+        tokio::fs::create_dir_all(&resource_root).await.unwrap();
+        let escaped = root.join("escaped.dat");
+        fake_download(&escaped).await;
+        tokio::fs::set_permissions(&root, Permissions::from_mode(0o700))
+            .await
+            .unwrap();
+
+        share_fetched_resource(&resource_root, &escaped).await;
+
+        assert_eq!(mode_of(&escaped).await, SHARED_FILE_MODE);
+        assert_eq!(mode_of(&root).await, 0o700, "the parent must be untouched");
+        let _ = tokio::fs::set_permissions(&root, Permissions::from_mode(0o755)).await;
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 }

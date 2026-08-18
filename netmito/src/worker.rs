@@ -429,13 +429,15 @@ impl MitoWorker {
             let resp: RegisterWorkerResp = resp.json().await.map_err(RequestError::from)?;
             let mut cache_path =
                 dirs::cache_dir().ok_or(Error::Custom("Cache dir not found".to_string()))?;
+            crate::executor::warn_unreachable_ancestors(&cache_path).await;
             cache_path.push("mitosis");
+            crate::executor::ensure_traversable_dir(&cache_path).await?;
             let log_dir = cache_path.join("worker");
             cache_path.push(resp.worker_id.to_string());
-            tokio::fs::create_dir_all(&cache_path).await?;
-            tokio::fs::create_dir_all(&cache_path.join("result")).await?;
-            tokio::fs::create_dir_all(&cache_path.join("exec")).await?;
-            tokio::fs::create_dir_all(&cache_path.join("resource")).await?;
+            // Same tree `reset_workspace` rebuilds between tasks, and made the
+            // same way: the first task must not be the one that runs against a
+            // umask-restricted workspace.
+            crate::executor::reset_workspace(&cache_path).await?;
             tokio::fs::create_dir_all(&log_dir).await?;
             let guards = config.setup_tracing_subscriber::<&uuid::Uuid, _>(&resp.worker_id)?;
             let redis_client = if config.skip_redis {

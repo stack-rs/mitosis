@@ -32,7 +32,10 @@ use crate::entity::content::ArtifactContentType;
 use crate::entity::hook_tasks::HookType;
 use crate::entity::state::{AgentState, TaskExecState};
 use crate::error::{self, Result};
-use crate::executor::{execute, reset_workspace, ExecClient, Executor, UploadTarget};
+use crate::executor::{
+    create_shared_dir, ensure_traversable_dir, execute, reset_workspace,
+    warn_unreachable_ancestors, ExecClient, Executor, UploadTarget,
+};
 use crate::schema::*;
 use crate::service::auth::{
     cred::get_user_credential, credential_guard::CredentialGuard, get_and_prompt_username,
@@ -218,10 +221,17 @@ impl MitoAgent {
 
         let mut cache_path =
             dirs::cache_dir().ok_or(error::Error::Custom("Cache dir not found".to_string()))?;
+        // Built one level at a time so each is made traversable as it appears:
+        // `create_dir_all` would apply the umask to the levels it creates, and a
+        // single `0700` link is enough to hide the workspace from a task that
+        // switched user.
+        warn_unreachable_ancestors(&cache_path).await;
         cache_path.push("mitosis");
+        ensure_traversable_dir(&cache_path).await?;
         cache_path.push("agent");
+        ensure_traversable_dir(&cache_path).await?;
         cache_path.push(register.agent_uuid.to_string());
-        tokio::fs::create_dir_all(&cache_path).await?;
+        ensure_traversable_dir(&cache_path).await?;
         tracing::info!("Working directory: {}", cache_path.display());
 
         let mut client = AgentClient {
@@ -841,10 +851,13 @@ impl SuiteRunner {
         self.cache_path.join("share")
     }
 
-    /// Create a job's file tree
+    /// Create a job's file tree. The job root only has to be walked through;
+    /// `share/` is handed to the tasks and hooks as `MITO_SUITE_SHARED`, so it
+    /// is opened up to whatever user they end up running as.
     async fn prepare_workspace(&self) -> Result<()> {
         let _ = tokio::fs::remove_dir_all(&self.cache_path).await;
-        tokio::fs::create_dir_all(self.shared_path()).await?;
+        ensure_traversable_dir(&self.cache_path).await?;
+        create_shared_dir(&self.shared_path()).await?;
         Ok(())
     }
 

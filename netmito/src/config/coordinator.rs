@@ -455,13 +455,18 @@ impl CoordinatorConfig {
                 .unwrap_or_else(|_| "netmito=info".into());
             let coordinator_guard = tracing_subscriber::registry()
                 .with(
-                    tracing_subscriber::fmt::layer().with_filter(
-                        tracing_subscriber::EnvFilter::try_from_default_env()
-                            .unwrap_or_else(|_| "netmito=info".into()),
-                    ),
+                    tracing_subscriber::fmt::layer()
+                        .with_file(true)
+                        .with_line_number(true)
+                        .with_filter(
+                            tracing_subscriber::EnvFilter::try_from_default_env()
+                                .unwrap_or_else(|_| "netmito=info".into()),
+                        ),
                 )
                 .with(
                     tracing_subscriber::fmt::layer()
+                        .with_file(true)
+                        .with_line_number(true)
                         .with_writer(non_blocking)
                         .with_filter(env_filter),
                 )
@@ -473,10 +478,13 @@ impl CoordinatorConfig {
         } else {
             let coordinator_guard = tracing_subscriber::registry()
                 .with(
-                    tracing_subscriber::fmt::layer().with_filter(
-                        tracing_subscriber::EnvFilter::try_from_default_env()
-                            .unwrap_or_else(|_| "netmito=info".into()),
-                    ),
+                    tracing_subscriber::fmt::layer()
+                        .with_file(true)
+                        .with_line_number(true)
+                        .with_filter(
+                            tracing_subscriber::EnvFilter::try_from_default_env()
+                                .unwrap_or_else(|_| "netmito=info".into()),
+                        ),
                 )
                 .set_default();
             Ok(TracingGuard {

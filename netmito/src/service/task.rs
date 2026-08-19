@@ -705,14 +705,20 @@ pub async fn user_change_task_labels(
     Ok(())
 }
 
+#[derive(FromQueryResult)]
+struct UserGroupRoleWithName {
+    role: UserGroupRole,
+    username: String,
+}
+
 pub async fn user_cancel_task(
     pool: &InfraPool,
     user_id: i64,
     uuid: Uuid,
 ) -> crate::error::Result<()> {
-    let task_id = pool
+    let (task_id, username) = pool
         .db
-        .transaction::<_, i64, crate::error::Error>(|txn| {
+        .transaction::<_, (i64, String), crate::error::Error>(|txn| {
             Box::pin(async move {
                 let task = ActiveTasks::Entity::find()
                     .filter(ActiveTasks::Column::Uuid.eq(uuid))
@@ -722,14 +728,32 @@ pub async fn user_cancel_task(
                     .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
                         "Task with uuid {uuid}"
                     ))))?;
-                let user_group_role = UserGroup::Entity::find()
-                    .filter(UserGroup::Column::UserId.eq(user_id))
-                    .filter(UserGroup::Column::GroupId.eq(task.group_id))
-                    .one(txn)
-                    .await?
-                    .ok_or(Error::ApiError(crate::error::ApiError::InvalidRequest(
-                        "User is not in the group".to_string(),
-                    )))?;
+                let builder = txn.get_database_backend();
+                let role_stmt = Query::select()
+                    .column((UserGroup::Entity, UserGroup::Column::Role))
+                    .column((User::Entity, User::Column::Username))
+                    .from(UserGroup::Entity)
+                    .join(
+                        sea_orm::JoinType::Join,
+                        User::Entity,
+                        Expr::col((User::Entity, User::Column::Id))
+                            .eq(Expr::col((UserGroup::Entity, UserGroup::Column::UserId))),
+                    )
+                    .and_where(
+                        Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id),
+                    )
+                    .and_where(
+                        Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))
+                            .eq(task.group_id),
+                    )
+                    .to_owned();
+                let user_group_role =
+                    UserGroupRoleWithName::find_by_statement(builder.build(&role_stmt))
+                        .one(txn)
+                        .await?
+                        .ok_or(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                            "User is not in the group".to_string(),
+                        )))?;
                 match user_group_role.role {
                     UserGroupRole::Admin | UserGroupRole::Write => {}
                     _ => {
@@ -771,10 +795,11 @@ pub async fn user_cancel_task(
                     crate::service::suite::decrement_incomplete_tasks(txn, suite_id, 1, now)
                         .await?;
                 }
-                Ok(task.id)
+                Ok((task.id, user_group_role.username))
             })
         })
         .await?;
+    tracing::info!("User {} cancelled task {}", username, uuid);
     let _ = remove_task(task_id, pool)
         .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
     Ok(())
@@ -916,17 +941,14 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
     Ok(TaskQueryResp { info, artifacts })
 }
 
-#[derive(FromQueryResult)]
-struct UserGroupRoleQueryRes {
-    role: UserGroupRole,
-}
-
+/// Returns the name of `user_id`, read from the same row as the role check so
+/// callers that want to log it pay no extra query.
 pub(crate) async fn check_task_list_query(
     user_id: i64,
     pool: &InfraPool,
     query: &mut TasksQueryReq,
     role: UserGroupRole,
-) -> crate::error::Result<()> {
+) -> crate::error::Result<String> {
     if let Some(ref tags) = query.tags {
         if tags.is_empty() {
             return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
@@ -955,49 +977,52 @@ pub(crate) async fn check_task_list_query(
             )));
         }
     }
-    if query.group_name.is_none() {
-        let username = User::Entity::find()
-            .filter(User::Column::Id.eq(user_id))
-            .one(&pool.db)
-            .await?
-            .ok_or(Error::ApiError(crate::error::ApiError::NotFound(
-                "User".to_string(),
-            )))?
-            .username;
-        tracing::debug!("No group name specified, use username {} instead", username);
-        query.group_name = Some(username);
-    }
-    if let Some(ref group_name) = query.group_name {
-        let builder = pool.db.get_database_backend();
-        let role_stmt = Query::select()
-            .column((UserGroup::Entity, UserGroup::Column::Role))
-            .from(UserGroup::Entity)
-            .join(
-                sea_orm::JoinType::Join,
-                Group::Entity,
-                Expr::col((Group::Entity, Group::Column::Id))
-                    .eq(Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))),
-            )
-            .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
-            .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()))
-            .to_owned();
-        let query_role = UserGroupRoleQueryRes::find_by_statement(builder.build(&role_stmt))
-            .one(&pool.db)
-            .await?
-            .map(|r| r.role);
-        match query_role {
-            Some(r) if r >= role => {}
-            Some(_) => {
-                return Err(Error::AuthError(crate::error::AuthError::PermissionDenied));
-            }
-            None => {
-                return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
-                    format!("Group with name {group_name} not found or user is not in the group"),
-                )));
-            }
+    let group_name = match query.group_name {
+        Some(ref group_name) => group_name.clone(),
+        None => {
+            let username = User::Entity::find()
+                .filter(User::Column::Id.eq(user_id))
+                .one(&pool.db)
+                .await?
+                .ok_or(Error::ApiError(crate::error::ApiError::NotFound(
+                    "User".to_string(),
+                )))?
+                .username;
+            tracing::debug!("No group name specified, use username {} instead", username);
+            query.group_name = Some(username.clone());
+            username
         }
+    };
+    let builder = pool.db.get_database_backend();
+    let role_stmt = Query::select()
+        .column((UserGroup::Entity, UserGroup::Column::Role))
+        .column((User::Entity, User::Column::Username))
+        .from(UserGroup::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            Group::Entity,
+            Expr::col((Group::Entity, Group::Column::Id))
+                .eq(Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))),
+        )
+        .join(
+            sea_orm::JoinType::Join,
+            User::Entity,
+            Expr::col((User::Entity, User::Column::Id))
+                .eq(Expr::col((UserGroup::Entity, UserGroup::Column::UserId))),
+        )
+        .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+        .and_where(Expr::col((Group::Entity, Group::Column::GroupName)).eq(group_name.clone()))
+        .to_owned();
+    let query_role = UserGroupRoleWithName::find_by_statement(builder.build(&role_stmt))
+        .one(&pool.db)
+        .await?;
+    match query_role {
+        Some(r) if r.role >= role => Ok(r.username),
+        Some(_) => Err(Error::AuthError(crate::error::AuthError::PermissionDenied)),
+        None => Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+            format!("Group with name {group_name} not found or user is not in the group"),
+        ))),
     }
-    Ok(())
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -1408,16 +1433,16 @@ pub async fn cancel_tasks_by_filter(
 ) -> crate::error::Result<TasksCancelByFilterResp> {
     // Convert request to TasksQueryReq for validation and filtering
     let mut query = TasksQueryReq {
-        creator_usernames: req.creator_usernames,
-        group_name: req.group_name,
-        tags: req.tags,
-        labels: req.labels,
+        creator_usernames: req.creator_usernames.clone(),
+        group_name: req.group_name.clone(),
+        tags: req.tags.clone(),
+        labels: req.labels.clone(),
         runner_uuid: None,
         // Filter for Ready and Pending tasks (cancellable states)
         states: {
             let mut states = HashSet::new();
             // If user specified states, intersect with Ready and Pending
-            if let Some(user_states) = req.states {
+            if let Some(ref user_states) = req.states {
                 if user_states.contains(&TaskState::Ready) {
                     states.insert(TaskState::Ready);
                 }
@@ -1432,15 +1457,15 @@ pub async fn cancel_tasks_by_filter(
             }
             Some(states)
         },
-        exit_status: req.exit_status,
-        priority: req.priority,
+        exit_status: req.exit_status.clone(),
+        priority: req.priority.clone(),
         limit: None,
         offset: None,
         count: false,
     };
 
     // Validate query and fill in defaults (also checks Write permission)
-    check_task_list_query(user_id, pool, &mut query, UserGroupRole::Write).await?;
+    let username = check_task_list_query(user_id, pool, &mut query, UserGroupRole::Write).await?;
     let group_name = query.group_name.clone().unwrap_or_default();
 
     // Build task ID subquery with the same filters (avoids parameter limits)
@@ -1575,6 +1600,8 @@ pub async fn cancel_tasks_by_filter(
             .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
     }
 
+    tracing::info!("User {} cancelled tasks by filter {:?}", username, req);
+
     Ok(TasksCancelByFilterResp {
         cancelled_count: task_ids.len() as u64,
         group_name,
@@ -1599,6 +1626,17 @@ pub async fn cancel_tasks_by_uuids(
             "UUIDs list cannot be empty".to_string(),
         )));
     }
+
+    // Permission is checked per task inside the delete below, so this lookup is
+    // only for the log line.
+    let username = User::Entity::find()
+        .filter(User::Column::Id.eq(user_id))
+        .one(&pool.db)
+        .await?
+        .ok_or(Error::ApiError(crate::error::ApiError::NotFound(
+            "User".to_string(),
+        )))?
+        .username;
 
     // Chunk UUIDs to avoid hitting the parameter limit
     let uuid_chunks: Vec<Vec<Uuid>> = req.uuids.chunks(1024).map(|chunk| chunk.to_vec()).collect();
@@ -1760,6 +1798,8 @@ pub async fn cancel_tasks_by_uuids(
         let _ = remove_task(*task_id, pool)
             .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
     }
+
+    tracing::info!("User {} cancelled tasks by uuids {:?}", username, req);
 
     // Determine which UUIDs failed (not found or no permission)
     let failed_uuids: Vec<Uuid> = req

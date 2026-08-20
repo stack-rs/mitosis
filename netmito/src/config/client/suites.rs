@@ -62,7 +62,7 @@ pub struct CreateSuiteArgs {
     /// Number of workers each agent spawns for this suite
     #[arg(short, long, default_value_t = 1)]
     pub workers: u32,
-    /// Number of tasks each worker prefetches locally
+    /// Number of tasks the agent prefetches locally
     #[arg(long, default_value_t = 16)]
     pub prefetch: u32,
     /// Provision hook, as a JSON exec spec: '{"args":["sh","-c","./setup.sh"],"terminal_output":true}'.

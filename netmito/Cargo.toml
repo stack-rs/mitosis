@@ -24,7 +24,7 @@ axum-extra = { version = "0.12", features = ["typed-header", "query"] }
 base64 = "0.22.1"
 clap = { workspace = true }
 clap-repl = "0.3.2"
-crossfire = { version = "2.1.6", features = ["tokio"], optional = true }
+crossfire = { version = "2.1.6", features = ["tokio"] }
 derive_more = { version = "2.0.1", features = ["from"] }
 dirs = "6.0.0"
 figment = { version = "0.10", features = ["toml", "env"] }
@@ -85,4 +85,3 @@ async-once-cell = "0.5.4"
 [features]
 # default = ["debugging"]
 debugging = ["dep:http-body-util"]
-crossfire-channel = ["dep:crossfire"]

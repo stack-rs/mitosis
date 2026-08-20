@@ -16,7 +16,7 @@ use crate::config::TracingGuard;
 use crate::entity::content::ArtifactContentType;
 use crate::entity::state::TaskExecState;
 use crate::error::RequestError;
-use crate::executor::{execute, ExecClient, Executor, UploadTarget};
+use crate::executor::{ExecClient, Executor, UploadTarget};
 use crate::schema::*;
 use crate::service::auth::get_and_prompt_username;
 use crate::{
@@ -583,7 +583,9 @@ impl MitoWorker {
                         redis_client: redis_client.clone(),
                     }),
                 };
-                if let Err(e) = execute(&mut executor, task.spec, task.exec_options.as_ref()).await
+                if let Err(e) = executor
+                    .execute(task.spec, task.exec_options.as_ref())
+                    .await
                 {
                     tracing::error!("Task execution failed: {}", e);
                     cancel_token.cancel();

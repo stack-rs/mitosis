@@ -129,11 +129,6 @@ pub struct AgentConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub machine_code: Option<String>,
-    /// Run one suite and exit instead of staying up for more work. Intended for
-    /// tests and one-shot batches.
-    #[arg(long)]
-    #[serde(skip_serializing_if = "<&bool>::not")]
-    pub run_once: bool,
 }
 
 impl Default for AgentConfig {

@@ -15,12 +15,12 @@
 use std::collections::{HashMap, VecDeque};
 
 use axum::extract::ws::Message;
+use crossfire::{AsyncRx, MTx};
 use speedy::Writable;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::channel::{MRx, MTx};
 use crate::schema::{AgentNotification, WsNotificationEvent};
 
 /// Hard cap on unacknowledged notifications kept per agent. An agent that never
@@ -120,11 +120,11 @@ impl AgentSession {
 pub struct AgentWsRouter {
     sessions: HashMap<Uuid, AgentSession>,
     cancel_token: CancellationToken,
-    rx: MRx<RouterOp>,
+    rx: AsyncRx<RouterOp>,
 }
 
 impl AgentWsRouter {
-    pub fn new(cancel_token: CancellationToken, rx: MRx<RouterOp>) -> Self {
+    pub fn new(cancel_token: CancellationToken, rx: AsyncRx<RouterOp>) -> Self {
         Self {
             sessions: HashMap::new(),
             cancel_token,
@@ -138,7 +138,7 @@ impl AgentWsRouter {
             tokio::select! {
                 biased;
                 _ = self.cancel_token.cancelled() => break,
-                op = self.rx.recv() => match op {
+                op = self.rx.recv() => match op.ok() {
                     None => break,
                     Some(op) => self.handle_op(op),
                 },

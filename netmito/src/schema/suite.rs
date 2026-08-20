@@ -58,7 +58,7 @@ pub enum WorkerSchedulePlan {
         /// Optional CPU core binding strategy
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cpu_binding: Option<CpuBinding>,
-        /// How many tasks to prefetch locally per worker (default: 16)
+        /// How many tasks the agent keeps claimed but not yet started (default: 16)
         #[serde(default = "default_prefetch_count")]
         task_prefetch_count: u32,
     },

@@ -2,13 +2,13 @@
 
 use std::{cmp::Reverse, time::Duration};
 
+use crossfire::AsyncRx;
 use priority_queue::PriorityQueue;
 use sea_orm::prelude::*;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    channel::MRx,
     config::InfraPool,
     entity::{
         agents as Agent,
@@ -33,7 +33,7 @@ pub struct AgentHeartbeatQueue {
     cancel_token: CancellationToken,
     heartbeat_timeout: Duration,
     pool: InfraPool,
-    rx: MRx<AgentHeartbeatOp>,
+    rx: AsyncRx<AgentHeartbeatOp>,
 }
 
 impl AgentHeartbeatQueue {
@@ -41,7 +41,7 @@ impl AgentHeartbeatQueue {
         cancel_token: CancellationToken,
         heartbeat_timeout: Duration,
         pool: InfraPool,
-        rx: MRx<AgentHeartbeatOp>,
+        rx: AsyncRx<AgentHeartbeatOp>,
     ) -> Self {
         Self {
             agents: PriorityQueue::new(),
@@ -156,7 +156,7 @@ impl AgentHeartbeatQueue {
             tokio::select! {
                 biased;
                 _ = self.cancel_token.cancelled() => break,
-                op = self.rx.recv() => match op {
+                op = self.rx.recv() => match op.ok() {
                     None => break,
                     Some(op) => {
                         self.handle_op(op);

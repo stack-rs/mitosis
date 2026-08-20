@@ -111,19 +111,13 @@ impl MitoCoordinator {
             .map_err(|_| crate::error::Error::Custom("set shutdown secret failed".to_string()))?;
         let cancel_token = CancellationToken::new();
 
-        #[cfg(not(feature = "crossfire-channel"))]
-        let (worker_task_queue_tx, worker_task_queue_rx) = tokio::sync::mpsc::unbounded_channel();
-        #[cfg(feature = "crossfire-channel")]
         let (worker_task_queue_tx, worker_task_queue_rx) = crossfire::mpsc::unbounded_async();
-        #[cfg(not(feature = "crossfire-channel"))]
-        let (worker_heartbeat_queue_tx, worker_heartbeat_queue_rx) =
-            tokio::sync::mpsc::unbounded_channel();
-        #[cfg(feature = "crossfire-channel")]
         let (worker_heartbeat_queue_tx, worker_heartbeat_queue_rx) =
             crossfire::mpsc::unbounded_async();
 
-        let (agent_heartbeat_queue_tx, agent_heartbeat_queue_rx) = crate::channel::unbounded();
-        let (ws_router_tx, ws_router_rx) = crate::channel::unbounded();
+        let (agent_heartbeat_queue_tx, agent_heartbeat_queue_rx) =
+            crossfire::mpsc::unbounded_async();
+        let (ws_router_tx, ws_router_rx) = crossfire::mpsc::unbounded_async();
 
         // Setup worker task queue
         let worker_task_queue =

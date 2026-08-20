@@ -1909,6 +1909,61 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+    delete:
+      summary: Stop one of a suite's jobs
+      description: >-
+        Stop the job an agent is running for this suite. The agent itself stays
+        up and goes straight back to choosing a suite, so this preempts it onto
+        whatever ranks highest now — possibly this same suite, which re-provisions
+        it. To keep an agent off a suite, exclude it via the agent-override
+        endpoint instead. Requires the Write role in the suite's group. This is
+        the same operation as `POST /agents/{uuid}/job/stop`, addressed by job
+        number and authorized through the suite rather than the agent.
+      operationId: stopSuiteJob
+      tags:
+        - Suites
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: job_id
+          in: path
+          required: true
+          description: The suite-scoped job number, ascending from 1
+          schema:
+            type: integer
+            format: int32
+        - name: op
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - graceful
+              - force
+          description: |
+            Stop mode:
+            - graceful (default): the agent stops claiming tasks, finishes and
+              commits the ones it is running, then cleans up; the job ends
+              Completed and anything claimed but unstarted returns to Ready
+            - force: the job is marked Killed at once, its uncommitted tasks are
+              reclaimed, and the cleanup hook does not run
+      responses:
+        "200":
+          description: Stop requested (or nothing was running to stop)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StopAgentJobResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /agents:
     post:
@@ -2011,13 +2066,67 @@ paths:
               - force
           description: |
             Shutdown mode:
-            - graceful (default): an idle agent stops now; a busy one finishes
-              its current job first
+            - graceful (default): an idle agent stops now; a busy one winds its
+              job down first — the tasks it is running finish and commit, then
+              cleanup runs. It does not drain the rest of the suite; anything it
+              claimed but had not started returns to Ready for other agents
             - force: the agent's in-flight jobs are killed without cleanup and
               its uncommitted tasks are reclaimed for other agents
       responses:
         "200":
           description: Shutdown requested
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /agents/{uuid}/job/stop:
+    post:
+      summary: Stop the job an agent is running
+      description: >-
+        End the agent's current job without stopping the agent: it winds the job
+        down and immediately chooses a suite again. That re-choice is the point —
+        priority is otherwise only applied when an agent goes looking for work,
+        so this is how a user preempts one onto a suite that has since outranked
+        what it is running. The agent may well re-accept the same suite, which
+        re-provisions it from scratch. Requires the caller to have the Admin role
+        in a group that is Admin over the agent, exactly as shutdown does; an
+        agent that fails that check answers 404 as an unknown uuid does. An agent
+        with nothing in flight answers 200 with `stopped: false`.
+      operationId: stopAgentJob
+      tags:
+        - Agents
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: op
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - graceful
+              - force
+          description: |
+            Stop mode:
+            - graceful (default): the agent stops claiming tasks, finishes and
+              commits the ones it is running, then cleans up; the job ends
+              Completed and anything claimed but unstarted returns to Ready
+            - force: the job is marked Killed at once, its uncommitted tasks are
+              reclaimed, and the cleanup hook does not run
+      responses:
+        "200":
+          description: Stop requested (or nothing was running to stop)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StopAgentJobResp"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -5390,6 +5499,25 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/HookTaskInfo"
+
+    StopAgentJobResp:
+      type: object
+      required:
+        - stopped
+      properties:
+        stopped:
+          type: boolean
+          description: >-
+            False when there was no in-flight job to stop — an ordinary answer,
+            not an error. The other fields are then absent.
+        suite_uuid:
+          type: string
+          format: uuid
+          description: The suite whose job was stopped
+        job_id:
+          type: integer
+          format: int32
+          description: The suite-scoped job number of the stopped job
 
     AgentState:
       type: string

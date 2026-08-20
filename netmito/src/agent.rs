@@ -12,14 +12,17 @@
 //! The main loop only ever services heartbeats and notifications; a claimed
 //! suite runs in a spawned [`SuiteRunner`] so neither starves the other.
 
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    collections::VecDeque,
+    path::PathBuf,
+    sync::{atomic::AtomicUsize, Arc, Mutex},
+    time::Duration,
+};
 
-use futures::{SinkExt, StreamExt};
+use crossfire::{MAsyncRx, MAsyncTx};
+use futures::{SinkExt as _, StreamExt as _};
 use reqwest::StatusCode;
-use speedy::{Readable, Writable};
-use tokio::sync::mpsc;
+use speedy::{Readable as _, Writable as _};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_util::sync::CancellationToken;
@@ -27,18 +30,22 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use url::Url;
 use uuid::Uuid;
 
-use crate::config::{AgentConfig, AgentConfigCli};
-use crate::entity::content::ArtifactContentType;
-use crate::entity::hook_tasks::HookType;
-use crate::entity::state::{AgentState, TaskExecState};
-use crate::error::{self, Result};
-use crate::executor::{
-    create_shared_dir, ensure_traversable_dir, execute, reset_workspace,
-    warn_unreachable_ancestors, ExecClient, Executor, UploadTarget,
-};
-use crate::schema::*;
-use crate::service::auth::{
-    cred::get_user_credential, credential_guard::CredentialGuard, get_and_prompt_username,
+use crate::{
+    config::{AgentConfig, AgentConfigCli},
+    entity::{
+        content::ArtifactContentType,
+        hook_tasks::HookType,
+        state::{AgentState, TaskExecState},
+    },
+    error::{self, Result},
+    executor::{
+        create_shared_dir, ensure_traversable_dir, reset_workspace, warn_unreachable_ancestors,
+        ExecClient, Executor, UploadTarget,
+    },
+    schema::*,
+    service::auth::{
+        cred::get_user_credential, credential_guard::CredentialGuard, get_and_prompt_username,
+    },
 };
 
 /// How many task slots a job runs at a time. A slot is a working directory plus
@@ -51,6 +58,17 @@ use crate::service::auth::{
 fn task_slots(suite: &TaskSuiteSpec) -> usize {
     match suite.worker_schedule {
         WorkerSchedulePlan::FixedWorkers { worker_count, .. } => (worker_count as usize).max(1),
+    }
+}
+
+/// How deep the job's task buffer runs: how many tasks it keeps claimed but not
+/// yet started. Floored at one, since a zero-deep buffer makes every task its own round trip.
+fn task_buffer_depth(suite: &TaskSuiteSpec) -> usize {
+    match suite.worker_schedule {
+        WorkerSchedulePlan::FixedWorkers {
+            task_prefetch_count,
+            ..
+        } => (task_prefetch_count as usize).max(1),
     }
 }
 
@@ -107,10 +125,9 @@ struct AgentClient {
     current_run: Option<JoinHandle<bool>>,
     /// Cancelling this exits the main loop.
     shutdown_token: CancellationToken,
-    /// Set by a graceful `Shutdown` notification or `--run-once`: finish the
-    /// current suite, then stop instead of taking another.
+    /// Set by a graceful `Shutdown` notification: finish the current suite,
+    /// then stop instead of taking another.
     stop_after_current: bool,
-    run_once: bool,
 }
 
 impl MitoAgent {
@@ -127,10 +144,9 @@ impl MitoAgent {
             )
             .init();
 
-        let run_once = cli.run_once;
         match AgentConfig::new(&cli) {
             Ok(config) => {
-                if let Err(e) = Self::run(config, run_once).await {
+                if let Err(e) = Self::run(config).await {
                     tracing::error!("Agent failed: {e}");
                     std::process::exit(1);
                 }
@@ -144,7 +160,7 @@ impl MitoAgent {
 
     /// Register with the coordinator and drive the agent loop until shutdown.
     /// Public so tests (and embedders) can run an agent in-process.
-    pub async fn run(mut config: AgentConfig, run_once: bool) -> Result<()> {
+    pub async fn run(mut config: AgentConfig) -> Result<()> {
         tracing::info!("Starting agent against {}", config.coordinator_addr);
         tracing::info!(
             "groups={:?} tags={:?} labels={:?}",
@@ -178,7 +194,7 @@ impl MitoAgent {
         )
         .await?;
 
-        let machine_code = resolve_machine_code(config.machine_code.take());
+        let machine_code = Self::resolve_machine_code(config.machine_code.take());
         tracing::info!("Machine code: {machine_code}");
 
         let mut register_url = config.coordinator_addr.clone();
@@ -260,53 +276,51 @@ impl MitoAgent {
             current_run: None,
             shutdown_token: CancellationToken::new(),
             stop_after_current: false,
-            run_once,
         };
 
         client.run_loop().await
     }
-}
 
-/// Resolve a stable machine code for this host.
-///
-/// Precedence: explicit config → the cached value under the mitosis config dir →
-/// `/etc/machine-id` → a fresh UUID. Whatever is resolved (unless explicitly
-/// overridden) is cached, so the identity survives restarts even where
-/// `/etc/machine-id` does not exist — containers, non-Linux hosts. The identity
-/// matters: the coordinator keys the agent row on it, and a machine that comes
-/// back with a different code strands its old row.
-fn resolve_machine_code(explicit: Option<String>) -> String {
-    if let Some(code) = explicit
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return code;
-    }
+    /// Resolve a stable machine code for this host.
+    ///
+    /// Precedence: explicit config → the cached value under the mitosis config dir →
+    /// `/etc/machine-id` → a fresh UUID. Whatever is resolved (unless explicitly
+    /// overridden) is cached, so the identity survives restarts even where
+    /// `/etc/machine-id` does not exist — containers, non-Linux hosts. The identity
+    /// matters: the coordinator keys the agent row on it, and a machine that comes
+    /// back with a different code strands its old row.
+    fn resolve_machine_code(explicit: Option<String>) -> String {
+        if let Some(code) = explicit
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return code;
+        }
 
-    let cache_path = dirs::config_dir().map(|mut p| {
-        p.push("mitosis");
-        p.push("machine-id");
-        p
-    });
-    if let Some(ref path) = cache_path {
-        if let Ok(cached) = std::fs::read_to_string(path) {
-            let cached = cached.trim().to_string();
-            if !cached.is_empty() {
-                return cached;
+        let cache_path = dirs::config_dir().map(|mut p| {
+            p.push("mitosis");
+            p.push("machine-id");
+            p
+        });
+        if let Some(ref path) = cache_path {
+            if let Ok(cached) = std::fs::read_to_string(path) {
+                let cached = cached.trim().to_string();
+                if !cached.is_empty() {
+                    return cached;
+                }
             }
         }
-    }
 
-    let code = std::fs::read_to_string("/etc/machine-id")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            tracing::info!("No /etc/machine-id available; generating a machine code");
-            Uuid::new_v4().simple().to_string()
-        });
+        let code = std::fs::read_to_string("/etc/machine-id")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                tracing::info!("No /etc/machine-id available; generating a machine code");
+                Uuid::new_v4().simple().to_string()
+            });
 
-    match cache_path {
+        match cache_path {
         Some(path) => {
             let res = path
                 .parent()
@@ -325,7 +339,8 @@ fn resolve_machine_code(explicit: Option<String>) -> String {
         ),
     }
 
-    code
+        code
+    }
 }
 
 impl AgentClient {
@@ -338,11 +353,6 @@ impl AgentClient {
     async fn run_loop(&mut self) -> Result<()> {
         let cancel_token = self.shutdown_token.clone();
 
-        // SIGTERM matters as much as SIGINT: systemd, `docker stop`, and a group-wide
-        // kill from a task's cleanup all arrive that way. Under the default disposition
-        // SIGTERM killed the process outright — no drain, no log line, and every task it
-        // was running left orphaned. `shutdown_signal` covers both signals and reports
-        // which one arrived, matching what the coordinator and worker already do.
         let signal_token = cancel_token.clone();
         tokio::spawn(async move {
             crate::signal::shutdown_signal(signal_token.clone()).await;
@@ -353,7 +363,7 @@ impl AgentClient {
         // The channel is built either way: `select!` evaluates a branch's
         // expression even when its guard is false, so `ws_rx` has to exist.
         let ws_enabled = !self.no_ws;
-        let (ws_tx, mut ws_rx) = mpsc::channel::<WsNotificationEvent>(32);
+        let (ws_tx, ws_rx) = crossfire::mpsc::bounded_async::<WsNotificationEvent>(32);
         let ws_handle = if ws_enabled {
             Some(self.spawn_websocket_client(ws_tx, cancel_token.clone()))
         } else {
@@ -397,7 +407,7 @@ impl AgentClient {
                     break;
                 }
 
-                Some(event) = ws_rx.recv(), if ws_enabled => {
+                Ok(event) = ws_rx.recv(), if ws_enabled => {
                     self.notification_counter = self.notification_counter.max(event.id);
                     self.handle_notification(event.event);
                 }
@@ -441,11 +451,9 @@ impl AgentClient {
         Ok(())
     }
 
-    // ── notifications ──
-
     fn spawn_websocket_client(
         &self,
-        notification_tx: mpsc::Sender<WsNotificationEvent>,
+        notification_tx: MAsyncTx<WsNotificationEvent>,
         cancel_token: CancellationToken,
     ) -> JoinHandle<()> {
         let mut url = self.coordinator_addr.clone();
@@ -458,7 +466,9 @@ impl AgentClient {
         tokio::spawn(async move {
             while !cancel_token.is_cancelled() {
                 tracing::debug!("Connecting to {ws_url}");
-                match websocket_session(&ws_url, &token, &notification_tx, &cancel_token).await {
+                match Self::websocket_session(&ws_url, &token, &notification_tx, &cancel_token)
+                    .await
+                {
                     Ok(()) => tracing::debug!("Agent WebSocket closed"),
                     // Notifications are an optimization — the heartbeat carries
                     // the same events — so a failure here is never fatal.
@@ -642,7 +652,6 @@ impl AgentClient {
                     cache_path: self.cache_path.join("job"),
                     job_token,
                     drain_token,
-                    run_once: self.run_once,
                 };
                 self.current_run = Some(tokio::spawn(runner.run(suite, job)));
                 self.state = AgentState::Executing;
@@ -667,10 +676,6 @@ impl AgentClient {
                     self.job_token = None;
                     self.drain_token = None;
                     self.state = AgentState::Idle;
-                    if self.run_once {
-                        tracing::info!("--run-once: one suite done, stopping");
-                        self.stop_after_current = true;
-                    }
                     tracing::info!("Agent is idle again");
                 }
             }
@@ -710,6 +715,84 @@ impl AgentClient {
         };
         Ok(resp.job.zip(resp.job_id).map(|(job, id)| (suite, job, id)))
     }
+
+    /// One WebSocket session: read notifications, hand each to the main loop, then
+    /// acknowledge it. Returns when the socket closes or shutdown is signalled.
+    async fn websocket_session(
+        ws_url: &str,
+        token: &str,
+        notification_tx: &MAsyncTx<WsNotificationEvent>,
+        cancel_token: &CancellationToken,
+    ) -> Result<()> {
+        let host = Url::parse(ws_url)
+            .ok()
+            .and_then(|u| {
+                u.host_str().map(|h| match u.port() {
+                    Some(port) => format!("{h}:{port}"),
+                    None => h.to_string(),
+                })
+            })
+            .unwrap_or_default();
+        let request = tokio_tungstenite::tungstenite::http::Request::builder()
+            .uri(ws_url)
+            .header("Host", host)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Sec-WebSocket-Version", "13")
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header(
+                "Sec-WebSocket-Key",
+                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+            )
+            .body(())
+            .map_err(|e| error::Error::Custom(format!("Invalid WebSocket request: {e}")))?;
+
+        let (ws_stream, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .map_err(|e| error::Error::Custom(format!("WebSocket connect failed: {e}")))?;
+        tracing::info!("Agent WebSocket connected");
+
+        let (mut ws_write, mut ws_read) = ws_stream.split();
+        loop {
+            let msg = tokio::select! {
+                _ = cancel_token.cancelled() => return Ok(()),
+                msg = ws_read.next() => msg,
+            };
+            let Some(msg) = msg else { return Ok(()) };
+            match msg {
+                Ok(WsMessage::Binary(bytes)) => {
+                    let event = match WsNotificationEvent::read_from_buffer(&bytes) {
+                        Ok(event) => event,
+                        Err(e) => {
+                            tracing::warn!("Unparseable notification: {e}");
+                            continue;
+                        }
+                    };
+                    let id = event.id;
+                    if notification_tx.send(event).await.is_err() {
+                        return Ok(());
+                    }
+                    // Acknowledge only once the main loop has taken it, so an event
+                    // never leaves the coordinator's replay buffer before we own it.
+                    let ack = AgentWsMessage::Ack {
+                        notification_id: id,
+                    };
+                    if let Ok(payload) = ack.write_to_vec() {
+                        let _ = ws_write.send(WsMessage::Binary(payload.into())).await;
+                    }
+                }
+                Ok(WsMessage::Ping(_)) | Ok(WsMessage::Pong(_)) | Ok(WsMessage::Frame(_)) => {}
+                Ok(WsMessage::Text(text)) => {
+                    tracing::debug!(%text, "Ignoring an unexpected text frame")
+                }
+                Ok(WsMessage::Close(frame)) => {
+                    tracing::debug!(?frame, "Coordinator closed the WebSocket");
+                    return Ok(());
+                }
+                Err(e) => return Err(error::Error::Custom(format!("WebSocket error: {e}"))),
+            }
+        }
+    }
 }
 
 /// Drives one accepted suite from provision through to a terminal job state.
@@ -735,9 +818,6 @@ struct SuiteRunner {
     /// but had not started is abandoned; the coordinator reclaims it on
     /// `complete`.
     drain_token: CancellationToken,
-    /// `--run-once`: never hold a drained job open waiting for late work, since
-    /// this agent stops after this suite anyway.
-    run_once: bool,
 }
 
 impl SuiteRunner {
@@ -779,10 +859,7 @@ impl SuiteRunner {
 
         if failure.is_none() {
             background = self.spawn_background_hook(job, &suite, background_token.clone());
-            if let Err(e) = self
-                .execute_tasks(suite_uuid, job, task_slots(&suite))
-                .await
-            {
+            if let Err(e) = self.execute_tasks(&suite, job).await {
                 tracing::error!("Task execution failed for suite {suite_uuid}: {e}");
                 failure = Some(JobFailureReason {
                     kind: JobFailureKind::ExecutionError,
@@ -865,150 +942,225 @@ impl SuiteRunner {
         Ok(())
     }
 
-    /// Claim and run the suite's tasks across `slots` task slots.
+    /// Claim the suite's tasks into a buffer and run them across `slots` slots.
     ///
-    /// One slot is one worker of the suite's `FixedWorkers` plan: its own
-    /// working directory and its own claim loop, so a slow task holds up only
-    /// the slot running it.
+    /// This call is the buffer's keeper: it does every claim, every hold-open
+    /// poll, and the decision to end the job. The slots only take what it hands
+    /// them, so none of that is duplicated `slots` times.
     ///
-    /// TODO: `task_prefetch_count` is not honored yet — a slot claims one task
-    /// at a time rather than a local batch.
-    async fn execute_tasks(&self, suite_uuid: Uuid, job: i64, slots: usize) -> Result<()> {
-        tracing::info!("Running the tasks of suite {suite_uuid} across {slots} slot(s)");
+    /// The buffer has two halves. The deep half is `staged`, held here; the
+    /// shallow half is the channel, and its capacity is the low-water mark —
+    /// `send` parks until a slot takes one, which is what wakes the refill.
+    async fn execute_tasks(&self, suite: &TaskSuiteSpec, job: i64) -> Result<()> {
+        let slots = task_slots(suite);
+        let depth = task_buffer_depth(suite);
+        tracing::info!(
+            "Running the tasks of suite {} across {slots} slots, buffering {depth}",
+            suite.uuid,
+        );
+
+        let (task_tx, task_rx) = crossfire::mpmc::bounded_async::<WorkerTaskResp>(slots);
+        // Bumped by a slot once a task ends, however it ended. Paired with the
+        // keeper's own `pushed` count: equal means everything ever handed out
+        // has finished, which no snapshot of "are the slots idle" can say
+        // without racing a slot that has just taken a task.
+        let completed = Arc::new(AtomicUsize::new(0));
+
         let mut running = tokio::task::JoinSet::new();
         for slot in 0..slots {
             let runner = self.clone();
-            running.spawn(async move { runner.run_slot(suite_uuid, job, slot).await });
+            let task_rx = task_rx.clone();
+            let completed = completed.clone();
+            running.spawn(async move { runner.run_slot(job, slot, task_rx, completed).await });
         }
+        // Only the solots hold the receivers.
+        drop(task_rx);
 
-        // Every slot is joined before the job moves on, so one that fails never
-        // strands the task another still has in flight.
-        let mut failure: Option<error::Error> = None;
+        // Keep filling the job to the buffer so that workers and continously working on it.
+        let filled = self
+            .fill_buffer(suite.uuid, task_tx, depth, completed)
+            .await;
+
         while let Some(joined) = running.join_next().await {
-            match joined {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    tracing::error!("A task slot of suite {suite_uuid} failed: {e}");
-                    failure.get_or_insert(e);
-                }
-                Err(e) => {
-                    tracing::error!("A task slot of suite {suite_uuid} panicked: {e}");
-                    failure.get_or_insert(error::Error::Custom(format!("task slot panicked: {e}")));
-                }
+            if let Err(e) = joined {
+                tracing::error!("A task slot of suite {} panicked: {e}", suite.uuid);
             }
         }
-        match failure {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        filled
     }
 
-    /// One task slot: claim a task, run it in `task-{slot}`, repeat until the
-    /// suite drains and stops holding the job open, or until the job is asked to
-    /// wind down.
-    async fn run_slot(&self, suite_uuid: Uuid, job: i64, slot: usize) -> Result<()> {
-        let dir = self.cache_path.join(format!("task-{slot}"));
+    /// Keep the buffer stocked until the suite has nothing left for us.
+    ///
+    /// Returns once the job is done claiming — drained, cancelled, or wound
+    /// down. Whatever is still staged at that point is abandoned unstarted;
+    /// `complete` hands those back to `Ready`.
+    async fn fill_buffer(
+        &self,
+        suite_uuid: Uuid,
+        task_tx: MAsyncTx<WorkerTaskResp>,
+        depth: usize,
+        completed: Arc<AtomicUsize>,
+    ) -> Result<()> {
+        let mut staged: VecDeque<WorkerTaskResp> = VecDeque::new();
+        // How many tasks have been handed to the slots.
+        let mut pushed: usize = 0;
+        // Log-only edge detector, so a hold is announced once rather than once
+        // per poll.
+        // TODO: make this an `Option<Instant>` so the resume line can report how
+        // long the job sat warm
         let mut holding = false;
+
         loop {
             if self.job_token.is_cancelled() {
-                tracing::info!("Suite {suite_uuid} cancelled; stopping task slot {slot}");
+                tracing::info!("Suite {suite_uuid} cancelled; claiming no more tasks");
                 return Ok(());
             }
-            // Checked before the claim, not just while waiting for work: a
-            // wind-down has to stop a slot that still has tasks to claim, which
-            // is the whole difference between it and letting the suite drain.
+            // Checked before the claim, not only while waiting on work: a
+            // wind-down has to stop a keeper that still has tasks to claim,
+            // which is the whole difference between it and letting the suite
+            // drain on its own.
             if self.drain_token.is_cancelled() {
                 tracing::info!(
-                    "Asked to wind down; slot {slot} of job {} claims no more tasks",
+                    "Asked to wind down; job {} claims no more tasks",
                     self.job_id
                 );
                 return Ok(());
             }
 
-            let resp = self.fetch_tasks(suite_uuid, 1).await?;
-            if resp.tasks.is_empty() {
-                // `--run-once` stops after this suite, so waiting out the idle
-                // window on the chance of late work buys nothing.
-                if !resp.hold_job_open || self.run_once {
-                    tracing::info!(
-                        "Suite {suite_uuid} is idle and has no more tasks for slot {slot}"
-                    );
-                    return Ok(());
-                }
-                if !holding {
-                    tracing::info!(
-                        "Suite {suite_uuid} is drained but still open; slot {slot} holds job {} open for more work",
-                        self.job_id
-                    );
-                    holding = true;
-                }
-                // The coordinator only notifies *idle* agents of a submission,
-                // and we are Executing, so the poll is what finds late work.
-                tokio::select! {
-                    _ = self.job_token.cancelled() => return Ok(()),
-                    // The check at the top of the loop would catch this too;
-                    // waking on it here is what keeps a wind-down from sitting
-                    // out the poll interval first.
-                    _ = self.drain_token.cancelled() => {
-                        tracing::info!(
-                            "Asked to wind down; releasing slot {slot} of job {}",
-                            self.job_id
-                        );
+            if staged.is_empty() {
+                // What the buffer is short by. Floored at one: with a prefetch
+                // count of one the channel alone can already hold the whole
+                // budget, and asking for nothing would spin.
+                let want = depth.saturating_sub(task_tx.len()).max(1);
+                let resp = self.fetch_tasks(suite_uuid, want as u32).await?;
+                if resp.tasks.is_empty() {
+                    // This expression means:
+                    // When 1. no thread is actually working (pushed == completed)
+                    // and 2. the suite is closed,
+                    // then we can stop this job.
+                    if !resp.hold_job_open
+                        && completed.load(std::sync::atomic::Ordering::Acquire) == pushed
+                    {
+                        tracing::debug!("Suite {suite_uuid} is idle and has no more tasks");
                         return Ok(());
                     }
-                    _ = tokio::time::sleep(HOLD_POLL_INTERVAL) => {}
+                    if !holding {
+                        tracing::debug!(
+                            "Suite {suite_uuid} is drained but still open; job {} stays up for \
+                             more work",
+                            self.job_id
+                        );
+                        holding = true;
+                    }
+                    // The coordinator only notifies *idle* agents of a
+                    // submission, and we are Executing, so the poll is what
+                    // finds late work — including a task a running one spawned.
+                    tokio::select! {
+                        _ = self.job_token.cancelled() => return Ok(()),
+                        // The checks at the top of the loop would catch this
+                        // too; waking on it here is what keeps a wind-down from
+                        // sitting out the poll interval first.
+                        _ = self.drain_token.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep(HOLD_POLL_INTERVAL) => {}
+                    }
+                    continue;
                 }
-                continue;
-            }
-            if holding {
-                tracing::info!(
-                    "Suite {suite_uuid} has work again; slot {slot} of job {} resumes",
-                    self.job_id
-                );
-                holding = false;
+                if holding {
+                    tracing::debug!(
+                        "Suite {suite_uuid} has work again; job {} resumes",
+                        self.job_id
+                    );
+                    holding = false;
+                }
+                staged.extend(resp.tasks);
             }
 
-            for task in resp.tasks {
-                // A wind-down abandons the rest of the batch: these are claimed
-                // but unstarted, and `complete` hands them back to `Ready`.
-                if self.job_token.is_cancelled() || self.drain_token.is_cancelled() {
-                    return Ok(());
-                }
-                let uuid = task.uuid;
-                if let Err(e) = self.run_task(job, task, &dir).await {
-                    // One task must not take the job down: the coordinator
-                    // reclaims anything left uncommitted.
-                    tracing::error!("Failed to run task {uuid}: {e}");
+            // Hand the staged batch over one at a time. This parks once the
+            // channel is full and wakes as slots take them, so the refill above
+            // runs exactly when the buffer has drained to the low-water mark.
+            while let Some(task) = staged.pop_front() {
+                tokio::select! {
+                    _ = self.job_token.cancelled() => return Ok(()),
+                    _ = self.drain_token.cancelled() => return Ok(()),
+                    sent = task_tx.send(task) => {
+                        if sent.is_err() {
+                            // Every slot is gone; nothing left to feed.
+                            return Ok(());
+                        }
+                        pushed += 1;
+                    }
                 }
             }
         }
     }
 
-    /// Run one task, reporting it through the agent's task endpoint.
-    async fn run_task(&self, job: i64, task: WorkerTaskResp, slot: &std::path::Path) -> Result<()> {
-        tracing::info!("Running task {} (args {:?})", task.uuid, task.spec.args);
-        reset_workspace(slot).await?;
-        let mut executor = Executor {
-            cancel_token: self.job_token.clone(),
-            polling_interval: self.connect_retry_interval,
-            cache_path: slot.to_path_buf(),
-            http_client: self.http_client.clone(),
-            client: Box::new(AgentTaskClient {
-                http: self.connection(),
-                job,
-                task_id: task.id,
-                task_uuid: task.uuid,
-                upstream_task_uuid: task.upstream_task_uuid,
-                shared_path: self.shared_path(),
-            }),
-        };
-        execute(&mut executor, task.spec, task.exec_options.as_ref()).await
+    /// One task slot: run what the keeper hands us, in `task-{slot}`, until the
+    /// channel closes.
+    ///
+    /// No drain check of its own — a wind-down closes the channel, and the slot
+    /// finishes the task in hand before it notices.
+    async fn run_slot(
+        &self,
+        job: i64,
+        slot: usize,
+        task_rx: MAsyncRx<WorkerTaskResp>,
+        completed: Arc<AtomicUsize>,
+    ) {
+        let dir = self.cache_path.join(format!("task-{slot}"));
+        loop {
+            let task = tokio::select! {
+                _ = self.job_token.cancelled() => break,
+                task = task_rx.recv() => match task {
+                    Ok(task) => task,
+                    Err(_) => break,
+                },
+            };
+
+            // TODO: run the task in `dir` and report it.
+            tracing::info!("Slot {} running task {}", slot, task.uuid);
+            tracing::debug!("Slot {} task {} spec: {:?}", slot, task.uuid, task.spec);
+            if let Err(e) = reset_workspace(&dir).await {
+                tracing::error!(
+                    "Slot {} error prepare workspace for task {}: {}",
+                    slot,
+                    task.uuid,
+                    e
+                );
+                completed.fetch_add(1, std::sync::atomic::Ordering::Release);
+                continue;
+            }
+            let mut executor = Executor {
+                cancel_token: self.job_token.clone(),
+                polling_interval: self.connect_retry_interval,
+                cache_path: dir.clone(),
+                http_client: self.http_client.clone(),
+                client: Box::new(AgentTaskClient {
+                    http: self.connection(),
+                    job,
+                    task_id: task.id,
+                    task_uuid: task.uuid,
+                    upstream_task_uuid: task.upstream_task_uuid,
+                    shared_path: self.shared_path(),
+                }),
+            };
+            if let Err(e) = executor
+                .execute(task.spec, task.exec_options.as_ref())
+                .await
+            {
+                tracing::error!("Slot {} error executing task {}: {}", slot, task.uuid, e);
+            }
+
+            // After the task is over, whatever became of it: the keeper reads
+            // this to tell "still working" from "everything is done".
+            completed.fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+        tracing::debug!("Slot {slot} of job {} released", self.job_id);
     }
 
     /// Run a suite hook, reporting it through the hook endpoint. An unconfigured
     /// hook is not a failed one — it just leaves no record.
     async fn run_hook(&self, job: i64, suite: &TaskSuiteSpec, hook_type: HookType) -> Result<()> {
-        let Some(spec) = hook_spec(suite, hook_type) else {
+        let Some(spec) = Self::hook_spec(suite, hook_type) else {
             tracing::debug!("No {hook_type} hook configured for suite {}", suite.uuid);
             return Ok(());
         };
@@ -1042,7 +1194,7 @@ impl SuiteRunner {
                 shared_path: self.shared_path(),
             }),
         };
-        execute(&mut executor, spec, None).await?;
+        executor.execute(spec, None).await?;
         match outcome.exit_status() {
             Some(0) | None => Ok(()),
             Some(status) => Err(error::Error::Custom(format!(
@@ -1059,7 +1211,7 @@ impl SuiteRunner {
         suite: &TaskSuiteSpec,
         cancel_token: CancellationToken,
     ) -> Option<JoinHandle<()>> {
-        let spec = hook_spec(suite, HookType::Background)?;
+        let spec = Self::hook_spec(suite, HookType::Background)?;
         let runner = self.clone();
         let suite = suite.clone();
         Some(tokio::spawn(async move {
@@ -1161,15 +1313,15 @@ impl SuiteRunner {
             error::get_error_from_resp(resp).await
         )))
     }
-}
 
-/// The hook's `ExecSpec` from the suite definition, if it has one.
-fn hook_spec(suite: &TaskSuiteSpec, hook_type: HookType) -> Option<ExecSpec> {
-    let hooks = suite.exec_hooks.as_ref()?;
-    match hook_type {
-        HookType::Provision => hooks.provision.clone(),
-        HookType::Cleanup => hooks.cleanup.clone(),
-        HookType::Background => hooks.background.clone(),
+    /// The hook's `ExecSpec` from the suite definition, if it has one.
+    fn hook_spec(suite: &TaskSuiteSpec, hook_type: HookType) -> Option<ExecSpec> {
+        let hooks = suite.exec_hooks.as_ref()?;
+        match hook_type {
+            HookType::Provision => hooks.provision.clone(),
+            HookType::Cleanup => hooks.cleanup.clone(),
+            HookType::Background => hooks.background.clone(),
+        }
     }
 }
 
@@ -1190,8 +1342,6 @@ impl HookOutcome {
         self.0.lock().ok()?.as_ref().map(|r| r.exit_status)
     }
 }
-
-// ── the agent's half of the execution seam ──
 
 /// What every agent-side [`ExecClient`] needs to reach the coordinator. Cloned
 /// per unit; the clones are all cheap handles.
@@ -1407,7 +1557,6 @@ impl ExecClient for AgentTaskClient {
         }
     }
 }
-
 /// A suite hook. Keyed by `{job, hook_type}` rather than by a task, and reported
 /// to `/agents/job/hook`, whose `Result` op records the outcome and mints the
 /// uuid its artifacts hang off — hence the outcome is reported before the
@@ -1527,84 +1676,6 @@ fn artifact_path(uuid: Uuid, content_type: ArtifactContentType) -> String {
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| "result".to_string());
     format!("agents/tasks/{uuid}/artifacts/{content_type}")
-}
-
-/// One WebSocket session: read notifications, hand each to the main loop, then
-/// acknowledge it. Returns when the socket closes or shutdown is signalled.
-async fn websocket_session(
-    ws_url: &str,
-    token: &str,
-    notification_tx: &mpsc::Sender<WsNotificationEvent>,
-    cancel_token: &CancellationToken,
-) -> Result<()> {
-    let host = Url::parse(ws_url)
-        .ok()
-        .and_then(|u| {
-            u.host_str().map(|h| match u.port() {
-                Some(port) => format!("{h}:{port}"),
-                None => h.to_string(),
-            })
-        })
-        .unwrap_or_default();
-    let request = tokio_tungstenite::tungstenite::http::Request::builder()
-        .uri(ws_url)
-        .header("Host", host)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Sec-WebSocket-Version", "13")
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header(
-            "Sec-WebSocket-Key",
-            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-        )
-        .body(())
-        .map_err(|e| error::Error::Custom(format!("Invalid WebSocket request: {e}")))?;
-
-    let (ws_stream, _) = tokio_tungstenite::connect_async(request)
-        .await
-        .map_err(|e| error::Error::Custom(format!("WebSocket connect failed: {e}")))?;
-    tracing::info!("Agent WebSocket connected");
-
-    let (mut ws_write, mut ws_read) = ws_stream.split();
-    loop {
-        let msg = tokio::select! {
-            _ = cancel_token.cancelled() => return Ok(()),
-            msg = ws_read.next() => msg,
-        };
-        let Some(msg) = msg else { return Ok(()) };
-        match msg {
-            Ok(WsMessage::Binary(bytes)) => {
-                let event = match WsNotificationEvent::read_from_buffer(&bytes) {
-                    Ok(event) => event,
-                    Err(e) => {
-                        tracing::warn!("Unparseable notification: {e}");
-                        continue;
-                    }
-                };
-                let id = event.id;
-                if notification_tx.send(event).await.is_err() {
-                    return Ok(());
-                }
-                // Acknowledge only once the main loop has taken it, so an event
-                // never leaves the coordinator's replay buffer before we own it.
-                let ack = AgentWsMessage::Ack {
-                    notification_id: id,
-                };
-                if let Ok(payload) = ack.write_to_vec() {
-                    let _ = ws_write.send(WsMessage::Binary(payload.into())).await;
-                }
-            }
-            Ok(WsMessage::Ping(_)) | Ok(WsMessage::Pong(_)) | Ok(WsMessage::Frame(_)) => {}
-            Ok(WsMessage::Text(text)) => {
-                tracing::debug!(%text, "Ignoring an unexpected text frame")
-            }
-            Ok(WsMessage::Close(frame)) => {
-                tracing::debug!(?frame, "Coordinator closed the WebSocket");
-                return Ok(());
-            }
-            Err(e) => return Err(error::Error::Custom(format!("WebSocket error: {e}"))),
-        }
-    }
 }
 
 /// Decode a successful JSON response, turning a non-2xx into a descriptive error.

@@ -6,6 +6,7 @@ use aws_sdk_s3::{
     Client as S3Client,
 };
 use clap::Args;
+use crossfire::{AsyncRx, MTx};
 use figment::{
     providers::{Env, Format, Serialized, Toml},
     value::magic::RelativePathBuf,
@@ -17,13 +18,10 @@ use redis::{acl::Rule, AsyncCommands};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use time::Duration;
-#[cfg(not(feature = "crossfire-channel"))]
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use crate::{
-    channel::{MRx, MTx},
     error::Error,
     service::agent::heartbeat::{AgentHeartbeatOp, AgentHeartbeatQueue},
     service::worker::{HeartbeatOp, HeartbeatQueue, TaskDispatcher, TaskDispatcherOp},
@@ -252,8 +250,7 @@ impl CoordinatorConfig {
     pub fn build_worker_task_queue(
         &self,
         cancel_token: CancellationToken,
-        #[cfg(not(feature = "crossfire-channel"))] rx: UnboundedReceiver<TaskDispatcherOp>,
-        #[cfg(feature = "crossfire-channel")] rx: crossfire::AsyncRx<TaskDispatcherOp>,
+        rx: AsyncRx<TaskDispatcherOp>,
     ) -> TaskDispatcher {
         TaskDispatcher::new(cancel_token, rx)
     }
@@ -262,8 +259,7 @@ impl CoordinatorConfig {
         &self,
         cancel_token: CancellationToken,
         pool: InfraPool,
-        #[cfg(not(feature = "crossfire-channel"))] rx: UnboundedReceiver<HeartbeatOp>,
-        #[cfg(feature = "crossfire-channel")] rx: crossfire::AsyncRx<HeartbeatOp>,
+        rx: AsyncRx<HeartbeatOp>,
     ) -> HeartbeatQueue {
         HeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
     }
@@ -272,7 +268,7 @@ impl CoordinatorConfig {
         &self,
         cancel_token: CancellationToken,
         pool: InfraPool,
-        rx: MRx<AgentHeartbeatOp>,
+        rx: AsyncRx<AgentHeartbeatOp>,
     ) -> AgentHeartbeatQueue {
         AgentHeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
     }
@@ -280,7 +276,7 @@ impl CoordinatorConfig {
     pub fn build_ws_router(
         &self,
         cancel_token: CancellationToken,
-        rx: MRx<RouterOp>,
+        rx: AsyncRx<RouterOp>,
     ) -> AgentWsRouter {
         AgentWsRouter::new(cancel_token, rx)
     }
@@ -347,18 +343,8 @@ impl CoordinatorConfig {
 
     pub async fn build_infra_pool(
         &self,
-        #[cfg(not(feature = "crossfire-channel"))] worker_task_queue_tx: UnboundedSender<
-            TaskDispatcherOp,
-        >,
-        #[cfg(feature = "crossfire-channel")] worker_task_queue_tx: crossfire::MTx<
-            TaskDispatcherOp,
-        >,
-        #[cfg(not(feature = "crossfire-channel"))] worker_heartbeat_queue_tx: UnboundedSender<
-            HeartbeatOp,
-        >,
-        #[cfg(feature = "crossfire-channel")] worker_heartbeat_queue_tx: crossfire::MTx<
-            HeartbeatOp,
-        >,
+        worker_task_queue_tx: MTx<TaskDispatcherOp>,
+        worker_heartbeat_queue_tx: MTx<HeartbeatOp>,
         agent_heartbeat_queue_tx: MTx<AgentHeartbeatOp>,
         ws_router_tx: MTx<RouterOp>,
     ) -> crate::error::Result<InfraPool> {
@@ -501,14 +487,8 @@ pub struct InfraPool {
     pub s3: S3Client,
     pub artifacts_bucket: String,
     pub attachments_bucket: String,
-    #[cfg(not(feature = "crossfire-channel"))]
-    pub worker_task_queue_tx: UnboundedSender<TaskDispatcherOp>,
-    #[cfg(feature = "crossfire-channel")]
-    pub worker_task_queue_tx: crossfire::MTx<TaskDispatcherOp>,
-    #[cfg(not(feature = "crossfire-channel"))]
-    pub worker_heartbeat_queue_tx: UnboundedSender<HeartbeatOp>,
-    #[cfg(feature = "crossfire-channel")]
-    pub worker_heartbeat_queue_tx: crossfire::MTx<HeartbeatOp>,
+    pub worker_task_queue_tx: MTx<TaskDispatcherOp>,
+    pub worker_heartbeat_queue_tx: MTx<HeartbeatOp>,
     pub agent_heartbeat_queue_tx: MTx<AgentHeartbeatOp>,
     pub ws_router_tx: MTx<RouterOp>,
     /// Identifies this coordinator process. Agents compare it against the

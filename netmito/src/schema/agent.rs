@@ -367,18 +367,15 @@ pub struct HookReportResp {
     pub url: Option<String>,
 }
 
-/// Request to claim tasks from a suite for execution
+/// Request to claim tasks from a suite for execution.
+///
+/// The coordinator knows the suite's schedule and how many tasks this agent
+/// is already holding, so it sizes the batch itself. An agent that asks is
+/// an agent with room, and it takes what it is given.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FetchTasksReq {
     /// Suite UUID to fetch tasks from
     pub suite_uuid: Uuid,
-    /// Maximum number of tasks to claim in this batch
-    #[serde(default = "default_fetch_count")]
-    pub max_count: u32,
-}
-
-fn default_fetch_count() -> u32 {
-    1
 }
 
 /// Response containing the claimed tasks (empty if the suite has none ready)

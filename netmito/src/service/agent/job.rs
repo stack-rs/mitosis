@@ -212,8 +212,9 @@ pub async fn agent_has_in_flight_job<C: ConnectionTrait>(db: &C, agent_id: i64) 
 /// `Finished` and `Cancelled` count because a task's result reaches the
 /// coordinator only with its `Commit`, which never arrived — and the state alone
 /// is not terminal, so a row left in it would never be archived by anything.
-/// Returns what was reclaimed, as `(task id, suite id)` — the suites are how the
-/// caller knows whom to offer the work to now that it is claimable again.
+/// Returns what was reclaimed, as `(task id, suite id, priority)` — the suites
+/// are how the caller knows whom to offer the work to now that it is claimable
+/// again, and the priority is where it goes in their queue.
 ///
 /// `suite_id` scopes the sweep: `None` takes back everything the agent holds,
 /// `Some(id)` only what it holds in that suite. Runs on any connection,
@@ -223,7 +224,7 @@ pub async fn reclaim_agent_tasks<C: ConnectionTrait>(
     agent_uuid: Uuid,
     suite_id: Option<i64>,
     now: TimeDateTimeWithTimeZone,
-) -> Result<Vec<(i64, Option<i64>)>> {
+) -> Result<Vec<(i64, Option<i64>, i32)>> {
     let mut query = ActiveTasks::Entity::update_many()
         .col_expr(ActiveTasks::Column::State, Expr::value(TaskState::Ready))
         .col_expr(ActiveTasks::Column::RunnerUuid, Expr::value(None::<Uuid>))
@@ -247,6 +248,6 @@ pub async fn reclaim_agent_tasks<C: ConnectionTrait>(
     }
     Ok(reclaimed
         .into_iter()
-        .map(|task| (task.id, task.task_suite_id))
+        .map(|task| (task.id, task.task_suite_id, task.priority))
         .collect())
 }

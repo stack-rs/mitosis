@@ -8,11 +8,12 @@
 //! agents step over each other's locked rows instead of contending, so no two
 //! agents can claim the same task and none of them block.
 //!
-//! [`queue::SuiteQueues`] sits in front of that as a hint and a policy gate: the
-//! ids it has queued for the suite are tried first, and while the suite is
-//! reserved for the jobs already on it, everybody else is answered empty. It
-//! never decides what a claim *means* — the transaction below does, against the
-//! database.
+//! [`queue::SuiteQueues`] sits in front of that as a hint and a policy gate: it
+//! sizes the batch from the suite's schedule and what this job is already
+//! holding, the ids it has queued for the suite are tried first, and while the
+//! suite is reserved for the jobs already on it, everybody else is answered
+//! empty. It never decides what a claim *means* — the transaction below does,
+//! against the database.
 //!
 //! [`queue::SuiteQueues`]: crate::service::agent::queue::SuiteQueues
 //!
@@ -43,23 +44,19 @@ use crate::{
     },
     error::{ApiError, Error, Result},
     schema::{ExecSpec, FetchTasksResp, ReportTaskOp, TaskExecOptions, WorkerTaskResp},
-    service::{agent::job, agent::matching, s3::group_upload_artifact},
+    service::{agent::job, agent::matching, agent::queue, s3::group_upload_artifact},
 };
 
-/// Upper bound on a single claim batch, so a malformed `max_count` cannot ask
-/// the coordinator to lock an unbounded number of rows.
-const MAX_FETCH_BATCH: u32 = 256;
-
-/// Claim up to `max_count` ready tasks of a suite for this agent.
+/// Claim as many of a suite's ready tasks as this agent still has room for.
+///
+/// The agent asks for no particular number: the suite's schedule says how many
+/// one job may hold, and the queue knows how many this one is holding already.
 pub async fn agent_fetch_tasks(
     agent_id: i64,
     agent_uuid: Uuid,
     pool: &InfraPool,
     suite_uuid: Uuid,
-    max_count: u32,
 ) -> Result<FetchTasksResp> {
-    let max_count = max_count.clamp(1, MAX_FETCH_BATCH);
-
     let suite = TaskSuites::Entity::find()
         .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
         .one(&pool.db)
@@ -86,24 +83,45 @@ pub async fn agent_fetch_tasks(
     // sweep has just settled only costs one more poll.
     let hold_job_open = matches!(suite.state, TaskSuiteState::Open);
 
+    let budget = queue::task_budget(&serde_json::from_value(suite.worker_schedule).inspect_err(
+        |e| {
+            tracing::error!(suite_uuid = %suite_uuid, "Stored worker schedule is unreadable: {e}");
+        },
+    )?);
+
     // While a suite is reserved for the jobs already running it, everyone else
     // is answered as if it were drained. `hold_job_open` still stands: an agent
     // that is holding stays holding, and comes back when the window is over.
-    let Some(hinted) = pool
-        .suite_queues
-        .take(suite_id, agent_id, max_count as usize)
-    else {
+    let Some((max_count, hinted)) = pool.suite_queues.take(suite_id, agent_id, budget) else {
         tracing::debug!(
             agent_uuid = %agent_uuid,
             suite_uuid = %suite_uuid,
             "Suite is reserved for the agents already running it; handing out nothing"
         );
-        pool.suite_queues.served(suite_id, agent_id, 0);
+        pool.suite_queues.served(suite_id, agent_id, 0, &[]);
         return Ok(FetchTasksResp {
             tasks: Vec::new(),
             hold_job_open,
         });
     };
+    // Full: it is holding as much as its workers and their buffer can take. It
+    // asks again the moment one of them commits.
+    if max_count == 0 {
+        tracing::debug!(
+            agent_uuid = %agent_uuid,
+            suite_uuid = %suite_uuid,
+            "Agent is holding a full batch already; handing out nothing"
+        );
+        pool.suite_queues.served(suite_id, agent_id, 0, &[]);
+        return Ok(FetchTasksResp {
+            tasks: Vec::new(),
+            hold_job_open,
+        });
+    }
+
+    // What the queue believed was claimable, for `served` to check the claim
+    // against.
+    let hinted_count = hinted.len();
 
     let claimed = pool
         .db
@@ -145,8 +163,9 @@ pub async fn agent_fetch_tasks(
         })
         .await?;
 
-    // Coming back empty is how a job says it is holding with room to spare.
-    pool.suite_queues.served(suite_id, agent_id, claimed.len());
+    let claimed_ids: Vec<i64> = claimed.iter().map(|task| task.id).collect();
+    pool.suite_queues
+        .served(suite_id, agent_id, hinted_count, &claimed_ids);
 
     let mut tasks = Vec::with_capacity(claimed.len());
     for task in claimed {
@@ -317,6 +336,12 @@ pub async fn agent_report_task(
                     })
                 })
                 .await?;
+
+            // The job is holding one task fewer, and has a slot free to take
+            // another with.
+            if let Some(suite_id) = suite_id {
+                pool.suite_queues.finished(suite_id, agent_id);
+            }
 
             // Task chaining: a child registered by an earlier Submit goes
             // Pending → Ready now that its parent has committed.

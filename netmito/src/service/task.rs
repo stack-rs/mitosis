@@ -56,6 +56,8 @@ enum Submitter {
     },
 }
 
+/// Insert a task. Telling anyone about it is [`dispatch_submitted_task`]'s job, called
+/// by the caller.
 async fn internal_submit_task(
     pool: &InfraPool,
     creator_id: i64,
@@ -69,7 +71,7 @@ async fn internal_submit_task(
         spec,
         exec_options,
     }: SubmitTaskReq,
-) -> crate::error::Result<SubmitTaskResp> {
+) -> crate::error::Result<SubmittedTask> {
     let tags = Vec::from_iter(tags);
     let labels = Vec::from_iter(labels);
     let now = TimeDateTimeWithTimeZone::now_utc();
@@ -355,23 +357,57 @@ async fn internal_submit_task(
         )
         .await?;
 
-    // If task is pending, then we have done
+    Ok(SubmittedTask {
+        task,
+        suite_id: suite.map(|suite| suite.id),
+    })
+}
+
+/// A task as submitted, before anyone has been told about it.
+struct SubmittedTask {
+    task: ActiveTasks::Model,
+    suite_id: Option<i64>,
+}
+
+impl SubmittedTask {
+    fn resp(&self) -> SubmitTaskResp {
+        SubmitTaskResp {
+            task_id: self.task.task_id,
+            uuid: self.task.uuid,
+        }
+    }
+}
+
+/// Offer a submitted task to whoever runs it: the agents on its suite, or the
+/// workers that match a suite-less one.
+///
+/// Split from the submission itself so a batch can insert its tasks first and
+/// make one offer per suite, rather than one per task — see
+/// [`user_batch_submit_tasks`].
+async fn dispatch_submitted_task(
+    pool: &InfraPool,
+    submitted: SubmittedTask,
+) -> crate::error::Result<()> {
+    let SubmittedTask { task, suite_id } = submitted;
+
+    // A pending task is nobody's to run until it is triggered.
     if matches!(task.state, TaskState::Pending) {
-        return Ok(SubmitTaskResp {
-            task_id: task.task_id,
-            uuid: task.uuid,
-        });
+        return Ok(());
     };
 
-    // Not pending, notify agent/worker depending on whether it belongs to a suite
-    match suite {
-        Some(suite) => {
+    match suite_id {
+        Some(suite_id) => {
             // Suite tasks are pulled by agents from the suite, not pushed into
             // worker queues. This queues the task for whoever claims next and
-            // offers the suite: to a job already running it and waiting for
-            // work if there is one, and only otherwise to the idle agents that
-            // could start one.
-            crate::service::agent::notify_suite_tasks_ready(pool, suite.id, [task.id]).await;
+            // offers the suite: to the jobs already running it if they can take
+            // it, and to the idle agents that could start one for whatever they
+            // cannot.
+            crate::service::agent::notify_suite_tasks_ready(
+                pool,
+                suite_id,
+                [(task.id, task.priority)],
+            )
+            .await;
         }
         None => {
             let builder = pool.db.get_database_backend();
@@ -409,10 +445,7 @@ async fn internal_submit_task(
             }
         }
     }
-    Ok(SubmitTaskResp {
-        task_id: task.task_id,
-        uuid: task.uuid,
-    })
+    Ok(())
 }
 
 pub async fn user_submit_task(
@@ -420,7 +453,10 @@ pub async fn user_submit_task(
     creator_id: i64,
     req: SubmitTaskReq,
 ) -> crate::error::Result<SubmitTaskResp> {
-    internal_submit_task(pool, creator_id, Submitter::User, req).await
+    let submitted = internal_submit_task(pool, creator_id, Submitter::User, req).await?;
+    let resp = submitted.resp();
+    dispatch_submitted_task(pool, submitted).await?;
+    Ok(resp)
 }
 
 /// Submit the downstream child of a running task, on behalf of the worker or
@@ -436,7 +472,7 @@ pub async fn worker_submit_pending_task(
     parent_group_id: i64,
     req: SubmitTaskReq,
 ) -> crate::error::Result<SubmitTaskResp> {
-    internal_submit_task(
+    let submitted = internal_submit_task(
         pool,
         creator_id,
         Submitter::Task {
@@ -445,7 +481,10 @@ pub async fn worker_submit_pending_task(
         },
         req,
     )
-    .await
+    .await?;
+    let resp = submitted.resp();
+    dispatch_submitted_task(pool, submitted).await?;
+    Ok(resp)
 }
 
 pub async fn worker_trigger_pending_task(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<()> {
@@ -465,7 +504,8 @@ pub async fn worker_trigger_pending_task(pool: &InfraPool, uuid: Uuid) -> crate:
     // A suite task never enters the worker queues — agents pull it from its
     // suite. Wake the idle eligible agents instead.
     if let Some(suite_id) = task.task_suite_id {
-        crate::service::agent::notify_suite_tasks_ready(pool, suite_id, [task.id]).await;
+        crate::service::agent::notify_suite_tasks_ready(pool, suite_id, [(task.id, task.priority)])
+            .await;
         return Ok(());
     }
     // Batch add task to worker task queues
@@ -698,9 +738,9 @@ pub async fn user_cancel_task(
     user_id: i64,
     uuid: Uuid,
 ) -> crate::error::Result<()> {
-    let (task_id, username) = pool
+    let (task_id, suite_id, username) = pool
         .db
-        .transaction::<_, (i64, String), crate::error::Error>(|txn| {
+        .transaction::<_, (i64, Option<i64>, String), crate::error::Error>(|txn| {
             Box::pin(async move {
                 let task = ActiveTasks::Entity::find()
                     .filter(ActiveTasks::Column::Uuid.eq(uuid))
@@ -777,13 +817,18 @@ pub async fn user_cancel_task(
                     crate::service::suite::decrement_incomplete_tasks(txn, suite_id, 1, now)
                         .await?;
                 }
-                Ok((task.id, user_group_role.username))
+                Ok((task.id, suite_id, user_group_role.username))
             })
         })
         .await?;
     tracing::info!("User {} cancelled task {}", username, uuid);
     let _ = remove_task(task_id, pool)
         .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
+    // The suite half of the same errand: a cancelled task is not claimable, and
+    // the queue is what agents are offered work out of.
+    if let Some(suite_id) = suite_id {
+        pool.suite_queues.remove_ready(suite_id, [task_id]);
+    }
     Ok(())
 }
 
@@ -1408,6 +1453,25 @@ async fn decrement_incomplete_tasks_by_suite<C: ConnectionTrait>(
 /// Cancel multiple tasks by filter criteria.
 /// Only tasks in Ready or Pending state will be cancelled.
 /// User must have Admin or Write role in the task's group (validated by check_task_list_query).
+/// Take cancelled tasks out of their suites' dispatch queues.
+///
+/// A cancelled task is archived where it stood, so no agent ever claims it and
+/// nothing else would tell the suite it has stopped being claimable. The
+/// suite-less ones are the workers' and are handled by `remove_task`.
+fn remove_cancelled_from_suites_queue(
+    pool: &InfraPool,
+    cancelled: impl IntoIterator<Item = (Option<i64>, i64)>,
+) {
+    let mut by_suite: HashMap<i64, Vec<i64>> = HashMap::new();
+    for (suite_id, task_id) in cancelled {
+        let Some(suite_id) = suite_id else { continue };
+        by_suite.entry(suite_id).or_default().push(task_id);
+    }
+    for (suite_id, task_ids) in by_suite {
+        pool.suite_queues.remove_ready(suite_id, task_ids);
+    }
+}
+
 pub async fn cancel_tasks_by_filter(
     user_id: i64,
     pool: &InfraPool,
@@ -1492,9 +1556,9 @@ pub async fn cancel_tasks_by_filter(
 
     // Execute delete and insert in a single transaction
     // Total: 1 query using CTE (DELETE RETURNING + INSERT SELECT) regardless of task count or column count
-    let task_ids = pool
+    let cancelled = pool
         .db
-        .transaction::<_, Vec<i64>, crate::error::Error>(|txn| {
+        .transaction::<_, Vec<IdResult>, crate::error::Error>(|txn| {
             let cte = cte.clone();
             Box::pin(async move {
                 let now = TimeDateTimeWithTimeZone::now_utc();
@@ -1569,23 +1633,22 @@ pub async fn cancel_tasks_by_filter(
                 )
                 .await?;
 
-                let task_ids: Vec<i64> = cancelled.into_iter().map(|r| r.id).collect();
-
-                Ok(task_ids)
+                Ok(cancelled)
             })
         })
         .await?;
 
     // Remove tasks from dispatch queues
-    for task_id in &task_ids {
-        let _ = remove_task(*task_id, pool)
-            .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
+    for task in &cancelled {
+        let _ = remove_task(task.id, pool)
+            .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task.id, e));
     }
+    remove_cancelled_from_suites_queue(pool, cancelled.iter().map(|r| (r.task_suite_id, r.id)));
 
     tracing::info!("User {} cancelled tasks by filter {:?}", username, req);
 
     Ok(TasksCancelByFilterResp {
-        cancelled_count: task_ids.len() as u64,
+        cancelled_count: cancelled.len() as u64,
         group_name,
     })
 }
@@ -1684,90 +1747,94 @@ pub async fn cancel_tasks_by_uuids(
         // Total: 1 query using CTE (DELETE RETURNING + INSERT SELECT) per chunk
         let (task_ids, found_uuids) = pool
             .db
-            .transaction::<_, (Vec<i64>, HashSet<Uuid>), crate::error::Error>(|txn| {
-                let cte = cte.clone();
-                Box::pin(async move {
-                    let now = TimeDateTimeWithTimeZone::now_utc();
-                    let res = TaskResultSpec {
-                        exit_status: 0,
-                        msg: Some(crate::schema::TaskResultMessage::UserCancellation),
-                    };
-                    let result =
-                        serde_json::to_value(res).inspect_err(|e| tracing::error!("{}", e))?;
+            .transaction::<_, (Vec<(Option<i64>, i64)>, HashSet<Uuid>), crate::error::Error>(
+                |txn| {
+                    let cte = cte.clone();
+                    Box::pin(async move {
+                        let now = TimeDateTimeWithTimeZone::now_utc();
+                        let res = TaskResultSpec {
+                            exit_status: 0,
+                            msg: Some(crate::schema::TaskResultMessage::UserCancellation),
+                        };
+                        let result =
+                            serde_json::to_value(res).inspect_err(|e| tracing::error!("{}", e))?;
 
-                    // Build SELECT from the CTE
-                    let select_from_cte = Query::select()
-                        .expr(Expr::col(Alias::new("id")))
-                        .expr(Expr::col(Alias::new("creator_id")))
-                        .expr(Expr::col(Alias::new("group_id")))
-                        .expr(Expr::col(Alias::new("task_id")))
-                        .expr(Expr::col(Alias::new("uuid")))
-                        .expr(Expr::col(Alias::new("tags")))
-                        .expr(Expr::col(Alias::new("labels")))
-                        .expr(Expr::col(Alias::new("created_at")))
-                        .expr(Expr::value(now))
-                        .expr(Expr::value(TaskState::Cancelled))
-                        .expr(Expr::col(Alias::new("runner_uuid")))
-                        .expr(Expr::col(Alias::new("exec_options")))
-                        .expr(Expr::col(Alias::new("priority")))
-                        .expr(Expr::col(Alias::new("spec")))
-                        .expr(Expr::value(result.clone()))
-                        .expr(Expr::col(Alias::new("upstream_task_uuid")))
-                        .expr(Expr::col(Alias::new("downstream_task_uuid")))
-                        .expr(Expr::col(Alias::new("task_suite_id")))
-                        .from(Alias::new("deleted"))
-                        .to_owned();
+                        // Build SELECT from the CTE
+                        let select_from_cte = Query::select()
+                            .expr(Expr::col(Alias::new("id")))
+                            .expr(Expr::col(Alias::new("creator_id")))
+                            .expr(Expr::col(Alias::new("group_id")))
+                            .expr(Expr::col(Alias::new("task_id")))
+                            .expr(Expr::col(Alias::new("uuid")))
+                            .expr(Expr::col(Alias::new("tags")))
+                            .expr(Expr::col(Alias::new("labels")))
+                            .expr(Expr::col(Alias::new("created_at")))
+                            .expr(Expr::value(now))
+                            .expr(Expr::value(TaskState::Cancelled))
+                            .expr(Expr::col(Alias::new("runner_uuid")))
+                            .expr(Expr::col(Alias::new("exec_options")))
+                            .expr(Expr::col(Alias::new("priority")))
+                            .expr(Expr::col(Alias::new("spec")))
+                            .expr(Expr::value(result.clone()))
+                            .expr(Expr::col(Alias::new("upstream_task_uuid")))
+                            .expr(Expr::col(Alias::new("downstream_task_uuid")))
+                            .expr(Expr::col(Alias::new("task_suite_id")))
+                            .from(Alias::new("deleted"))
+                            .to_owned();
 
-                    // Build the INSERT SELECT statement with CTE
-                    let mut insert_stmt = InsertStatement::new()
-                        .into_table(ArchivedTasks::Entity)
-                        .columns([
-                            ArchivedTasks::Column::Id,
-                            ArchivedTasks::Column::CreatorId,
-                            ArchivedTasks::Column::GroupId,
-                            ArchivedTasks::Column::TaskId,
-                            ArchivedTasks::Column::Uuid,
-                            ArchivedTasks::Column::Tags,
-                            ArchivedTasks::Column::Labels,
-                            ArchivedTasks::Column::CreatedAt,
-                            ArchivedTasks::Column::UpdatedAt,
-                            ArchivedTasks::Column::State,
-                            ArchivedTasks::Column::RunnerUuid,
-                            ArchivedTasks::Column::ExecOptions,
-                            ArchivedTasks::Column::Priority,
-                            ArchivedTasks::Column::Spec,
-                            ArchivedTasks::Column::Result,
-                            ArchivedTasks::Column::UpstreamTaskUuid,
-                            ArchivedTasks::Column::DownstreamTaskUuid,
-                            // Without this the archived copy of a suite task
-                            // loses its suite, and the count below has nothing
-                            // to key on.
-                            ArchivedTasks::Column::TaskSuiteId,
-                        ])
-                        .to_owned();
+                        // Build the INSERT SELECT statement with CTE
+                        let mut insert_stmt = InsertStatement::new()
+                            .into_table(ArchivedTasks::Entity)
+                            .columns([
+                                ArchivedTasks::Column::Id,
+                                ArchivedTasks::Column::CreatorId,
+                                ArchivedTasks::Column::GroupId,
+                                ArchivedTasks::Column::TaskId,
+                                ArchivedTasks::Column::Uuid,
+                                ArchivedTasks::Column::Tags,
+                                ArchivedTasks::Column::Labels,
+                                ArchivedTasks::Column::CreatedAt,
+                                ArchivedTasks::Column::UpdatedAt,
+                                ArchivedTasks::Column::State,
+                                ArchivedTasks::Column::RunnerUuid,
+                                ArchivedTasks::Column::ExecOptions,
+                                ArchivedTasks::Column::Priority,
+                                ArchivedTasks::Column::Spec,
+                                ArchivedTasks::Column::Result,
+                                ArchivedTasks::Column::UpstreamTaskUuid,
+                                ArchivedTasks::Column::DownstreamTaskUuid,
+                                // Without this the archived copy of a suite task
+                                // loses its suite, and the count below has nothing
+                                // to key on.
+                                ArchivedTasks::Column::TaskSuiteId,
+                            ])
+                            .to_owned();
 
-                    insert_stmt.select_from(select_from_cte).unwrap();
-                    insert_stmt.returning_all();
-                    let insert_with_cte = insert_stmt.with(cte.into());
+                        insert_stmt.select_from(select_from_cte).unwrap();
+                        insert_stmt.returning_all();
+                        let insert_with_cte = insert_stmt.with(cte.into());
 
-                    let stmt = builder.build(&insert_with_cte);
+                        let stmt = builder.build(&insert_with_cte);
 
-                    let results: Vec<IdUuidResult> =
-                        IdUuidResult::find_by_statement(stmt).all(txn).await?;
+                        let results: Vec<IdUuidResult> =
+                            IdUuidResult::find_by_statement(stmt).all(txn).await?;
 
-                    decrement_incomplete_tasks_by_suite(
-                        txn,
-                        results.iter().map(|r| r.task_suite_id),
-                        now,
-                    )
-                    .await?;
+                        decrement_incomplete_tasks_by_suite(
+                            txn,
+                            results.iter().map(|r| r.task_suite_id),
+                            now,
+                        )
+                        .await?;
 
-                    let task_ids: Vec<i64> = results.iter().map(|r| r.id).collect();
-                    let found_uuids: HashSet<Uuid> = results.into_iter().map(|r| r.uuid).collect();
+                        let cancelled: Vec<(Option<i64>, i64)> =
+                            results.iter().map(|r| (r.task_suite_id, r.id)).collect();
+                        let found_uuids: HashSet<Uuid> =
+                            results.into_iter().map(|r| r.uuid).collect();
 
-                    Ok((task_ids, found_uuids))
-                })
-            })
+                        Ok((cancelled, found_uuids))
+                    })
+                },
+            )
             .await?;
 
         // Accumulate results from this chunk
@@ -1776,10 +1843,11 @@ pub async fn cancel_tasks_by_uuids(
     }
 
     // Remove tasks from dispatch queues
-    for task_id in &all_task_ids {
+    for (_, task_id) in &all_task_ids {
         let _ = remove_task(*task_id, pool)
             .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
     }
+    remove_cancelled_from_suites_queue(pool, all_task_ids.iter().copied());
 
     tracing::info!("User {} cancelled tasks by uuids {:?}", username, req);
 
@@ -1809,6 +1877,12 @@ impl From<PartialWorkerId> for i64 {
 
 /// Batch submit multiple tasks.
 /// Submits each task in the list and returns individual results for each (including failures).
+///
+/// The tasks are inserted one at a time — each is its own transaction, and one
+/// rejected task must not take the rest with it — but a suite hears about all of
+/// its new tasks **once**. Offering them one by one would rank and reserve the
+/// suite once per task, against a backlog that is still growing, and re-run the
+/// idle-agent query every time.
 pub async fn user_batch_submit_tasks(
     pool: &InfraPool,
     user_id: i64,
@@ -1821,20 +1895,41 @@ pub async fn user_batch_submit_tasks(
     }
 
     let mut results = Vec::with_capacity(req.tasks.len());
+    // A batch may spread over several suites: each request names its own.
+    let mut per_suite: HashMap<i64, Vec<(i64, i32)>> = HashMap::new();
 
     for task_req in req.tasks {
-        let result = user_submit_task(pool, user_id, task_req)
-            .await
-            .map_err(|e| match e {
-                crate::error::Error::AuthError(err) => ApiError::AuthError(err),
-                crate::error::Error::ApiError(e) => e,
-                _ => {
-                    tracing::error!("{}", e);
-                    ApiError::InternalServerError
+        let result = async {
+            let submitted = internal_submit_task(pool, user_id, Submitter::User, task_req).await?;
+            let resp = submitted.resp();
+            match submitted.suite_id {
+                // Held back to the end of the batch, when the whole of its
+                // suite's new work can be offered in one round.
+                Some(suite_id) if !matches!(submitted.task.state, TaskState::Pending) => {
+                    per_suite
+                        .entry(suite_id)
+                        .or_default()
+                        .push((submitted.task.id, submitted.task.priority));
                 }
-            })
-            .map_err(ErrorMsg::from);
+                _ => dispatch_submitted_task(pool, submitted).await?,
+            }
+            Ok::<_, Error>(resp)
+        }
+        .await
+        .map_err(|e| match e {
+            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+            crate::error::Error::ApiError(e) => e,
+            _ => {
+                tracing::error!("{}", e);
+                ApiError::InternalServerError
+            }
+        })
+        .map_err(ErrorMsg::from);
         results.push(result);
+    }
+
+    for (suite_id, tasks) in per_suite {
+        crate::service::agent::notify_suite_tasks_ready(pool, suite_id, tasks).await;
     }
 
     Ok(crate::schema::TasksSubmitResp { results })

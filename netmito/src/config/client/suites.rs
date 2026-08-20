@@ -62,9 +62,10 @@ pub struct CreateSuiteArgs {
     /// Number of workers each agent spawns for this suite
     #[arg(short, long, default_value_t = 1)]
     pub workers: u32,
-    /// Number of tasks the agent prefetches locally
-    #[arg(long, default_value_t = 16)]
-    pub prefetch: u32,
+    /// Claim a task only when a worker is free, instead of keeping the next
+    /// one ready. Costs a round trip per task; for long tasks only
+    #[arg(long, default_value_t = false)]
+    pub no_prefetch: bool,
     /// Provision hook, as a JSON exec spec: '{"args":["sh","-c","./setup.sh"],"terminal_output":true}'.
     /// Runs once before any task; a non-zero exit fails the job and its tasks never start
     #[arg(long, value_parser = parse_exec_spec)]
@@ -99,7 +100,7 @@ impl From<CreateSuiteArgs> for CreateTaskSuiteReq {
             worker_schedule: WorkerSchedulePlan::FixedWorkers {
                 worker_count: args.workers,
                 cpu_binding: None,
-                task_prefetch_count: args.prefetch,
+                prefetch: !args.no_prefetch,
             },
             exec_hooks,
         }

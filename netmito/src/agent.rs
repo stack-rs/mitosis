@@ -15,7 +15,10 @@
 use std::{
     collections::VecDeque,
     path::PathBuf,
-    sync::{atomic::AtomicUsize, Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -23,7 +26,10 @@ use crossfire::{MAsyncRx, MAsyncTx};
 use futures::{SinkExt as _, StreamExt as _};
 use reqwest::StatusCode;
 use speedy::{Readable as _, Writable as _};
-use tokio::{sync::watch, task::JoinHandle};
+use tokio::{
+    sync::{watch, Notify},
+    task::JoinHandle,
+};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -61,14 +67,30 @@ fn task_slots(suite: &TaskSuiteSpec) -> usize {
     }
 }
 
-/// How deep the job's task buffer runs: how many tasks it keeps claimed but not
-/// yet started. Floored at one, since a zero-deep buffer makes every task its own round trip.
-fn task_buffer_depth(suite: &TaskSuiteSpec) -> usize {
-    match suite.worker_schedule {
-        WorkerSchedulePlan::FixedWorkers {
-            task_prefetch_count,
-            ..
-        } => (task_prefetch_count as usize).max(1),
+/// What the slots tell the keeper as they work.
+///
+/// Shared by all of them, so it says how the job is doing rather than any one
+/// slot: how many tasks have ended in total, and that one just did.
+#[derive(Debug, Default)]
+struct SlotProgress {
+    /// Tasks that have ended, however they ended.
+    completed: AtomicUsize,
+    /// Raised with it, so a keeper the coordinator has told to hold — because
+    /// the job was holding as many tasks as it may at once — comes back for
+    /// another the moment there is somewhere to put it, rather than at the end
+    /// of a poll interval.
+    freed: Notify,
+}
+
+impl SlotProgress {
+    /// A slot is done with a task, whatever became of it.
+    fn task_ended(&self) {
+        self.completed.fetch_add(1, Ordering::Release);
+        self.freed.notify_one();
+    }
+
+    fn completed(&self) -> usize {
+        self.completed.load(Ordering::Acquire)
     }
 }
 
@@ -964,38 +986,35 @@ impl SuiteRunner {
     /// poll, and the decision to end the job. The slots only take what it hands
     /// them, so none of that is duplicated `slots` times.
     ///
-    /// The buffer has two halves. The deep half is `staged`, held here; the
-    /// shallow half is the channel, and its capacity is the low-water mark —
-    /// `send` parks until a slot takes one, which is what wakes the refill.
+    /// How much may be claimed at once is the coordinator's to say — it knows
+    /// the suite's schedule and what this job is already holding. The channel
+    /// holds one task per slot, so `send` parks once every slot has its next
+    /// task waiting, and `staged` holds whatever a batch brought beyond that.
     async fn execute_tasks(&self, suite: &TaskSuiteSpec, job: i64) -> Result<()> {
         let slots = task_slots(suite);
-        let depth = task_buffer_depth(suite);
         tracing::info!(
-            "Running the tasks of suite {} across {slots} slots, buffering {depth}",
+            "Running the tasks of suite {} across {slots} slots",
             suite.uuid,
         );
 
         let (task_tx, task_rx) = crossfire::mpmc::bounded_async::<WorkerTaskResp>(slots);
-        // Bumped by a slot once a task ends, however it ended. Paired with the
-        // keeper's own `pushed` count: equal means everything ever handed out
-        // has finished, which no snapshot of "are the slots idle" can say
-        // without racing a slot that has just taken a task.
-        let completed = Arc::new(AtomicUsize::new(0));
+        // Paired with the keeper's own `pushed` count: equal means everything
+        // ever handed out has finished, which no snapshot of "are the slots
+        // idle" can say without racing a slot that has just taken a task.
+        let progress = Arc::new(SlotProgress::default());
 
         let mut running = tokio::task::JoinSet::new();
         for slot in 0..slots {
             let runner = self.clone();
             let task_rx = task_rx.clone();
-            let completed = completed.clone();
-            running.spawn(async move { runner.run_slot(job, slot, task_rx, completed).await });
+            let progress = progress.clone();
+            running.spawn(async move { runner.run_slot(job, slot, task_rx, progress).await });
         }
         // Only the solots hold the receivers.
         drop(task_rx);
 
         // Keep filling the job to the buffer so that workers and continously working on it.
-        let filled = self
-            .fill_buffer(suite.uuid, task_tx, depth, completed)
-            .await;
+        let filled = self.fill_buffer(suite.uuid, task_tx, progress).await;
 
         while let Some(joined) = running.join_next().await {
             if let Err(e) = joined {
@@ -1014,8 +1033,7 @@ impl SuiteRunner {
         &self,
         suite_uuid: Uuid,
         task_tx: MAsyncTx<WorkerTaskResp>,
-        depth: usize,
-        completed: Arc<AtomicUsize>,
+        progress: Arc<SlotProgress>,
     ) -> Result<()> {
         let mut staged: VecDeque<WorkerTaskResp> = VecDeque::new();
         // Cloned once for the whole loop, not per hold: a bump that lands while
@@ -1047,26 +1065,23 @@ impl SuiteRunner {
             }
 
             if staged.is_empty() {
-                // What the buffer is short by. Floored at one: with a prefetch
-                // count of one the channel alone can already hold the whole
-                // budget, and asking for nothing would spin.
-                let want = depth.saturating_sub(task_tx.len()).max(1);
-                let resp = self.fetch_tasks(suite_uuid, want as u32).await?;
+                let resp = self.fetch_tasks(suite_uuid).await?;
                 if resp.tasks.is_empty() {
                     // This expression means:
                     // When 1. no thread is actually working (pushed == completed)
                     // and 2. the suite is closed,
                     // then we can stop this job.
-                    if !resp.hold_job_open
-                        && completed.load(std::sync::atomic::Ordering::Acquire) == pushed
-                    {
+                    if !resp.hold_job_open && progress.completed() == pushed {
                         tracing::debug!("Suite {suite_uuid} is idle and has no more tasks");
                         return Ok(());
                     }
                     if !holding {
+                        // Either the suite is drained or this job is holding as
+                        // much as it may at once; both end here, and both end
+                        // when something changes rather than on a timer.
                         tracing::debug!(
-                            "Suite {suite_uuid} is drained but still open; job {} stays up for \
-                             more work",
+                            "Nothing to claim from suite {suite_uuid} for now; job {} stays up \
+                             for more work",
                             self.job_id
                         );
                         holding = true;
@@ -1087,13 +1102,16 @@ impl SuiteRunner {
                                 self.job_id
                             );
                         }
+                        // A slot came free, so a batch we were too full to be
+                        // given may be ours now.
+                        _ = progress.freed.notified() => {}
                         _ = tokio::time::sleep(HOLD_POLL_INTERVAL) => {}
                     }
                     continue;
                 }
                 if holding {
                     tracing::debug!(
-                        "Suite {suite_uuid} has work again; job {} resumes",
+                        "Suite {suite_uuid} has work for job {} again; it resumes",
                         self.job_id
                     );
                     holding = false;
@@ -1130,7 +1148,7 @@ impl SuiteRunner {
         job: i64,
         slot: usize,
         task_rx: MAsyncRx<WorkerTaskResp>,
-        completed: Arc<AtomicUsize>,
+        progress: Arc<SlotProgress>,
     ) {
         let dir = self.cache_path.join(format!("task-{slot}"));
         loop {
@@ -1152,7 +1170,7 @@ impl SuiteRunner {
                     task.uuid,
                     e
                 );
-                completed.fetch_add(1, std::sync::atomic::Ordering::Release);
+                progress.task_ended();
                 continue;
             }
             let mut executor = Executor {
@@ -1177,8 +1195,9 @@ impl SuiteRunner {
             }
 
             // After the task is over, whatever became of it: the keeper reads
-            // this to tell "still working" from "everything is done".
-            completed.fetch_add(1, std::sync::atomic::Ordering::Release);
+            // this to tell "still working" from "everything is done", and to
+            // know it has room for another.
+            progress.task_ended();
         }
         tracing::debug!("Slot {slot} of job {} released", self.job_id);
     }
@@ -1283,15 +1302,12 @@ impl SuiteRunner {
         }
     }
 
-    async fn fetch_tasks(&self, suite_uuid: Uuid, max_count: u32) -> Result<FetchTasksResp> {
+    async fn fetch_tasks(&self, suite_uuid: Uuid) -> Result<FetchTasksResp> {
         let resp = self
             .http_client
             .post(self.api_url("agents/tasks/fetch").as_str())
             .bearer_auth(&self.token)
-            .json(&FetchTasksReq {
-                suite_uuid,
-                max_count,
-            })
+            .json(&FetchTasksReq { suite_uuid })
             .send()
             .await
             .map_err(error::map_reqwest_err)?;

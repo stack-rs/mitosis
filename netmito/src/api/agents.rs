@@ -202,10 +202,9 @@ async fn fetch_tasks(
     State(pool): State<InfraPool>,
     Json(req): Json<FetchTasksReq>,
 ) -> Result<Json<FetchTasksResp>, ApiError> {
-    let resp =
-        service::agent::task::agent_fetch_tasks(a.id, a.uuid, &pool, req.suite_uuid, req.max_count)
-            .await
-            .map_err(map_service_error)?;
+    let resp = service::agent::task::agent_fetch_tasks(a.id, a.uuid, &pool, req.suite_uuid)
+        .await
+        .map_err(map_service_error)?;
     Ok(Json(resp))
 }
 

@@ -193,7 +193,7 @@ pub async fn user_create_task_suite(
         // TODO: this should finally be adjusted to some more flexible definitions
         WorkerSchedulePlan::FixedWorkers {
             worker_count: _worker_count,
-            task_prefetch_count: _task_prefetch_count,
+            prefetch: _prefetch,
             ..
         } => {
             // TODO: validate the request

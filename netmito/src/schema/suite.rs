@@ -58,9 +58,17 @@ pub enum WorkerSchedulePlan {
         /// Optional CPU core binding strategy
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cpu_binding: Option<CpuBinding>,
-        /// How many tasks the agent keeps claimed but not yet started (default: 16)
-        #[serde(default = "default_prefetch_count")]
-        task_prefetch_count: u32,
+        /// Whether the agent may hold claimed tasks beyond the ones it is
+        /// running, so a slot that frees has one waiting instead of paying a
+        /// round trip for it. The depth is not configurable: it is one more
+        /// worker's worth per worker, which is what makes the agent's buffer
+        /// the same size as its slot count.
+        ///
+        /// Turning it off costs a round trip per task and is worth it only for
+        /// suites whose tasks run far longer than that, where holding a task
+        /// claimed on a busy agent is worse than leaving it for a free one.
+        #[serde(default = "default_prefetch")]
+        prefetch: bool,
     },
     // Future extensions:
     // AutoScale { min_workers, max_workers, scale_up_threshold, scale_down_threshold, ... }
@@ -68,8 +76,8 @@ pub enum WorkerSchedulePlan {
     // Priority { high_priority_workers, low_priority_workers, ... }
 }
 
-fn default_prefetch_count() -> u32 {
-    16
+fn default_prefetch() -> bool {
+    true
 }
 
 /// CPU core binding configuration

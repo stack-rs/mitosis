@@ -10,11 +10,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::InfraPool,
-    entity::{
-        agents as Agent,
-        state::{AgentState, SuiteJobState},
-    },
-    service::agent::job,
+    entity::{agents as Agent, state::AgentState},
+    service::agent::{retire_agent, RetireCause},
 };
 
 /// Ceiling on any single database call made while handling a timeout, so a
@@ -112,38 +109,19 @@ impl AgentHeartbeatQueue {
             "Agent heartbeat timed out — marking offline and reclaiming its work"
         );
 
-        let now = TimeDateTimeWithTimeZone::now_utc();
-        match tokio::time::timeout(DB_TIMEOUT, mark_offline(&self.pool, agent_id, now)).await {
+        // The whole teardown is one service call, so a timeout here leaves it
+        // either done or untried rather than half-applied — and the agent is
+        // already off the queue, so nothing retries it. What survives that is
+        // the next `accept` finding a suite reserved for a job that no longer
+        // exists, which lapses on its own.
+        match tokio::time::timeout(
+            DB_TIMEOUT,
+            retire_agent(&self.pool, agent_id, RetireCause::HeartbeatTimeout),
+        )
+        .await
+        {
             Ok(res) => res?,
-            Err(_) => {
-                tracing::warn!(agent_id, "Marking the agent offline timed out");
-                return Ok(());
-            }
-        }
-
-        match tokio::time::timeout(
-            DB_TIMEOUT,
-            job::terminate_agent_jobs(&self.pool.db, agent_id, SuiteJobState::Lost, now),
-        )
-        .await
-        {
-            Ok(res) => {
-                res?;
-            }
-            Err(_) => tracing::warn!(agent_id, "Marking the agent's jobs Lost timed out"),
-        }
-
-        match tokio::time::timeout(
-            DB_TIMEOUT,
-            // The agent is gone: take back what it holds in every suite.
-            job::reclaim_agent_tasks(&self.pool.db, agent.uuid, None, now),
-        )
-        .await
-        {
-            Ok(res) => {
-                res?;
-            }
-            Err(_) => tracing::warn!(agent_id, "Reclaiming the agent's tasks timed out"),
+            Err(_) => tracing::warn!(agent_id, "Retiring the timed-out agent timed out"),
         }
 
         Ok(())

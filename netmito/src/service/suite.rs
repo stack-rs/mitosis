@@ -793,7 +793,12 @@ pub async fn user_cancel_task_suite(
     // lets the agent walk it through cleanup to `Completed`.
     let running_agents = match op {
         CancelTaskSuiteOp::Force => {
-            crate::service::agent::job::kill_suite_jobs(&pool.db, suite_id, now).await?
+            let killed =
+                crate::service::agent::job::kill_suite_jobs(&pool.db, suite_id, now).await?;
+            // Every job of the suite is over at once, and the suite itself has
+            // nothing left to hand out.
+            pool.suite_queues.close_suite(suite_id);
+            killed
         }
         CancelTaskSuiteOp::Graceful => {
             crate::service::agent::job::agents_running_suite(&pool.db, suite_id).await?

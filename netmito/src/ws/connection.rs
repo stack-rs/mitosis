@@ -11,6 +11,10 @@
 //! (`AgentWsMessage::Ack`) or implicitly via the `last_notification_id` on its
 //! next heartbeat. A heartbeat read is a *peek*, so a response lost in flight
 //! is redelivered instead of dropped.
+//!
+//! **Nudges coalesce.** A "come and look" event whose twin is still waiting in
+//! the buffer is dropped rather than queued ([`AgentNotification::coalesces_with`]):
+//! a hundred tasks submitted into one suite are one thing to go and look at.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -82,7 +86,14 @@ impl AgentSession {
         }
     }
 
-    fn push(&mut self, event: AgentNotification) -> WsNotificationEvent {
+    /// Queue an event, unless one already waiting makes it redundant.
+    ///
+    /// `None` means nothing was queued and nothing should be pushed: a nudge
+    /// the agent has not acted on yet is still the same nudge.
+    fn push(&mut self, event: AgentNotification) -> Option<WsNotificationEvent> {
+        if self.buffer.iter().any(|e| e.event.coalesces_with(&event)) {
+            return None;
+        }
         self.counter = self.counter.saturating_add(1);
         let event = WsNotificationEvent {
             id: self.counter,
@@ -97,7 +108,7 @@ impl AgentSession {
                 );
             }
         }
-        event
+        Some(event)
     }
 
     /// Drop everything the agent has confirmed it processed.
@@ -187,7 +198,9 @@ impl AgentWsRouter {
             }
             RouterOp::Notify { uuid, event } => {
                 let session = self.sessions.entry(uuid).or_insert_with(AgentSession::new);
-                let event = session.push(event);
+                let Some(event) = session.push(event) else {
+                    return;
+                };
                 if let Some(sender) = session.sender.clone() {
                     Self::try_push(&sender, &event, uuid);
                 }

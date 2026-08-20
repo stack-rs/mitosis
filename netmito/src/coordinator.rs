@@ -247,6 +247,9 @@ impl MitoCoordinator {
         });
 
         restore_workers(&infra_pool).await?;
+        // Agents run through a coordinator restart, so their jobs have to be
+        // back in the dispatch state before the first submission looks for one.
+        crate::service::agent::queue::restore(&infra_pool).await?;
         // Agents keep their rows across a coordinator restart, so tell them this
         // is a new boot and their notification sequence starts over.
         crate::service::agent::notify_agents_of_restart(&infra_pool).await?;

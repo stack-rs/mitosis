@@ -485,12 +485,11 @@ pub struct WsNotificationEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, Readable, Writable)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentNotification {
-    /// A suite is available for this agent to execute.
-    SuiteAvailable {
-        /// Optional hint about which suite (the agent still fetches)
-        suite_uuid: Option<Uuid>,
-        priority: i32,
-    },
+    /// Some suite this agent could run has work. Deliberately unaddressed: by
+    /// the time the agent asks, the best suite for it may not be the one that
+    /// prompted this, so the choice is made in `accept` — against the state
+    /// then, and under the suite's lock — rather than named here.
+    SuiteAvailable,
 
     /// Stop the current suite and pick up a higher-priority one.
     ///
@@ -531,6 +530,33 @@ pub enum AgentNotification {
     /// declaration order, so appending is compatible with older agents and
     /// inserting silently renumbers everything after it.
     StopJob { suite_uuid: Uuid, graceful: bool },
+
+    /// The job this agent is running on `suite_uuid` has tasks waiting: fetch
+    /// now instead of sitting out the rest of the hold interval. Sent only to
+    /// jobs that came up short on their last fetch, and paired with a
+    /// reservation that keeps the tasks for them while they come back.
+    ///
+    /// An agent that is not running this suite ignores it.
+    TasksAvailable { suite_uuid: Uuid },
+}
+
+impl AgentNotification {
+    /// Whether an identical event already waiting unacknowledged says everything
+    /// this one would.
+    ///
+    /// True only for the "come and look" nudges, which carry no state of their
+    /// own: the agent re-reads the real thing over HTTP, so a second copy buys
+    /// nothing and a burst of submissions must not push the buffer's older,
+    /// stateful events out.
+    pub fn coalesces_with(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::SuiteAvailable, Self::SuiteAvailable) => true,
+            (Self::TasksAvailable { suite_uuid: a }, Self::TasksAvailable { suite_uuid: b }) => {
+                a == b
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Message from an agent to the coordinator over the WebSocket.

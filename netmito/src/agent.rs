@@ -23,7 +23,7 @@ use crossfire::{MAsyncRx, MAsyncTx};
 use futures::{SinkExt as _, StreamExt as _};
 use reqwest::StatusCode;
 use speedy::{Readable as _, Writable as _};
-use tokio::task::JoinHandle;
+use tokio::{sync::watch, task::JoinHandle};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -75,22 +75,14 @@ fn task_buffer_depth(suite: &TaskSuiteSpec) -> usize {
 /// How often a poll-based `watch` re-asks the coordinator.
 const WATCH_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
-/// How often a job with nothing to do re-checks its suite for late work. This is
-/// the latency a task submitted into a warm job pays before it starts.
+/// How often a job with nothing to do re-checks its suite for late work. The
+/// backstop, not the mechanism: a task submitted into a suite this job is
+/// holding is pushed to it as `TasksAvailable`, and this only covers the times
+/// the push cannot arrive — a dropped socket, or a task one of our own slots
+/// spawned.
 const HOLD_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct MitoAgent;
-
-/// What the agent should claim next, recorded by a notification and consumed in
-/// the idle branch of the main loop. Distinct from "nothing pending", so an idle
-/// agent never polls unless the coordinator signalled work.
-#[derive(Debug, Clone, Copy)]
-enum PendingSuite {
-    /// Work exists but was not named — take whatever the coordinator offers.
-    Any,
-    /// A specific suite was named; target it directly.
-    Specific(Uuid),
-}
 
 struct AgentClient {
     coordinator_addr: Url,
@@ -102,7 +94,7 @@ struct AgentClient {
     coordinator_boot_id: Option<Uuid>,
     state: AgentState,
     assigned_suite_uuid: Option<Uuid>,
-    pending_suite: Option<PendingSuite>,
+    has_pending_suite: bool,
     heartbeat_interval: Duration,
     connect_retry_interval: Duration,
     /// How often an idle agent asks for a suite unprompted; `None` waits for a
@@ -128,6 +120,11 @@ struct AgentClient {
     /// Set by a graceful `Shutdown` notification or by Ctrl+C: finish the
     /// current suite, then stop instead of taking another.
     stop_after_current: bool,
+    /// Bumped when the coordinator says the running job's suite has tasks. A
+    /// counter rather than a flag: the receiver only has to see that it moved,
+    /// and a bump that lands while the job is fetching is still there when it
+    /// next looks.
+    fetch_wake: watch::Sender<u64>,
 }
 
 impl MitoAgent {
@@ -263,7 +260,7 @@ impl MitoAgent {
             assigned_suite_uuid: None,
             // Registration is itself a reason to look for work: the coordinator
             // could not have notified us before we existed.
-            pending_suite: Some(PendingSuite::Any),
+            has_pending_suite: false,
             heartbeat_interval: config.heartbeat_interval,
             connect_retry_interval: config.connect_retry_interval,
             idle_poll_interval: config.idle_poll_interval,
@@ -276,6 +273,7 @@ impl MitoAgent {
             current_run: None,
             shutdown_token: CancellationToken::new(),
             stop_after_current: false,
+            fetch_wake: watch::Sender::new(0),
         };
 
         client.run_loop().await
@@ -442,7 +440,7 @@ impl AgentClient {
                     // When the agent is in busy state, the self.advance returns almost immediately,
                     // which shouldn't cause any trouble.
                     if self.state == AgentState::Idle && !self.stop_after_current {
-                        self.note_pending_suite(None);
+                        self.has_pending_suite = true;
                     }
                 }
             }
@@ -500,24 +498,12 @@ impl AgentClient {
         })
     }
 
-    fn note_pending_suite(&mut self, suite_uuid: Option<Uuid>) {
-        match suite_uuid {
-            // A named suite always wins: a specific target beats the generic hint.
-            Some(uuid) => self.pending_suite = Some(PendingSuite::Specific(uuid)),
-            None => {
-                if self.pending_suite.is_none() {
-                    self.pending_suite = Some(PendingSuite::Any);
-                }
-            }
-        }
-    }
-
     /// Wind down and stop: the tasks in hand finish and cleanup runs, but
     /// nothing more is claimed and no next suite is picked. An idle agent
     /// leaves the loop on the very next pass.
     fn begin_graceful_shutdown(&mut self) {
         self.stop_after_current = true;
-        self.pending_suite = None;
+        self.has_pending_suite = false;
         if let Some(token) = &self.drain_token {
             token.cancel();
         }
@@ -525,12 +511,20 @@ impl AgentClient {
 
     fn handle_notification(&mut self, notification: AgentNotification) {
         match notification {
-            AgentNotification::SuiteAvailable {
-                suite_uuid,
-                priority,
-            } => {
-                tracing::debug!(?suite_uuid, priority, "Suite available");
-                self.note_pending_suite(suite_uuid);
+            AgentNotification::SuiteAvailable => {
+                tracing::debug!("A suite is available");
+                self.has_pending_suite = true;
+            }
+            AgentNotification::TasksAvailable { suite_uuid } => {
+                // For the job we are running, not for the idle loop: the
+                // coordinator has tasks held for this job and is asking it to
+                // come back now rather than at the end of its hold interval.
+                if self.assigned_suite_uuid == Some(suite_uuid) {
+                    tracing::debug!(%suite_uuid, "Tasks are waiting for this job");
+                    self.fetch_wake.send_modify(|n| *n = n.wrapping_add(1));
+                } else {
+                    tracing::debug!(%suite_uuid, "Ignoring a task offer for a suite we left");
+                }
             }
             AgentNotification::PreemptSuite {
                 new_suite_uuid,
@@ -545,7 +539,7 @@ impl AgentClient {
                     if let Some(token) = &self.job_token {
                         token.cancel();
                     }
-                    self.note_pending_suite(Some(new_suite_uuid));
+                    self.has_pending_suite = true;
                 }
             }
             AgentNotification::SuiteCancelled { suite_uuid, reason } => {
@@ -646,16 +640,14 @@ impl AgentClient {
                 }
                 // Act only on a signal: a notification, the re-check the
                 // coordinator runs on every heartbeat, or the idle poll.
-                let target = match self.pending_suite.take() {
-                    None => return Ok(()),
-                    Some(PendingSuite::Any) => None,
-                    Some(PendingSuite::Specific(uuid)) => Some(uuid),
-                };
+                if !self.has_pending_suite {
+                    return Ok(());
+                }
 
                 // One attempt per signal: the slot was cleared above, so
                 // "nothing available" leaves us idle until the next
                 // notification rather than spinning.
-                let Some((suite, job, job_id)) = self.fetch_suite(target).await? else {
+                let Some((suite, job, job_id)) = self.fetch_suite().await? else {
                     return Ok(());
                 };
                 tracing::info!("Accepted suite {} as job {job_id}", suite.uuid);
@@ -674,6 +666,7 @@ impl AgentClient {
                     cache_path: self.cache_path.join("job"),
                     job_token,
                     drain_token,
+                    fetch_wake: self.fetch_wake.subscribe(),
                 };
                 self.current_run = Some(tokio::spawn(runner.run(suite, job)));
                 self.state = AgentState::Executing;
@@ -689,7 +682,7 @@ impl AgentClient {
                     if let Some(handle) = self.current_run.take() {
                         match handle.await {
                             // `complete` said more work is waiting for us.
-                            Ok(true) => self.note_pending_suite(None),
+                            Ok(true) => self.has_pending_suite = true,
                             Ok(false) => {}
                             Err(e) => tracing::error!("The suite runner task failed: {e}"),
                         }
@@ -713,15 +706,12 @@ impl AgentClient {
     ///
     /// The suite handed back need not be the one asked for: a stale hint is
     /// answered with the best available instead.
-    async fn fetch_suite(
-        &self,
-        suite_uuid: Option<Uuid>,
-    ) -> Result<Option<(TaskSuiteSpec, i64, i32)>> {
+    async fn fetch_suite(&self) -> Result<Option<(TaskSuiteSpec, i64, i32)>> {
         let resp = self
             .http_client
             .post(self.api_url("agents/suite").as_str())
             .bearer_auth(&self.token)
-            .json(&AcceptSuiteReq { suite_uuid })
+            .json(&AcceptSuiteReq { suite_uuid: None })
             .send()
             .await
             .map_err(error::map_reqwest_err)?;
@@ -840,6 +830,10 @@ struct SuiteRunner {
     /// but had not started is abandoned; the coordinator reclaims it on
     /// `complete`.
     drain_token: CancellationToken,
+    /// Moves when the coordinator says this suite has tasks waiting for us. It
+    /// is what turns the hold below from a poll into a push; the poll stays as
+    /// the backstop for a dropped socket.
+    fetch_wake: watch::Receiver<u64>,
 }
 
 impl SuiteRunner {
@@ -1024,6 +1018,9 @@ impl SuiteRunner {
         completed: Arc<AtomicUsize>,
     ) -> Result<()> {
         let mut staged: VecDeque<WorkerTaskResp> = VecDeque::new();
+        // Cloned once for the whole loop, not per hold: a bump that lands while
+        // we are mid-fetch is then still unseen when we come back to wait on it.
+        let mut wake = self.fetch_wake.clone();
         // How many tasks have been handed to the slots.
         let mut pushed: usize = 0;
         // Log-only edge detector, so a hold is announced once rather than once
@@ -1074,15 +1071,22 @@ impl SuiteRunner {
                         );
                         holding = true;
                     }
-                    // The coordinator only notifies *idle* agents of a
-                    // submission, and we are Executing, so the poll is what
-                    // finds late work — including a task a running one spawned.
+                    // A submission into a suite we are holding is pushed to
+                    // us, so the wake is the normal way out of here; the poll
+                    // covers a dropped socket and a task a running one spawned
+                    // while the push was in flight.
                     tokio::select! {
                         _ = self.job_token.cancelled() => return Ok(()),
                         // The checks at the top of the loop would catch this
                         // too; waking on it here is what keeps a wind-down from
                         // sitting out the poll interval first.
                         _ = self.drain_token.cancelled() => return Ok(()),
+                        _ = wake.changed() => {
+                            tracing::debug!(
+                                "Job {} was told suite {suite_uuid} has tasks",
+                                self.job_id
+                            );
+                        }
                         _ = tokio::time::sleep(HOLD_POLL_INTERVAL) => {}
                     }
                     continue;

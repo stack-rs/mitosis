@@ -8,6 +8,14 @@
 //! agents step over each other's locked rows instead of contending, so no two
 //! agents can claim the same task and none of them block.
 //!
+//! [`queue::SuiteQueues`] sits in front of that as a hint and a policy gate: the
+//! ids it has queued for the suite are tried first, and while the suite is
+//! reserved for the jobs already on it, everybody else is answered empty. It
+//! never decides what a claim *means* — the transaction below does, against the
+//! database.
+//!
+//! [`queue::SuiteQueues`]: crate::service::agent::queue::SuiteQueues
+//!
 //! ## Reporting
 //!
 //! Agents use the same [`ReportTaskOp`] variants as workers, with the suite job
@@ -72,25 +80,53 @@ pub async fn agent_fetch_tasks(
 
     let now = TimeDateTimeWithTimeZone::now_utc();
     let suite_id = suite.id;
+
+    // Read from the same snapshot as the eligibility check above, which is at
+    // most a claim-transaction old. Erring on the side of `true` for a suite the
+    // sweep has just settled only costs one more poll.
+    let hold_job_open = matches!(suite.state, TaskSuiteState::Open);
+
+    // While a suite is reserved for the jobs already running it, everyone else
+    // is answered as if it were drained. `hold_job_open` still stands: an agent
+    // that is holding stays holding, and comes back when the window is over.
+    let Some(hinted) = pool
+        .suite_queues
+        .take(suite_id, agent_id, max_count as usize)
+    else {
+        tracing::debug!(
+            agent_uuid = %agent_uuid,
+            suite_uuid = %suite_uuid,
+            "Suite is reserved for the agents already running it; handing out nothing"
+        );
+        pool.suite_queues.served(suite_id, agent_id, 0);
+        return Ok(FetchTasksResp {
+            tasks: Vec::new(),
+            hold_job_open,
+        });
+    };
+
     let claimed = pool
         .db
         .transaction::<_, Vec<ActiveTasks::Model>, Error>(|txn| {
             Box::pin(async move {
-                // TODO: serve claims from a per-suite in-memory priority queue
-                // refilled from the database in batches, falling back to this
-                // query
-                let candidates = ActiveTasks::Entity::find()
-                    .filter(ActiveTasks::Column::TaskSuiteId.eq(suite_id))
-                    .filter(ActiveTasks::Column::State.eq(TaskState::Ready))
-                    .order_by_desc(ActiveTasks::Column::Priority)
-                    .order_by_asc(ActiveTasks::Column::Id)
-                    .limit(max_count as u64)
-                    .lock_with_behavior(
-                        sea_orm::sea_query::LockType::Update,
-                        sea_orm::sea_query::LockBehavior::SkipLocked,
-                    )
-                    .all(txn)
-                    .await?;
+                // The queued ids first: they are this suite's newest work, and
+                // taking them by id skips the ordered scan. They are only a
+                // hint, so any that are no longer `Ready` simply do not come
+                // back, and the query below makes up the difference.
+                let mut candidates = if hinted.is_empty() {
+                    Vec::new()
+                } else {
+                    claim_candidates(txn, suite_id, Some(hinted), max_count).await?
+                };
+                if candidates.len() < max_count as usize {
+                    let want = max_count - candidates.len() as u32;
+                    let claimed: Vec<i64> = candidates.iter().map(|t| t.id).collect();
+                    for task in claim_candidates(txn, suite_id, None, want).await? {
+                        if !claimed.contains(&task.id) {
+                            candidates.push(task);
+                        }
+                    }
+                }
                 if candidates.is_empty() {
                     return Ok(Vec::new());
                 }
@@ -108,6 +144,9 @@ pub async fn agent_fetch_tasks(
             })
         })
         .await?;
+
+    // Coming back empty is how a job says it is holding with room to spare.
+    pool.suite_queues.served(suite_id, agent_id, claimed.len());
 
     let mut tasks = Vec::with_capacity(claimed.len());
     for task in claimed {
@@ -136,14 +175,41 @@ pub async fn agent_fetch_tasks(
         count = tasks.len(),
         "Agent claimed tasks from a suite"
     );
-    // Read from the same snapshot as the eligibility check above, which is at
-    // most a claim-transaction old. Erring on the side of `true` for a suite the
-    // sweep has just settled only costs one more poll.
-    let hold_job_open = matches!(suite.state, TaskSuiteState::Open);
     Ok(FetchTasksResp {
         tasks,
         hold_job_open,
     })
+}
+
+/// Lock up to `limit` of a suite's claimable tasks for the caller's transaction,
+/// either from a set of candidate ids or, with `ids` as `None`, in priority
+/// order across the whole suite.
+///
+/// `SKIP LOCKED` is what makes this safe to run concurrently: agents step over
+/// each other's locked rows instead of contending, so no two can claim the same
+/// task and none of them block.
+async fn claim_candidates<C: ConnectionTrait>(
+    txn: &C,
+    suite_id: i64,
+    ids: Option<Vec<i64>>,
+    limit: u32,
+) -> Result<Vec<ActiveTasks::Model>> {
+    let mut query = ActiveTasks::Entity::find()
+        .filter(ActiveTasks::Column::TaskSuiteId.eq(suite_id))
+        .filter(ActiveTasks::Column::State.eq(TaskState::Ready));
+    if let Some(ids) = ids {
+        query = query.filter(ActiveTasks::Column::Id.is_in(ids));
+    }
+    Ok(query
+        .order_by_desc(ActiveTasks::Column::Priority)
+        .order_by_asc(ActiveTasks::Column::Id)
+        .limit(limit as u64)
+        .lock_with_behavior(
+            sea_orm::sea_query::LockType::Update,
+            sea_orm::sea_query::LockBehavior::SkipLocked,
+        )
+        .all(txn)
+        .await?)
 }
 
 /// Report the result of a task this agent claimed.

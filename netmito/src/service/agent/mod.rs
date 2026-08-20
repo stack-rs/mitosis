@@ -15,6 +15,15 @@
 //! `suite_agent_jobs` row whose opaque id the agent echoes on every later call.
 //! `start`/`cleanup`/`complete` advance that row and the agent state in step.
 //!
+//! ## How work is offered
+//!
+//! A suite that gains a task is offered in two tiers ([`notify_suite_available`]):
+//! a job already running it and waiting for work is told directly and the suite
+//! is briefly reserved for it, and only if there is no such job are the idle
+//! eligible agents nudged. The nudge names no suite — which one is best for an
+//! agent is decided in [`agent_accept_suite`], under the suite's lock, against
+//! the state at the moment it asks. [`queue`] holds the in-memory side of this.
+//!
 //! ## No automatic preemption (yet)
 //!
 //! An agent that has accepted a suite runs it to completion; nothing takes it
@@ -37,9 +46,10 @@ pub mod heartbeat;
 pub mod hook;
 pub mod job;
 pub mod matching;
+pub mod queue;
 pub mod task;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use sea_orm::sea_query::extension::postgres::PgExpr;
 use sea_orm::sea_query::{Alias, PgFunc, Query};
@@ -105,9 +115,9 @@ pub async fn user_register_agent(
         .map(serde_json::to_value)
         .transpose()?;
 
-    let (agent_uuid, agent_id, reused) = pool
+    let (agent_uuid, agent_id, reused, retired) = pool
         .db
-        .transaction::<_, (Uuid, i64, bool), Error>(|txn| {
+        .transaction::<_, (Uuid, i64, bool, Option<RetiredWork>), Error>(|txn| {
             Box::pin(async move {
                 // Exactly one group holds Admin over the agent, and that role is
                 // the only way it is ever shut down. Unless the caller names a
@@ -170,6 +180,7 @@ pub async fn user_register_agent(
                     .one(txn)
                     .await?;
 
+                let mut retired = None;
                 let (agent, reused) = match existing {
                     Some(machine) => {
                         let agent = Agent::Entity::find_by_id(machine.agent_id)
@@ -182,15 +193,33 @@ pub async fn user_register_agent(
                                     machine.agent_id
                                 ))
                             })?;
+                        // A machine registering again means the process that
+                        // held this agent is gone, whatever it still looks like
+                        // it is doing. Closing it out here, in the transaction
+                        // that re-adopts it, is what keeps its jobs and the
+                        // tasks it was holding from waiting on a heartbeat that
+                        // will never lapse. Deliberately after the permission
+                        // checks above: a machine code must not be enough to
+                        // tear an agent down.
                         let agent_state = agent.state;
+                        if agent_state != AgentState::Offline {
+                            retired = Some(
+                                retire_agent_writes(
+                                    txn,
+                                    agent.id,
+                                    agent.uuid,
+                                    RetireCause::Reregistered,
+                                    now,
+                                )
+                                .await?,
+                            );
+                        }
                         let mut agent: Agent::ActiveModel = agent.into();
                         agent.tags = Set(tags);
                         agent.labels = Set(labels);
-                        // A restarting agent comes back Idle. If the previous
-                        // process died mid-job, that job is still in flight;
-                        // the heartbeat queue will time it out and reclaim its
-                        // tasks. Clearing the assignment here keeps the fresh
-                        // process from being handed a suite it never accepted.
+                        // A restarting agent comes back Idle, with nothing
+                        // assigned: the retirement above has already closed out
+                        // whatever the previous process was running.
                         agent.state = Set(AgentState::Idle);
                         agent.assigned_task_suite_id = Set(None);
                         agent.last_heartbeat = Set(now);
@@ -265,10 +294,24 @@ pub async fn user_register_agent(
                     .await?;
                 }
 
-                Ok((agent.uuid, agent.id, reused))
+                Ok((agent.uuid, agent.id, reused, retired))
             })
         })
         .await?;
+
+    // Before the heartbeat below: the follow-through stops tracking the agent
+    // that just went, and the fresh one has to be tracked after that, not
+    // before.
+    if let Some(retired) = retired {
+        retire_agent_post_commit(
+            pool,
+            agent_id,
+            agent_uuid,
+            RetireCause::Reregistered,
+            retired,
+        )
+        .await;
+    }
 
     // An agent is a long-lived daemon: without an explicit lifetime its token
     // never expires.
@@ -462,15 +505,7 @@ pub async fn user_shutdown_agent_by_uuid(
 
     match op {
         AgentShutdownOp::Force => {
-            heartbeat::mark_offline(pool, agent.id, now).await?;
-            let killed =
-                job::terminate_agent_jobs(&pool.db, agent.id, SuiteJobState::Killed, now).await?;
-            // Forced off: take back what it holds in every suite.
-            job::reclaim_agent_tasks(&pool.db, agent.uuid, None, now).await?;
-            let _ = pool
-                .agent_heartbeat_queue_tx
-                .send(AgentHeartbeatOp::Remove(agent.id));
-            tracing::info!(agent_uuid = %agent.uuid, killed_jobs = killed, "Agent force shutdown");
+            retire_agent(pool, agent.id, RetireCause::ForceShutdown).await?;
         }
         AgentShutdownOp::Graceful => {
             if agent.assigned_task_suite_id.is_none() {
@@ -498,6 +533,146 @@ pub async fn user_shutdown_agent_by_uuid(
     );
 
     Ok(())
+}
+
+/// Why an agent is being retired, which is also which terminal its jobs get.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetireCause {
+    /// Its heartbeat lapsed: the process is gone, or unreachable, which for our
+    /// purposes is the same thing.
+    HeartbeatTimeout,
+    /// A user forced it off.
+    ForceShutdown,
+    /// A new process registered against the same machine, so whatever was
+    /// running under the old one is over whether it knows it or not.
+    Reregistered,
+}
+
+impl RetireCause {
+    fn into_job_terminal(self) -> SuiteJobState {
+        match self {
+            // The agent was told to stop; the jobs died with it, not on their own.
+            Self::ForceShutdown => SuiteJobState::Killed,
+            Self::HeartbeatTimeout | Self::Reregistered => SuiteJobState::Lost,
+        }
+    }
+}
+
+/// Everything that has to happen when an agent stops being usable, in one call.
+///
+/// Retiring is not a state change but a teardown, and the parts only make sense
+/// together: the agent is parked `Offline` with no assignment, its in-flight
+/// jobs get a coordinator-written terminal, the tasks it holds uncommitted go
+/// back to `Ready`, the suites it was running forget it, its liveness tracking
+/// stops, and the work it dropped is offered to whoever can take it now.
+///
+/// Idempotent by construction: every write is filtered on the state it is
+/// leaving, so a second call finds nothing to do. An agent already `Offline` is
+/// skipped outright.
+pub async fn retire_agent(pool: &InfraPool, agent_id: i64, cause: RetireCause) -> Result<()> {
+    let now = TimeDateTimeWithTimeZone::now_utc();
+
+    let Some(agent) = Agent::Entity::find_by_id(agent_id).one(&pool.db).await? else {
+        tracing::debug!(agent_id, "Agent is gone; nothing to retire");
+        return Ok(());
+    };
+    if agent.state == AgentState::Offline {
+        return Ok(());
+    }
+    let agent_uuid = agent.uuid;
+
+    let outcome = pool
+        .db
+        .transaction::<_, RetiredWork, Error>(|txn| {
+            Box::pin(
+                async move { retire_agent_writes(txn, agent_id, agent_uuid, cause, now).await },
+            )
+        })
+        .await?;
+
+    retire_agent_post_commit(pool, agent_id, agent_uuid, cause, outcome).await;
+    Ok(())
+}
+
+/// What a retirement freed: the suites whose jobs it ended, and the tasks it
+/// handed back as `(task id, suite id)`.
+type RetiredWork = (Vec<i64>, Vec<(i64, Option<i64>)>);
+
+/// The database half of [`retire_agent`], for callers that need it inside a
+/// transaction of their own — registration writes the returning agent in the
+/// same transaction that closes out the departed one.
+async fn retire_agent_writes<C: ConnectionTrait>(
+    txn: &C,
+    agent_id: i64,
+    agent_uuid: Uuid,
+    cause: RetireCause,
+    now: TimeDateTimeWithTimeZone,
+) -> Result<RetiredWork> {
+    let suite_ids =
+        job::terminate_agent_jobs(txn, agent_id, cause.into_job_terminal(), now).await?;
+
+    Agent::Entity::update_many()
+        .col_expr(Agent::Column::State, Expr::value(AgentState::Offline))
+        .col_expr(Agent::Column::AssignedTaskSuiteId, Expr::value(None::<i64>))
+        .col_expr(Agent::Column::UpdatedAt, Expr::value(now))
+        .filter(Agent::Column::Id.eq(agent_id))
+        .exec(txn)
+        .await?;
+
+    // Unscoped: the agent is gone from every suite at once, not just the one job
+    // we happened to be looking at.
+    let reclaimed = job::reclaim_agent_tasks(txn, agent_uuid, None, now).await?;
+
+    Ok((suite_ids, reclaimed))
+}
+
+/// Everything outside the database that a retirement owes: drop the agent from
+/// the suites it was running, stop tracking its liveness, and offer the work it
+/// dropped to whoever can take it now.
+///
+/// Runs after the writes have committed, so nothing here can be undone by a
+/// rollback.
+async fn retire_agent_post_commit(
+    pool: &InfraPool,
+    agent_id: i64,
+    agent_uuid: Uuid,
+    cause: RetireCause,
+    (suite_ids, reclaimed): RetiredWork,
+) {
+    for suite_id in &suite_ids {
+        pool.suite_queues.close(*suite_id, agent_id);
+    }
+    let _ = pool
+        .agent_heartbeat_queue_tx
+        .send(AgentHeartbeatOp::Remove(agent_id));
+
+    tracing::info!(
+        agent_id,
+        %agent_uuid,
+        ?cause,
+        jobs = suite_ids.len(),
+        reclaimed = reclaimed.len(),
+        "Retired an agent"
+    );
+
+    // Offer what it dropped, per suite — including the suites whose jobs ended
+    // holding nothing, since a job leaving may itself be what frees the suite up
+    // for somebody else.
+    let mut suites: HashSet<i64> = suite_ids.into_iter().collect();
+    let mut by_suite: HashMap<i64, Vec<i64>> = HashMap::new();
+    for (task_id, suite_id) in reclaimed {
+        let Some(suite_id) = suite_id else { continue };
+        suites.insert(suite_id);
+        by_suite.entry(suite_id).or_default().push(task_id);
+    }
+    for suite_id in suites {
+        notify_suite_tasks_ready(
+            pool,
+            suite_id,
+            by_suite.remove(&suite_id).unwrap_or_default(),
+        )
+        .await;
+    }
 }
 
 /// Stop the job `agent_uuid` is running now, leaving the agent up.
@@ -573,14 +748,14 @@ pub(crate) async fn stop_agent_job(
     if op == StopJobOp::Force {
         let stopped = pool
             .db
-            .transaction::<_, bool, Error>(|txn| {
+            .transaction::<_, Option<Vec<(i64, Option<i64>)>>, Error>(|txn| {
                 Box::pin(async move {
                     // Locked, so the terminal check and the write below cannot
                     // straddle the agent's own `complete`.
                     let job_row = job::load_validate_job_locked(txn, job_handle, agent_id).await?;
                     // It finished under us — nothing to stop, and no error either.
                     if job_row.state.is_terminal() {
-                        return Ok(false);
+                        return Ok(None);
                     }
 
                     let suite_id = job_row.task_suite_id;
@@ -603,19 +778,26 @@ pub(crate) async fn stop_agent_job(
 
                     // The kill is the last moment we know these will never be
                     // committed; scoped to this suite, as `complete` does.
-                    job::reclaim_agent_tasks(txn, agent_uuid, Some(suite_id), now).await?;
+                    let reclaimed =
+                        job::reclaim_agent_tasks(txn, agent_uuid, Some(suite_id), now).await?;
 
-                    Ok(true)
+                    Ok(Some(reclaimed))
                 })
             })
             .await?;
 
-        if !stopped {
+        let Some(reclaimed) = stopped else {
             return Ok(StopAgentJobResp {
                 stopped: false,
                 suite_uuid: None,
                 job_id: None,
             });
+        };
+
+        let suite_id = job.task_suite_id;
+        pool.suite_queues.close(suite_id, agent_id);
+        if !reclaimed.is_empty() {
+            notify_suite_tasks_ready(pool, suite_id, reclaimed.into_iter().map(|(id, _)| id)).await;
         }
     }
 
@@ -679,21 +861,16 @@ pub async fn agent_heartbeat(
         .ok_or(Error::ApiError(ApiError::NotFound("Agent".to_string())))?;
 
     // An idle agent with nothing assigned and work waiting gets a fresh nudge.
+    // The suite it would land on is not named: it is re-picked in `accept`, and
+    // by then a reservation may have moved the answer on.
     if req.state == AgentState::Idle && agent.assigned_task_suite_id.is_none() {
-        if let Some(suite_id) = matching::best_available_suite_id(&pool.db, agent_id).await? {
-            if let Some(suite) = TaskSuites::Entity::find_by_id(suite_id)
-                .one(&pool.db)
-                .await?
-            {
-                AgentWsRouter::notify(
-                    &pool.ws_router_tx,
-                    agent_uuid,
-                    AgentNotification::SuiteAvailable {
-                        suite_uuid: Some(suite.uuid),
-                        priority: suite.priority,
-                    },
-                );
-            }
+        let blocked = pool.suite_queues.blocked_for(agent_id);
+        if matching::agent_has_available_suite(&pool.db, agent_id, &blocked).await? {
+            AgentWsRouter::notify(
+                &pool.ws_router_tx,
+                agent_uuid,
+                AgentNotification::SuiteAvailable,
+            );
         }
     }
 
@@ -729,20 +906,71 @@ pub async fn agent_heartbeat(
     Ok(AgentHeartbeatResp { notifications })
 }
 
-/// Tell every agent that could take this suite that it has work. Only idle
-/// agents are targeted
+/// A suite gained claimable tasks: queue them and offer the suite.
+///
+/// The ids are a dispatch hint for whoever claims next; the tasks themselves are
+/// already `Ready` in the database, which is what any claim actually reads.
+pub async fn notify_suite_tasks_ready(
+    pool: &InfraPool,
+    suite_id: i64,
+    task_ids: impl IntoIterator<Item = i64>,
+) {
+    pool.suite_queues.push_ready(suite_id, task_ids);
+    notify_suite_available(pool, suite_id).await;
+}
+
+/// Offer a suite that has work, in two tiers.
+///
+/// **A job already running the suite and waiting for a task gets it.** It has a
+/// provisioned workspace and a free slot; an idle agent would pay a whole
+/// provision hook to run what that job can absorb in a round trip. Those jobs
+/// are told directly, and the suite is reserved for the agents on it
+/// ([`queue::RESERVATION_WINDOW`]) so an idle agent cannot open a second job for
+/// work that is spoken for.
+///
+/// **Only when no job is waiting** is the suite offered to the idle agents that
+/// could start one — unaddressed, because which suite is best for any of them is
+/// a question answered in `accept`, not here.
 ///
 /// TODO: check according to agent scheduling strategy, and notify some agents
 /// running low-priority suites to stop the job and switch to this suite
 pub async fn notify_suite_available(pool: &InfraPool, suite_id: i64) {
-    let suite = match TaskSuites::Entity::find_by_id(suite_id).one(&pool.db).await {
-        Ok(Some(suite)) => suite,
-        Ok(None) => return,
-        Err(e) => {
-            tracing::error!(suite_id, "Failed to load suite for agent notification: {e}");
-            return;
+    let waiting = pool.suite_queues.waiting_agents(suite_id);
+    if !waiting.is_empty() {
+        let suite_uuid = match TaskSuites::Entity::find_by_id(suite_id).one(&pool.db).await {
+            Ok(Some(suite)) => suite.uuid,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::error!(suite_id, "Failed to load suite for agent notification: {e}");
+                return;
+            }
+        };
+        pool.suite_queues.reserve(
+            suite_id,
+            waiting.iter().map(|(agent_id, _)| *agent_id).collect(),
+            queue::RESERVATION_WINDOW,
+        );
+        tracing::debug!(
+            suite_id,
+            jobs = waiting.len(),
+            "Offering the suite's new work to the jobs already running it"
+        );
+        for (_, agent_uuid) in waiting {
+            AgentWsRouter::notify(
+                &pool.ws_router_tx,
+                agent_uuid,
+                AgentNotification::TasksAvailable { suite_uuid },
+            );
         }
-    };
+        return;
+    }
+
+    // A window still in force from a moment ago is reason enough not to send
+    // anyone here: they would only be turned away by `accept`.
+    if pool.suite_queues.is_reserved(suite_id) {
+        return;
+    }
+
     let agents = match matching::idle_eligible_agent_uuids(&pool.db, suite_id).await {
         Ok(agents) => agents,
         Err(e) => {
@@ -754,10 +982,7 @@ pub async fn notify_suite_available(pool: &InfraPool, suite_id: i64) {
         AgentWsRouter::notify(
             &pool.ws_router_tx,
             agent_uuid,
-            AgentNotification::SuiteAvailable {
-                suite_uuid: Some(suite.uuid),
-                priority: suite.priority,
-            },
+            AgentNotification::SuiteAvailable,
         );
     }
 }
@@ -802,83 +1027,108 @@ async fn suite_to_spec<C: ConnectionTrait>(
 /// reason, not an HTTP error.
 pub async fn agent_accept_suite(
     agent_id: i64,
+    agent_uuid: Uuid,
     pool: &InfraPool,
     req: AcceptSuiteReq,
 ) -> Result<AcceptSuiteResp> {
     let now = TimeDateTimeWithTimeZone::now_utc();
+    // Read before the transaction opens: an in-memory answer that is at most one
+    // round trip stale, and the window it comes from is a preference, not a
+    // guarantee — the suite's row lock is still what settles who gets it.
+    let blocked = pool.suite_queues.blocked_for(agent_id);
 
     let outcome = pool
         .db
-        .transaction::<_, std::result::Result<(TaskSuiteSpec, i64, i32), String>, Error>(|txn| {
-            Box::pin(async move {
-                // One suite at a time, checked before anything is locked. A busy
-                // agent that asks again is racing its own state, not erroring.
+        .transaction::<_, std::result::Result<(TaskSuiteSpec, i64, i32, i64), String>, Error>(
+            |txn| {
+                let blocked = blocked;
+                Box::pin(async move {
+                    // One suite at a time, checked before anything is locked. A busy
+                    // agent that asks again is racing its own state, not erroring.
 
-                let agent = Agent::Entity::find_by_id(agent_id)
-                    .one(txn)
-                    .await?
-                    .ok_or(Error::ApiError(ApiError::NotFound("Agent".to_string())))?;
-                if agent.assigned_task_suite_id.is_some() || agent.state.is_busy() {
-                    return Ok(Err(format!(
-                        "Agent is already {} and cannot accept another suite",
-                        agent.state
-                    )));
-                }
-
-                // What the agent asked for, if it is still worth running.
-                let requested = match req.suite_uuid {
-                    Some(suite_uuid) => {
-                        lock_runnable_suite(txn, agent_id, SuiteTarget::Uuid(suite_uuid)).await?
+                    let agent = Agent::Entity::find_by_id(agent_id)
+                        .one(txn)
+                        .await?
+                        .ok_or(Error::ApiError(ApiError::NotFound("Agent".to_string())))?;
+                    if agent.assigned_task_suite_id.is_some() || agent.state.is_busy() {
+                        return Ok(Err(format!(
+                            "Agent is already {} and cannot accept another suite",
+                            agent.state
+                        )));
                     }
-                    None => None,
-                };
-                // Otherwise — or if the hint went stale — the best on offer.
-                let suite = match requested {
-                    Some(suite) => suite,
-                    None => {
-                        match matching::best_available_suite_id(txn, agent_id).await? {
-                            Some(suite_id) => {
-                                match lock_runnable_suite(txn, agent_id, SuiteTarget::Id(suite_id))
+
+                    // What the agent asked for, if it is still worth running.
+                    let requested = match req.suite_uuid {
+                        Some(suite_uuid) => {
+                            lock_runnable_suite(
+                                txn,
+                                agent_id,
+                                SuiteTarget::Uuid(suite_uuid),
+                                &blocked,
+                            )
+                            .await?
+                        }
+                        None => None,
+                    };
+                    // Otherwise — or if the hint went stale — the best on offer.
+                    let suite = match requested {
+                        Some(suite) => suite,
+                        None => {
+                            match matching::best_available_suite_id(txn, agent_id, &blocked).await?
+                            {
+                                Some(suite_id) => {
+                                    match lock_runnable_suite(
+                                        txn,
+                                        agent_id,
+                                        SuiteTarget::Id(suite_id),
+                                        &blocked,
+                                    )
                                     .await?
-                                {
-                                    Some(suite) => suite,
-                                    // Drained between the pick and the lock.
-                                    None => {
-                                        return Ok(Err(
-                                            "No suite is available for this agent".to_string()
-                                        ))
+                                    {
+                                        Some(suite) => suite,
+                                        // Drained between the pick and the lock.
+                                        None => {
+                                            return Ok(Err(
+                                                "No suite is available for this agent".to_string()
+                                            ))
+                                        }
                                     }
                                 }
-                            }
-                            None => {
-                                return Ok(Err("No suite is available for this agent".to_string()))
+                                None => {
+                                    return Ok(Err(
+                                        "No suite is available for this agent".to_string()
+                                    ))
+                                }
                             }
                         }
-                    }
-                };
+                    };
 
-                let suite_id = suite.id;
-                let spec = suite_to_spec(txn, suite).await?;
+                    let suite_id = suite.id;
+                    let spec = suite_to_spec(txn, suite).await?;
 
-                let mut agent: Agent::ActiveModel = agent.into();
-                agent.assigned_task_suite_id = Set(Some(suite_id));
-                agent.updated_at = Set(now);
-                agent.update(txn).await?;
+                    let mut agent: Agent::ActiveModel = agent.into();
+                    agent.assigned_task_suite_id = Set(Some(suite_id));
+                    agent.updated_at = Set(now);
+                    agent.update(txn).await?;
 
-                let job = job::create_job(txn, suite_id, agent_id, now).await?;
-                Ok(Ok((spec, job.id, job.job_id)))
-            })
-        })
+                    let job = job::create_job(txn, suite_id, agent_id, now).await?;
+                    Ok(Ok((spec, job.id, job.job_id, suite_id)))
+                })
+            },
+        )
         .await?;
 
     match outcome {
-        Ok((suite, job, job_id)) => Ok(AcceptSuiteResp {
-            accepted: true,
-            suite: Some(suite),
-            job: Some(job),
-            job_id: Some(job_id),
-            reason: None,
-        }),
+        Ok((suite, job, job_id, suite_id)) => {
+            pool.suite_queues.open(suite_id, agent_id, agent_uuid);
+            Ok(AcceptSuiteResp {
+                accepted: true,
+                suite: Some(suite),
+                job: Some(job),
+                job_id: Some(job_id),
+                reason: None,
+            })
+        }
         Err(reason) => Ok(AcceptSuiteResp {
             accepted: false,
             suite: None,
@@ -902,10 +1152,14 @@ enum SuiteTarget {
 /// for all of them. The checks are re-run under the lock even for a suite
 /// `best_available_suite_id` just returned: that query takes no locks, so its
 /// answer can go stale before we take one.
+/// `blocked` names the suites reserved for other agents, which are refused here
+/// too: `best_available_suite_id` never offers one, but an agent may still ask
+/// for one by uuid.
 async fn lock_runnable_suite<C: ConnectionTrait>(
     txn: &C,
     agent_id: i64,
     target: SuiteTarget,
+    blocked: &[i64],
 ) -> Result<Option<TaskSuites::Model>> {
     let query = TaskSuites::Entity::find();
     let suite = match target {
@@ -919,6 +1173,9 @@ async fn lock_runnable_suite<C: ConnectionTrait>(
     let Some(suite) = suite else {
         return Ok(None);
     };
+    if blocked.contains(&suite.id) {
+        return Ok(None);
+    }
     // Same predicate as `matching::suite_has_work`, which is what the picker
     // filters on: runnable state, plus a task this agent could claim right now.
     if !matches!(suite.state, TaskSuiteState::Open | TaskSuiteState::Closed) {
@@ -1035,9 +1292,9 @@ pub async fn agent_complete_job(
     let now = TimeDateTimeWithTimeZone::now_utc();
     let job_handle = req.job;
 
-    let (job_id, terminal, released, reclaimed) = pool
+    let (job_id, terminal, released, reclaimed, suite_id) = pool
         .db
-        .transaction::<_, (i32, SuiteJobState, bool, usize), Error>(|txn| {
+        .transaction::<_, (i32, SuiteJobState, bool, Vec<(i64, Option<i64>)>, i64), Error>(|txn| {
             Box::pin(async move {
                 // Locked, so the terminal check and the write below cannot
                 // straddle a `Killed`/`Lost` written by teardown.
@@ -1086,7 +1343,7 @@ pub async fn agent_complete_job(
                 let reclaimed =
                     job::reclaim_agent_tasks(txn, agent_uuid, Some(suite_id), now).await?;
 
-                Ok((job_id, terminal, released, reclaimed))
+                Ok((job_id, terminal, released, reclaimed, suite_id))
             })
         })
         .await?;
@@ -1102,17 +1359,25 @@ pub async fn agent_complete_job(
             "Agent was no longer assigned to the completed job's suite; left its state alone"
         );
     }
-    if reclaimed > 0 {
+    // The job is over before anything else reads this: the suite must stop
+    // counting it as somewhere to send work, and stop reserving on its behalf.
+    pool.suite_queues.close(suite_id, agent_id);
+
+    if !reclaimed.is_empty() {
         tracing::warn!(
             agent_id,
             job_id,
-            reclaimed,
+            reclaimed = reclaimed.len(),
             "Agent completed its job holding uncommitted tasks; they were returned to Ready \
              and will be re-run, and that run's results are lost"
         );
+        // Claimable again, and this agent is not the one to run them.
+        notify_suite_tasks_ready(pool, suite_id, reclaimed.into_iter().map(|(id, _)| id)).await;
     }
 
-    let next_suite_available = matching::agent_has_available_suite(&pool.db, agent_id).await?;
+    let blocked = pool.suite_queues.blocked_for(agent_id);
+    let next_suite_available =
+        matching::agent_has_available_suite(&pool.db, agent_id, &blocked).await?;
     Ok(CompleteJobResp {
         next_suite_available,
     })

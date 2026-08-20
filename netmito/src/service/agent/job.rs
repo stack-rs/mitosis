@@ -140,21 +140,22 @@ pub fn expect_state(job: &SuiteAgentJobs::Model, expected: SuiteJobState) -> Res
 
 /// Coordinator-written terminal: mark every in-flight job owned by `agent_id`
 /// with `state` (`Lost` on heartbeat timeout, `Killed` on a force shutdown).
-/// Returns the number of jobs affected.
+/// Returns the suite ids those jobs were running, so the caller can drop them from
+/// the in-memory dispatch state and re-offer their work.
 pub async fn terminate_agent_jobs<C: ConnectionTrait>(
     db: &C,
     agent_id: i64,
     state: SuiteJobState,
     now: TimeDateTimeWithTimeZone,
-) -> Result<u64> {
-    let res = SuiteAgentJobs::Entity::update_many()
+) -> Result<Vec<i64>> {
+    let terminated = SuiteAgentJobs::Entity::update_many()
         .col_expr(SuiteAgentJobs::Column::State, Expr::value(state))
         .col_expr(SuiteAgentJobs::Column::UpdatedAt, Expr::value(now))
         .filter(SuiteAgentJobs::Column::AgentId.eq(agent_id))
         .filter(SuiteAgentJobs::Column::State.is_in(IN_FLIGHT))
-        .exec(db)
+        .exec_with_returning(db)
         .await?;
-    Ok(res.rows_affected)
+    Ok(terminated.into_iter().map(|j| j.task_suite_id).collect())
 }
 
 /// Coordinator-written terminal: force-stop every in-flight job of a suite
@@ -211,7 +212,8 @@ pub async fn agent_has_in_flight_job<C: ConnectionTrait>(db: &C, agent_id: i64) 
 /// `Finished` and `Cancelled` count because a task's result reaches the
 /// coordinator only with its `Commit`, which never arrived — and the state alone
 /// is not terminal, so a row left in it would never be archived by anything.
-/// Returns how many were reclaimed.
+/// Returns what was reclaimed, as `(task id, suite id)` — the suites are how the
+/// caller knows whom to offer the work to now that it is claimable again.
 ///
 /// `suite_id` scopes the sweep: `None` takes back everything the agent holds,
 /// `Some(id)` only what it holds in that suite. Runs on any connection,
@@ -221,7 +223,7 @@ pub async fn reclaim_agent_tasks<C: ConnectionTrait>(
     agent_uuid: Uuid,
     suite_id: Option<i64>,
     now: TimeDateTimeWithTimeZone,
-) -> Result<usize> {
+) -> Result<Vec<(i64, Option<i64>)>> {
     let mut query = ActiveTasks::Entity::update_many()
         .col_expr(ActiveTasks::Column::State, Expr::value(TaskState::Ready))
         .col_expr(ActiveTasks::Column::RunnerUuid, Expr::value(None::<Uuid>))
@@ -243,5 +245,8 @@ pub async fn reclaim_agent_tasks<C: ConnectionTrait>(
             "Reclaimed uncommitted tasks from an agent"
         );
     }
-    Ok(reclaimed.len())
+    Ok(reclaimed
+        .into_iter()
+        .map(|task| (task.id, task.task_suite_id))
+        .collect())
 }

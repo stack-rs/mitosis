@@ -24,6 +24,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use crate::{
     error::Error,
     service::agent::heartbeat::{AgentHeartbeatOp, AgentHeartbeatQueue},
+    service::agent::queue::SuiteQueues,
     service::worker::{HeartbeatOp, HeartbeatQueue, TaskDispatcher, TaskDispatcherOp},
     ws::{AgentWsRouter, RouterOp},
 };
@@ -372,6 +373,7 @@ impl CoordinatorConfig {
             worker_heartbeat_queue_tx,
             agent_heartbeat_queue_tx,
             ws_router_tx,
+            suite_queues: SuiteQueues::new(),
             boot_uuid: uuid::Uuid::new_v4(),
             ws_keepalive_interval: self.ws_keepalive_interval,
         })
@@ -491,6 +493,8 @@ pub struct InfraPool {
     pub worker_heartbeat_queue_tx: MTx<HeartbeatOp>,
     pub agent_heartbeat_queue_tx: MTx<AgentHeartbeatOp>,
     pub ws_router_tx: MTx<RouterOp>,
+    /// Dispatch state for the suites that have a job running right now.
+    pub suite_queues: SuiteQueues,
     /// Identifies this coordinator process. Agents compare it against the
     /// `boot_id` in a `CounterSync` to notice a restart and reset the
     /// notification sequence they are tracking.

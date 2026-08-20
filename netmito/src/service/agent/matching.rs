@@ -166,15 +166,26 @@ pub async fn is_agent_eligible<C: ConnectionTrait>(
 pub async fn agent_has_available_suite<C: ConnectionTrait>(
     db: &C,
     agent_id: i64,
+    blocked: &[i64],
 ) -> crate::error::Result<bool> {
-    Ok(best_available_suite_id(db, agent_id).await?.is_some())
+    Ok(best_available_suite_id(db, agent_id, blocked)
+        .await?
+        .is_some())
 }
 
 /// The suite this agent should pick up next: highest priority first, then
 /// oldest. `None` when nothing is available.
+///
+/// `blocked` is [`SuiteQueues::blocked_for`]: the suites reserved for the agents
+/// already running them. They are excluded here rather than filtered afterwards
+/// so that a reserved suite at the top of the order does not hide the runnable
+/// one behind it.
+///
+/// [`SuiteQueues::blocked_for`]: crate::service::agent::queue::SuiteQueues::blocked_for
 pub async fn best_available_suite_id<C: ConnectionTrait>(
     db: &C,
     agent_id: i64,
+    blocked: &[i64],
 ) -> crate::error::Result<Option<i64>> {
     #[derive(FromQueryResult)]
     struct SuiteId {
@@ -184,8 +195,11 @@ pub async fn best_available_suite_id<C: ConnectionTrait>(
     let mut stmt = eligible_pairs();
     stmt.expr_as(suite_col(TaskSuites::Column::Id), Alias::new("suite_id"))
         .and_where(agent_col(Agent::Column::Id).eq(agent_id))
-        .and_where(suite_has_work())
-        .order_by_expr(suite_col(TaskSuites::Column::Priority).into(), Order::Desc)
+        .and_where(suite_has_work());
+    if !blocked.is_empty() {
+        stmt.and_where(suite_col(TaskSuites::Column::Id).is_not_in(blocked.to_vec()));
+    }
+    stmt.order_by_expr(suite_col(TaskSuites::Column::Priority).into(), Order::Desc)
         .order_by_expr(suite_col(TaskSuites::Column::CreatedAt).into(), Order::Asc)
         .limit(1);
 

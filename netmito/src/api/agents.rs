@@ -142,7 +142,7 @@ async fn accept_suite(
     State(pool): State<InfraPool>,
     Json(req): Json<AcceptSuiteReq>,
 ) -> Result<Json<AcceptSuiteResp>, ApiError> {
-    let resp = service::agent::agent_accept_suite(a.id, &pool, req)
+    let resp = service::agent::agent_accept_suite(a.id, a.uuid, &pool, req)
         .await
         .map_err(map_service_error)?;
     Ok(Json(resp))

@@ -125,8 +125,8 @@ struct AgentClient {
     current_run: Option<JoinHandle<bool>>,
     /// Cancelling this exits the main loop.
     shutdown_token: CancellationToken,
-    /// Set by a graceful `Shutdown` notification: finish the current suite,
-    /// then stop instead of taking another.
+    /// Set by a graceful `Shutdown` notification or by Ctrl+C: finish the
+    /// current suite, then stop instead of taking another.
     stop_after_current: bool,
 }
 
@@ -353,10 +353,16 @@ impl AgentClient {
     async fn run_loop(&mut self) -> Result<()> {
         let cancel_token = self.shutdown_token.clone();
 
-        let signal_token = cancel_token.clone();
-        tokio::spawn(async move {
-            crate::signal::shutdown_signal(signal_token.clone()).await;
-            signal_token.cancel();
+        // token that signals ctrl-c has been pressed once.
+        let signal_token = CancellationToken::new();
+        tokio::spawn({
+            let shutdown_token = cancel_token.clone();
+            let signal_token = signal_token.clone();
+            async move {
+                crate::signal::shutdown_signal(shutdown_token).await;
+                // When ctrlc is pressed once, the await above ends.
+                signal_token.cancel();
+            }
         });
 
         // `no_ws` opens no socket at all and disables the branch that reads it.
@@ -405,6 +411,17 @@ impl AgentClient {
                         token.cancel();
                     }
                     break;
+                }
+
+                // Disarmed once a wind-down is under way, both so the arm stops
+                // resolving on every pass and so a second Ctrl+C falls through
+                // to the shared handler, which exits the process outright.
+                _ = signal_token.cancelled(), if !self.stop_after_current => {
+                    tracing::info!(
+                        "Signal received; finishing the current job before exiting \
+                         (Ctrl+C again to exit now)"
+                    );
+                    self.begin_graceful_shutdown();
                 }
 
                 Ok(event) = ws_rx.recv(), if ws_enabled => {
@@ -495,6 +512,17 @@ impl AgentClient {
         }
     }
 
+    /// Wind down and stop: the tasks in hand finish and cleanup runs, but
+    /// nothing more is claimed and no next suite is picked. An idle agent
+    /// leaves the loop on the very next pass.
+    fn begin_graceful_shutdown(&mut self) {
+        self.stop_after_current = true;
+        self.pending_suite = None;
+        if let Some(token) = &self.drain_token {
+            token.cancel();
+        }
+    }
+
     fn handle_notification(&mut self, notification: AgentNotification) {
         match notification {
             AgentNotification::SuiteAvailable {
@@ -560,13 +588,7 @@ impl AgentClient {
             AgentNotification::Shutdown { graceful } => {
                 tracing::warn!("Coordinator asked this agent to shut down (graceful={graceful})");
                 if graceful {
-                    self.stop_after_current = true;
-                    self.pending_suite = None;
-                    // Same wind-down as a graceful stop — running tasks finish
-                    // and cleanup runs — and then we stop instead of re-picking.
-                    if let Some(token) = &self.drain_token {
-                        token.cancel();
-                    }
+                    self.begin_graceful_shutdown();
                 } else {
                     if let Some(token) = &self.job_token {
                         token.cancel();

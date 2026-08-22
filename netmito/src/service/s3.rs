@@ -62,7 +62,7 @@ pub async fn setup_buckets(client: &Client, bucket_names: Vec<String>) -> Result
             }
             Ok(())
         }
-        Err(e) => Err(S3Error::ListBucketsError(e)),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -78,7 +78,7 @@ pub async fn create_bucket(client: &Client, bucket_name: &str) -> Result<(), S3E
             tracing::info!("Bucket {} already exists", bucket_name);
             Ok(())
         }
-        Err(e) => Err(S3Error::CreateBucketError(e)),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -137,7 +137,7 @@ pub async fn delete_object<T: Into<String>>(
         .send()
         .await
         .map(|_| ())
-        .map_err(S3Error::DeleteObjectError)
+        .map_err(|e| e.into())
 }
 
 pub async fn delete_objects<T: Into<String>>(

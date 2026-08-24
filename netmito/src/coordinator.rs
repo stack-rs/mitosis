@@ -9,6 +9,7 @@ use crate::api::router;
 use crate::config::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 use crate::migration::{Migrator, MigratorTrait};
 use crate::service::agent::heartbeat::AgentHeartbeatQueue;
+use crate::service::agent::queue;
 use crate::service::s3::setup_buckets;
 use crate::service::suite::sweep_inactive_suites;
 use crate::service::worker::{restore_workers, HeartbeatQueue, TaskDispatcher};
@@ -40,6 +41,8 @@ pub struct MitoCoordinator {
     /// How long a suite may go without a new task before the sweep settles it
     /// out of `Open`.
     pub suite_auto_close_timeout: std::time::Duration,
+    /// How often the in-memory suite queues are checked against the database.
+    pub suite_queue_reconcile_interval: std::time::Duration,
 }
 
 impl MitoCoordinator {
@@ -148,6 +151,7 @@ impl MitoCoordinator {
         );
         let ws_router = config.build_ws_router(cancel_token.clone(), ws_router_rx);
         let suite_auto_close_timeout = config.suite_auto_close_timeout;
+        let suite_queue_reconcile_interval = config.suite_queue_reconcile_interval;
 
         // Setup s3 storage
         // List all buckets and create if not exist
@@ -179,6 +183,7 @@ impl MitoCoordinator {
             cancel_token,
             log_dir,
             suite_auto_close_timeout,
+            suite_queue_reconcile_interval,
         })
     }
 
@@ -192,38 +197,47 @@ impl MitoCoordinator {
             mut ws_router,
             cancel_token,
             suite_auto_close_timeout,
+            suite_queue_reconcile_interval,
             ..
         } = self;
 
         // Create TaskTracker to manage background tasks
         let task_tracker = TaskTracker::new();
 
-        // Settle idle suites out of `Open`. Jittered so a fleet of coordinators
-        // against one database does not sweep in lockstep.
+        // The suite housekeeping ticks: settle idle suites out of `Open`, and
+        // keep the in-memory queues honest about what is still claimable.
         {
-            let db = infra_pool.db.clone();
+            let pool = infra_pool.clone();
             let cancel = cancel_token.clone();
-            let period = suite_sweep_period(suite_auto_close_timeout);
+            let mut sweep = tokio::time::interval(suite_sweep_period(suite_auto_close_timeout));
+            let mut reconcile = tokio::time::interval(suite_queue_reconcile_interval);
+            // A tick missed because the other branch was still working is
+            // dropped rather than fired straight after it: neither job is worth
+            // catching up on, and both are cheaper spread out.
+            sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             task_tracker.spawn(async move {
+                // Both tick immediately: the first sweep settles whatever went
+                // idle while the coordinator was down, and the first reconcile
+                // only takes note of suspects, since nothing is dropped before a
+                // second pass misses it too.
                 loop {
-                    // Up to half a period of jitter, so several coordinators on
-                    // one database do not all sweep on the same tick.
-                    let delay = period
-                        + std::time::Duration::from_millis(rand::Rng::random_range(
-                            &mut rand::rng(),
-                            0..=(period.as_millis() as u64 / 2),
-                        ));
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => break,
-                        _ = tokio::time::sleep(delay) => {
-                            if let Err(e) = sweep_inactive_suites(&db, suite_auto_close_timeout).await {
+                        _ = sweep.tick() => {
+                            if let Err(e) = sweep_inactive_suites(&pool.db, suite_auto_close_timeout).await {
                                 tracing::error!("Failed to sweep inactive suites: {e}");
+                            }
+                        }
+                        _ = reconcile.tick() => {
+                            if let Err(e) = queue::reconcile(&pool).await {
+                                tracing::error!("Failed to reconcile the suite queues: {e}");
                             }
                         }
                     }
                 }
-                tracing::info!("Suite sweep stopped");
+                tracing::info!("Suite housekeeping stopped");
             });
         }
 

@@ -1,79 +1,17 @@
-//! What the coordinator keeps in memory about the suites that have a live job.
+//! The coordinator's in-memory dispatch state for the suites that have a live
+//! job.
 //!
-//! One entry per suite with at least one in-flight job. Each holds
+//! One entry per suite with at least one in-flight job, holding
 //!
-//! - the jobs running it, keyed by agent — the map is the entry's refcount, so
-//!   the last job to end takes the entry with it;
+//! - the jobs running it, keyed by agent, with how many tasks each may hold and
+//!   is holding — the map is the entry's refcount, so the last job to end takes
+//!   the entry with it;
 //! - the ids of its claimable tasks, in the order a claim would take them;
-//! - an optional reservation window.
+//! - an optional reservation window, during which only the agents already on
+//!   the suite may accept it or claim from it.
 //!
-//! The database stays the authority on every claim. This is a dispatch hint and
-//! a policy knob, never a queue a task can be lost from: an entry dropped
-//! because its last job ended — or because the coordinator restarted — costs the
-//! next fetch one ordinary `ORDER BY priority` query and nothing else.
-//!
-//! ## How full a job is
-//!
-//! A job may hold [`task_budget`] tasks at once — what its workers can be
-//! running, plus one more worker's worth to keep them fed. How many it is
-//! holding right now is counted here: up on the batch it is handed, down as it
-//! commits them, and gone with the entry when the job ends. The agent is told
-//! how many it may take; it never asks for a number, because "what is this job
-//! holding" is a question about a claim the coordinator itself granted.
-//!
-//! Both numbers are kept per job rather than per suite. Today a suite's schedule
-//! gives every job on it the same budget, but a scheme that sized a job to the
-//! machine it landed on would not, and nothing here would need to change.
-//!
-//! The count is audited where it dies: an ending job hands back exactly the
-//! tasks it never committed, so [`SuiteQueues::close`] compares the two and
-//! warns when they disagree.
-//!
-//! ## Who a suite's new work is offered to
-//!
-//! A task submitted into a suite that a job is already sitting idle on should be
-//! run by that job, not by a second one provisioned from scratch to run one
-//! task. So the offer goes to the jobs already on the suite, **fullest first** —
-//! most tasks held, of those with room. Work packs onto the jobs that are nearly
-//! full instead of spreading a task each across every free slot in the fleet,
-//! which leaves whole agents free to drain and move to another suite. Only as
-//! many jobs are told as it takes to cover the backlog
-//! ([`SuiteQueues::follow_up_offer`]).
-//!
-//! ## The queue is the suite's claimable tasks, exactly
-//!
-//! Not a sample of them. It is seeded from the database when the suite's first
-//! job opens, added to as tasks become claimable, and emptied only by the claim
-//! that takes them or the cancellation that archives them. Exactness is what
-//! lets it answer "how much is waiting", and that answer decides whether more
-//! agents are worth provisioning: a queue holding a fraction of the truth would
-//! leave every suite whose work arrived before its first agent looking nearly
-//! idle, and it would be left to whoever was already there.
-//!
-//! It is an invariant with upkeep, then: **a path that makes a suite task
-//! claimable, or takes one away, has to say so here.** One that forgets shows up
-//! in the log rather than in the dispatch — see [`SuiteQueues::take`].
-//!
-//! ## The reservation window
-//!
-//! The jobs that were told are told directly ([`AgentNotification::TasksAvailable`]),
-//! and the suite is reserved for the agents already on it: while the window
-//! lasts, no other agent may accept the suite or claim its tasks.
-//!
-//! **Only an offer the warm jobs can cover is reserved.** The window exists to
-//! stop a second job being provisioned for work an existing one can absorb; work
-//! beyond what they can absorb is work more agents genuinely help with, and a
-//! job provisioned for it earns its hook.
-//!
-//! **The window covers the round trip, not the backlog.** It ends as soon as
-//! every job that was told has come back — or as soon as the queue is empty,
-//! whichever happens first — so in the ordinary case it lasts one fetch. Work
-//! still queued after the warm jobs have taken their fill is work more agents
-//! genuinely help with, and they are not kept out of it. [`RESERVATION_WINDOW`]
-//! is only the cap for the job that never comes back at all; past it the suite
-//! is on offer to everyone again, one idle heartbeat later at worst.
-//!
-//! [`AgentNotification::TasksAvailable`]: crate::schema::AgentNotification::TasksAvailable
+//! The database stays the authority on every claim: this decides who is offered
+//! what, and answers how much a suite has waiting.
 
 use std::{
     cmp::Ordering,
@@ -141,6 +79,11 @@ struct SuiteQueue {
     /// The suite's claimable tasks, in the order a claim would take them.
     ready: Vec<ReadyTask>,
     reservation: Option<Reservation>,
+    /// Queued ids the last reconcile could not find claimable in the database.
+    /// A second sighting is what condemns them ([`SuiteQueues::drop_unclaimable`]).
+    /// We don't drip them at first sight is because we don't know if the trasaction
+    /// adding this task is in the middle of executing, not commiting yet.
+    suspects: HashSet<i64>,
 }
 
 /// A claimable task, ordered the way the claim query hands them out: highest
@@ -304,13 +247,6 @@ impl SuiteQueues {
     /// bookkeeping — a decrement that never ran, a hand-out that was never
     /// recorded — and it is logged rather than corrected, since the entry is
     /// going either way and the number is only useful as a symptom.
-    ///
-    /// It can also be a race rather than a bug, on the paths that end a job
-    /// under a working agent: a commit that lands between the reclaim and this
-    /// call is archived rather than reclaimed, and may decrement after the
-    /// comparison. One line either side of a forced stop or a retirement means
-    /// little; a mismatch on a graceful `complete`, where every slot has already
-    /// joined, or a drift that grows, is the real thing.
     pub fn close(&self, suite_id: i64, agent_id: i64, reclaimed: usize) {
         let mut queues = self.lock();
         match queues
@@ -362,6 +298,16 @@ impl SuiteQueues {
     /// These tasks of the suite are claimable now — newly submitted, triggered
     /// out of `Pending`, or handed back by an agent that will not run them.
     ///
+    /// **Call this inside the transaction that makes them claimable, before it
+    /// commits.** A claim cannot lock a row it cannot see, so pushing first
+    /// guarantees that the [`SuiteQueues::served`] of any claim that takes the
+    /// task runs after this — and `served` is the only thing that takes it back
+    /// out. Pushing after the commit inverts that pair and strands a running
+    /// task on the suite's backlog for good.
+    ///
+    /// The price is that a transaction which rolls back leaves ids behind that
+    /// no claim will ever take; [`reconcile`] is what clears those.
+    ///
     /// Ignored unless a job is running the suite: with no entry there is nothing
     /// to hand them to, and the entry that opens next reads the suite's
     /// claimable tasks out of the database for itself ([`SuiteQueues::open`]).
@@ -382,6 +328,36 @@ impl SuiteQueues {
         queue.ready.dedup();
     }
 
+    /// Queue what a reclaim handed back, in the shape
+    /// [`job::reclaim_agent_tasks`] returns and grouped by suite. Suite-less
+    /// tasks are the workers' and are skipped.
+    ///
+    /// Belongs inside the reclaiming transaction, for the reason in
+    /// [`SuiteQueues::push_ready`].
+    ///
+    /// [`job::reclaim_agent_tasks`]: crate::service::agent::job::reclaim_agent_tasks
+    pub fn push_reclaimed(&self, reclaimed: &[(i64, Option<i64>, i32)]) {
+        let mut queues = self.lock();
+        let mut touched: HashSet<i64> = HashSet::new();
+        for (task_id, suite_id, priority) in reclaimed {
+            let Some(suite_id) = *suite_id else { continue };
+            let Some(queue) = queues.get_mut(&suite_id) else {
+                continue;
+            };
+            queue.ready.push(ReadyTask {
+                id: *task_id,
+                priority: *priority,
+            });
+            touched.insert(suite_id);
+        }
+        for suite_id in touched {
+            if let Some(queue) = queues.get_mut(&suite_id) {
+                queue.ready.sort_unstable();
+                queue.ready.dedup();
+            }
+        }
+    }
+
     /// These tasks are not claimable any more, and it was not a claim that took
     /// them: a cancellation archived them where they stood.
     ///
@@ -398,6 +374,61 @@ impl SuiteQueues {
         };
         queue.ready.retain(|task| !gone.contains(&task.id));
         queue.settle_reservation();
+    }
+
+    /// The suites with a live entry, which is what the reconcile tick asks the
+    /// database about.
+    pub fn tracked_suites(&self) -> Vec<i64> {
+        self.lock().keys().copied().collect()
+    }
+
+    /// Drop the queued ids the database does not call claimable after all.
+    ///
+    /// `claimable` is a snapshot of the `Ready` tasks of every suite that was
+    /// looked at, keyed by suite. A suite with nothing claimable maps to an
+    /// empty set, which is not the same as a suite that was not looked at and is
+    /// left alone.
+    ///
+    /// **An id has to be missing from two consecutive snapshots to go.** The
+    /// queue is deliberately ahead of the database — a task is pushed inside the
+    /// transaction that makes it claimable, before the commit — so one snapshot
+    /// cannot tell a task whose commit has not landed yet from one whose never
+    /// will. A second pass can: by then the transaction has settled either way.
+    /// Confirmed ids are safe to drop even when they belong to a claim that has
+    /// not called [`SuiteQueues::served`] yet, since that call would remove them
+    /// too.
+    ///
+    /// Removals only. A task the database calls claimable that the queue has
+    /// never heard of is a missed [`SuiteQueues::push_ready`]; `served` reports
+    /// that, and re-adding it here would race the claim that is taking it.
+    pub fn drop_unclaimable(&self, claimable: &HashMap<i64, HashSet<i64>>) {
+        let mut queues = self.lock();
+        for (suite_id, claimable) in claimable {
+            let Some(queue) = queues.get_mut(suite_id) else {
+                continue;
+            };
+            let missing: HashSet<i64> = queue
+                .ready
+                .iter()
+                .map(|task| task.id)
+                .filter(|id| !claimable.contains(id))
+                .collect();
+            let condemned: HashSet<i64> = missing.intersection(&queue.suspects).copied().collect();
+            queue.suspects = missing.difference(&condemned).copied().collect();
+            if condemned.is_empty() {
+                continue;
+            }
+            queue.ready.retain(|task| !condemned.contains(&task.id));
+            queue.settle_reservation();
+            // Nothing reaches here without a bug or a rolled-back transaction:
+            // every path that makes a suite task unclaimable is supposed to say
+            // so itself.
+            tracing::warn!(
+                suite_id,
+                dropped = condemned.len(),
+                "Dropped queued tasks the database has not called claimable for two passes"
+            );
+        }
     }
 
     /// Who this suite's claimable work should be offered to, and whether they
@@ -602,6 +633,28 @@ impl SuiteQueues {
         queue.settle_reservation();
     }
 
+    /// A queued task's priority changed, so its place in the queue changes with
+    /// it: the ids handed to a claim are only worth taking by id while they are
+    /// the ones it would have picked for itself.
+    ///
+    /// In place, and only if the task is still queued — a claim may have taken it
+    /// since, and re-adding it would put a task that is no longer claimable back
+    /// on the suite's backlog.
+    pub fn reprioritize(&self, suite_id: i64, task_id: i64, priority: i32) {
+        let mut queues = self.lock();
+        let Some(queue) = queues.get_mut(&suite_id) else {
+            return;
+        };
+        let Some(task) = queue.ready.iter_mut().find(|task| task.id == task_id) else {
+            return;
+        };
+        if task.priority == priority {
+            return;
+        }
+        task.priority = priority;
+        queue.ready.sort_unstable();
+    }
+
     /// A task this job was holding is committed and gone, so the job has room
     /// for another. Its own slot is free at the same moment, which is what sends
     /// it back to fetch.
@@ -638,6 +691,32 @@ pub async fn ready_tasks<C: ConnectionTrait>(
         .into_iter()
         .filter_map(|(suite_id, task_id, priority)| Some((suite_id?, task_id, priority)))
         .collect())
+}
+
+/// Drop from every live entry what the database no longer calls claimable.
+///
+/// The one drift no call site can repair on its own: a transaction that pushed
+/// and then rolled back leaves ids that nothing takes back out, since `served`
+/// removes only what a claim actually locked. Left alone they inflate the
+/// backlog [`SuiteQueues::follow_up_offer`] ranks against for as long as the
+/// suite has a job on it.
+///
+/// See [`SuiteQueues::drop_unclaimable`] for why a task is only dropped on the
+/// second pass that misses it.
+pub async fn reconcile(pool: &InfraPool) -> crate::error::Result<()> {
+    let suite_ids = pool.suite_queues.tracked_suites();
+    if suite_ids.is_empty() {
+        return Ok(());
+    }
+    // Seeded with every suite asked about, so one with nothing claimable is told
+    // apart from one the query did not cover.
+    let mut claimable: HashMap<i64, HashSet<i64>> =
+        suite_ids.iter().map(|id| (*id, HashSet::new())).collect();
+    for (suite_id, task_id, _) in ready_tasks(&pool.db, suite_ids).await? {
+        claimable.entry(suite_id).or_default().insert(task_id);
+    }
+    pool.suite_queues.drop_unclaimable(&claimable);
+    Ok(())
 }
 
 /// Rebuild the entries for jobs that outlived the coordinator.
@@ -780,6 +859,15 @@ mod tests {
         queues.push_ready(suite_id, ids.into_iter().map(|id| (id, 0)));
     }
 
+    /// What the database says is claimable, in the shape `drop_unclaimable`
+    /// wants: one entry per suite looked at, empty where nothing is.
+    fn snapshot(suites: impl IntoIterator<Item = (i64, Vec<i64>)>) -> HashMap<i64, HashSet<i64>> {
+        suites
+            .into_iter()
+            .map(|(suite_id, ids)| (suite_id, ids.into_iter().collect()))
+            .collect()
+    }
+
     #[test]
     fn a_suites_schedule_says_how_much_one_job_may_hold() {
         let prefetching = WorkerSchedulePlan::FixedWorkers {
@@ -895,6 +983,44 @@ mod tests {
     }
 
     #[test]
+    fn a_reclaim_queues_what_it_handed_back_to_each_suite() {
+        let queues = SuiteQueues::new();
+        open(&queues, 1, 10, 8);
+        open(&queues, 2, 10, 8);
+        ready(&queues, 1, [100]);
+
+        // As `reclaim_agent_tasks` returns them: (task id, suite id, priority).
+        queues.push_reclaimed(&[
+            (101, Some(1), 5),
+            (200, Some(2), 0),
+            // Suite-less tasks are the workers'; a suite with no job has no
+            // entry to queue against.
+            (300, None, 0),
+            (400, Some(3), 0),
+        ]);
+
+        assert_eq!(queues.take(1, 10, 8), Some((8, vec![101, 100])));
+        assert_eq!(queues.take(2, 10, 8), Some((8, vec![200])));
+        assert_eq!(queues.take(3, 10, 8), Some((8, Vec::new())));
+    }
+
+    #[test]
+    fn a_reprioritised_task_moves_to_where_a_claim_would_take_it() {
+        let queues = SuiteQueues::new();
+        open(&queues, 1, 10, 8);
+        queues.push_ready(1, [(100, 0), (101, 5)]);
+        assert_eq!(queues.take(1, 10, 8), Some((8, vec![101, 100])));
+
+        queues.reprioritize(1, 100, 9);
+        assert_eq!(queues.take(1, 10, 8), Some((8, vec![100, 101])));
+
+        // A task the queue is not holding is not put back by a change to it.
+        queues.served(1, 10, 2, &[100, 101]);
+        queues.reprioritize(1, 100, 3);
+        assert_eq!(queues.take(1, 10, 8), Some((6, Vec::new())));
+    }
+
+    #[test]
     fn a_cancelled_task_stops_being_claimable() {
         let queues = SuiteQueues::new();
         open(&queues, 1, 10, 4);
@@ -902,6 +1028,56 @@ mod tests {
 
         queues.remove_ready(1, [101]);
         assert_eq!(queues.take(1, 10, 4), Some((4, vec![100, 102])));
+    }
+
+    #[test]
+    fn a_task_the_database_never_made_claimable_goes_on_the_second_pass() {
+        let queues = SuiteQueues::new();
+        open(&queues, 1, 10, 8);
+        ready(&queues, 1, [100, 101]);
+
+        // 101 is not claimable in the database — but a task pushed by a
+        // transaction that has not committed yet looks exactly the same, so one
+        // pass only suspects it.
+        let without = snapshot([(1, vec![100])]);
+        queues.drop_unclaimable(&without);
+        assert_eq!(queues.take(1, 10, 8), Some((8, vec![100, 101])));
+
+        // Still nowhere on the next pass: its transaction rolled back.
+        queues.drop_unclaimable(&without);
+        assert_eq!(queues.take(1, 10, 8), Some((8, vec![100])));
+    }
+
+    #[test]
+    fn a_task_whose_commit_lands_between_passes_is_kept() {
+        let queues = SuiteQueues::new();
+        open(&queues, 1, 10, 8);
+        ready(&queues, 1, [100]);
+
+        // Pushed, not yet committed: the snapshot cannot see it.
+        queues.drop_unclaimable(&snapshot([(1, vec![])]));
+        // Committed by the next pass, which also clears the suspicion — so a
+        // later miss has to be confirmed on its own before anything is dropped.
+        queues.drop_unclaimable(&snapshot([(1, vec![100])]));
+        queues.drop_unclaimable(&snapshot([(1, vec![])]));
+        assert_eq!(queues.take(1, 10, 8), Some((8, vec![100])));
+    }
+
+    #[test]
+    fn a_suite_the_snapshot_did_not_cover_is_left_alone() {
+        let queues = SuiteQueues::new();
+        open(&queues, 1, 10, 8);
+        open(&queues, 2, 11, 8);
+        ready(&queues, 1, [100]);
+        ready(&queues, 2, [200]);
+
+        // Suite 2 was not asked about; only suite 1 having nothing claimable is
+        // an answer.
+        let only_suite_1 = snapshot([(1, vec![])]);
+        queues.drop_unclaimable(&only_suite_1);
+        queues.drop_unclaimable(&only_suite_1);
+        assert_eq!(queues.take(1, 10, 8), Some((8, Vec::new())));
+        assert_eq!(queues.take(2, 11, 8), Some((8, vec![200])));
     }
 
     #[test]

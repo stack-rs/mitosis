@@ -117,9 +117,11 @@ pub async fn user_register_agent(
         .map(serde_json::to_value)
         .transpose()?;
 
+    let queues = pool.suite_queues.clone();
     let (agent_uuid, agent_id, reused, retired) = pool
         .db
-        .transaction::<_, (Uuid, i64, bool, Option<RetiredWork>), Error>(|txn| {
+        .transaction::<_, (Uuid, i64, bool, Option<RetiredWork>), Error>(move |txn| {
+            let queues = queues;
             Box::pin(async move {
                 // Exactly one group holds Admin over the agent, and that role is
                 // the only way it is ever shut down. Unless the caller names a
@@ -208,6 +210,7 @@ pub async fn user_register_agent(
                             retired = Some(
                                 retire_agent_writes(
                                     txn,
+                                    &queues,
                                     agent.id,
                                     agent.uuid,
                                     RetireCause::Reregistered,
@@ -583,12 +586,14 @@ pub async fn retire_agent(pool: &InfraPool, agent_id: i64, cause: RetireCause) -
     }
     let agent_uuid = agent.uuid;
 
+    let queues = pool.suite_queues.clone();
     let outcome = pool
         .db
-        .transaction::<_, RetiredWork, Error>(|txn| {
-            Box::pin(
-                async move { retire_agent_writes(txn, agent_id, agent_uuid, cause, now).await },
-            )
+        .transaction::<_, RetiredWork, Error>(move |txn| {
+            let queues = queues;
+            Box::pin(async move {
+                retire_agent_writes(txn, &queues, agent_id, agent_uuid, cause, now).await
+            })
         })
         .await?;
 
@@ -605,6 +610,7 @@ type RetiredWork = (Vec<i64>, Vec<(i64, Option<i64>, i32)>);
 /// same transaction that closes out the departed one.
 async fn retire_agent_writes<C: ConnectionTrait>(
     txn: &C,
+    queues: &queue::SuiteQueues,
     agent_id: i64,
     agent_uuid: Uuid,
     cause: RetireCause,
@@ -624,6 +630,8 @@ async fn retire_agent_writes<C: ConnectionTrait>(
     // Unscoped: the agent is gone from every suite at once, not just the one job
     // we happened to be looking at.
     let reclaimed = job::reclaim_agent_tasks(txn, agent_uuid, None, now).await?;
+    // Before the commit, for the reason in `SuiteQueues::push_ready`.
+    queues.push_reclaimed(&reclaimed);
 
     Ok((suite_ids, reclaimed))
 }
@@ -676,12 +684,7 @@ async fn retire_agent_post_commit(
     let mut suites: HashSet<i64> = suite_ids.into_iter().collect();
     suites.extend(by_suite.keys().copied());
     for suite_id in suites {
-        notify_suite_tasks_ready(
-            pool,
-            suite_id,
-            by_suite.remove(&suite_id).unwrap_or_default(),
-        )
-        .await;
+        notify_suite_available(pool, suite_id).await;
     }
 }
 
@@ -756,9 +759,11 @@ pub(crate) async fn stop_agent_job(
     let (job_handle, job_id) = (job.id, job.job_id);
 
     if op == StopJobOp::Force {
+        let queues = pool.suite_queues.clone();
         let stopped = pool
             .db
-            .transaction::<_, Option<Vec<(i64, Option<i64>, i32)>>, Error>(|txn| {
+            .transaction::<_, Option<Vec<(i64, Option<i64>, i32)>>, Error>(move |txn| {
+                let queues = queues;
                 Box::pin(async move {
                     // Locked, so the terminal check and the write below cannot
                     // straddle the agent's own `complete`.
@@ -790,6 +795,8 @@ pub(crate) async fn stop_agent_job(
                     // committed; scoped to this suite, as `complete` does.
                     let reclaimed =
                         job::reclaim_agent_tasks(txn, agent_uuid, Some(suite_id), now).await?;
+                    // Before the commit, for the reason in `SuiteQueues::push_ready`.
+                    queues.push_reclaimed(&reclaimed);
 
                     Ok(Some(reclaimed))
                 })
@@ -807,14 +814,7 @@ pub(crate) async fn stop_agent_job(
         let suite_id = job.task_suite_id;
         pool.suite_queues.close(suite_id, agent_id, reclaimed.len());
         if !reclaimed.is_empty() {
-            notify_suite_tasks_ready(
-                pool,
-                suite_id,
-                reclaimed
-                    .into_iter()
-                    .map(|(id, _, priority)| (id, priority)),
-            )
-            .await;
+            notify_suite_available(pool, suite_id).await;
         }
     }
 
@@ -923,21 +923,12 @@ pub async fn agent_heartbeat(
     Ok(AgentHeartbeatResp { notifications })
 }
 
-/// A suite gained claimable tasks: queue them and offer the suite.
-///
-/// The ids are a dispatch hint for whoever claims next; the tasks themselves are
-/// already `Ready` in the database, which is what any claim actually reads.
-pub async fn notify_suite_tasks_ready(
-    pool: &InfraPool,
-    suite_id: i64,
-    tasks: impl IntoIterator<Item = (i64, i32)>,
-) {
-    pool.suite_queues.push_ready(suite_id, tasks);
-    notify_suite_available(pool, suite_id).await;
-}
-
 /// Offer a suite that has work: to the jobs already running it, and to idle
 /// agents only for what those jobs cannot take.
+///
+/// The tasks themselves are queued by the transaction that made them claimable
+/// ([`queue::SuiteQueues::push_ready`]), so by the time this runs the queue is
+/// already the backlog it ranks against.
 ///
 /// **The jobs on the suite are asked first, fullest first.** Each has a
 /// provisioned workspace and room to spare; an idle agent would pay a whole
@@ -1342,10 +1333,12 @@ pub async fn agent_complete_job(
     let now = TimeDateTimeWithTimeZone::now_utc();
     let job_handle = req.job;
 
+    let queues = pool.suite_queues.clone();
     let (job_id, terminal, released, reclaimed, suite_id) = pool
         .db
         .transaction::<_, (i32, SuiteJobState, bool, Vec<(i64, Option<i64>, i32)>, i64), Error>(
-            |txn| {
+            move |txn| {
+                let queues = queues;
                 Box::pin(async move {
                     // Locked, so the terminal check and the write below cannot
                     // straddle a `Killed`/`Lost` written by teardown.
@@ -1393,6 +1386,8 @@ pub async fn agent_complete_job(
                     // alone.
                     let reclaimed =
                         job::reclaim_agent_tasks(txn, agent_uuid, Some(suite_id), now).await?;
+                    // Before the commit, for the reason in `SuiteQueues::push_ready`.
+                    queues.push_reclaimed(&reclaimed);
 
                     Ok((job_id, terminal, released, reclaimed, suite_id))
                 })
@@ -1426,14 +1421,7 @@ pub async fn agent_complete_job(
              and will be re-run, and that run's results are lost"
         );
         // Claimable again, and this agent is not the one to run them.
-        notify_suite_tasks_ready(
-            pool,
-            suite_id,
-            reclaimed
-                .into_iter()
-                .map(|(id, _, priority)| (id, priority)),
-        )
-        .await;
+        notify_suite_available(pool, suite_id).await;
     }
 
     let blocked = pool.suite_queues.blocked_for(agent_id);

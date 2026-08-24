@@ -72,6 +72,15 @@ pub struct CoordinatorConfig {
     /// provision hooks.
     #[serde(with = "humantime_serde", default = "default_suite_auto_close_timeout")]
     pub(crate) suite_auto_close_timeout: std::time::Duration,
+    /// How often the coordinator checks its in-memory suite queues against the
+    /// database and drops what is not claimable after all. Two passes have to
+    /// miss a task before it goes, so this is half the time a rolled-back
+    /// transaction can leave one inflating a suite's backlog.
+    #[serde(
+        with = "humantime_serde",
+        default = "default_suite_queue_reconcile_interval"
+    )]
+    pub(crate) suite_queue_reconcile_interval: std::time::Duration,
     pub(crate) log_path: Option<RelativePathBuf>,
     pub(crate) file_log: bool,
 }
@@ -82,6 +91,10 @@ fn default_ws_keepalive_interval() -> std::time::Duration {
 
 fn default_suite_auto_close_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(120)
+}
+
+fn default_suite_queue_reconcile_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(60)
 }
 
 fn default_mitosis_region() -> String {
@@ -178,6 +191,11 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub suite_auto_close_timeout: Option<String>,
+    /// How often the in-memory suite queues are checked against the database,
+    /// default to 60 seconds
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub suite_queue_reconcile_interval: Option<String>,
     /// The log file path. If not specified, then the default rolling log file path would be used.
     /// If specified, then the log file would be exactly at the path specified.
     #[arg(long)]
@@ -221,6 +239,7 @@ impl Default for CoordinatorConfig {
             heartbeat_timeout: std::time::Duration::from_secs(600),
             ws_keepalive_interval: default_ws_keepalive_interval(),
             suite_auto_close_timeout: default_suite_auto_close_timeout(),
+            suite_queue_reconcile_interval: default_suite_queue_reconcile_interval(),
             log_path: None,
             file_log: false,
         }

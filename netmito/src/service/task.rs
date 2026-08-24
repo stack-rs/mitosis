@@ -94,10 +94,12 @@ async fn internal_submit_task(
         .map(serde_json::to_value)
         .transpose()?;
 
+    let queues = pool.suite_queues.clone();
     let (task, suite) = pool
         .db
         .transaction::<_, (ActiveTasks::Model, Option<TaskSuites::Model>), crate::error::Error>(
-            |txn| {
+            move |txn| {
+                let queues = queues;
                 Box::pin(async move {
                     // Resolve the designated suite, if any. How it is authorized
                     // depends on the submitter: a user reaches a suite through their
@@ -351,6 +353,21 @@ async fn internal_submit_task(
                         ..Default::default()
                     };
                     let task = task.insert(txn).await?;
+
+                    // Queued here, inside the transaction, and never after it
+                    // commits. The queue is emptied by `served`, which removes
+                    // what a claim locked — so a task pushed before its commit
+                    // is always pushed before any `served` that could take it
+                    // back out, because no claim can lock a row it cannot yet
+                    // see. Push after the commit instead and a claim landing in
+                    // between wins the race: it takes the task, `served` finds
+                    // nothing in the queue to remove, and the push then puts an
+                    // already-running task back on the suite's backlog, where
+                    // nothing will ever remove it again.
+                    if let (Some(suite), TaskState::Ready) = (&suite, task.state) {
+                        queues.push_ready(suite.id, [(task.id, task.priority)]);
+                    }
+
                     Ok((task, suite))
                 })
             },
@@ -398,16 +415,11 @@ async fn dispatch_submitted_task(
     match suite_id {
         Some(suite_id) => {
             // Suite tasks are pulled by agents from the suite, not pushed into
-            // worker queues. This queues the task for whoever claims next and
-            // offers the suite: to the jobs already running it if they can take
-            // it, and to the idle agents that could start one for whatever they
-            // cannot.
-            crate::service::agent::notify_suite_tasks_ready(
-                pool,
-                suite_id,
-                [(task.id, task.priority)],
-            )
-            .await;
+            // worker queues, and the submit transaction has already queued this
+            // one. What is left is the offer: to the jobs already running the
+            // suite if they can take it, and to the idle agents that could start
+            // one for whatever they cannot.
+            crate::service::agent::notify_suite_available(pool, suite_id).await;
         }
         None => {
             let builder = pool.db.get_database_backend();
@@ -489,23 +501,38 @@ pub async fn worker_submit_pending_task(
 
 pub async fn worker_trigger_pending_task(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<()> {
     tracing::debug!("Trigger pending task {uuid}");
-    let task = ActiveTasks::Entity::find()
-        .filter(ActiveTasks::Column::Uuid.eq(uuid))
-        .filter(ActiveTasks::Column::State.eq(TaskState::Pending))
-        .one(&pool.db)
-        .await?
-        .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
-            "Pending task with uuid {uuid}"
-        ))))?;
-    let mut task: ActiveTasks::ActiveModel = task.into();
-    task.state = Set(TaskState::Ready);
-    task.updated_at = Set(TimeDateTimeWithTimeZone::now_utc());
-    let task = task.update(&pool.db).await?;
+    // A transaction rather than a bare update, so a suite task can be queued
+    // before the write that makes it claimable commits — see
+    // `SuiteQueues::push_ready`.
+    let queues = pool.suite_queues.clone();
+    let task = pool
+        .db
+        .transaction::<_, ActiveTasks::Model, crate::error::Error>(move |txn| {
+            let queues = queues;
+            Box::pin(async move {
+                let task = ActiveTasks::Entity::find()
+                    .filter(ActiveTasks::Column::Uuid.eq(uuid))
+                    .filter(ActiveTasks::Column::State.eq(TaskState::Pending))
+                    .one(txn)
+                    .await?
+                    .ok_or(Error::ApiError(crate::error::ApiError::NotFound(format!(
+                        "Pending task with uuid {uuid}"
+                    ))))?;
+                let mut task: ActiveTasks::ActiveModel = task.into();
+                task.state = Set(TaskState::Ready);
+                task.updated_at = Set(TimeDateTimeWithTimeZone::now_utc());
+                let task = task.update(txn).await?;
+                if let Some(suite_id) = task.task_suite_id {
+                    queues.push_ready(suite_id, [(task.id, task.priority)]);
+                }
+                Ok(task)
+            })
+        })
+        .await?;
     // A suite task never enters the worker queues — agents pull it from its
     // suite. Wake the idle eligible agents instead.
     if let Some(suite_id) = task.task_suite_id {
-        crate::service::agent::notify_suite_tasks_ready(pool, suite_id, [(task.id, task.priority)])
-            .await;
+        crate::service::agent::notify_suite_available(pool, suite_id).await;
         return Ok(());
     }
     // Batch add task to worker task queues
@@ -610,9 +637,13 @@ pub async fn user_change_task(
         })
         .await?;
     // Suite-bound tasks never live in the worker task queues, so there is nothing to
-    // re-dispatch after a change.
+    // re-dispatch after a change. Their suite's queue orders its hints by priority,
+    // though, so a changed one has to reach it or the hints stop being the tasks a
+    // claim would have picked.
     // TODO: notify change to agents if this task belongs to a task suite
-    if task.task_suite_id.is_some() {
+    if let Some(suite_id) = task.task_suite_id {
+        pool.suite_queues
+            .reprioritize(suite_id, task.id, task.priority);
         return Ok(());
     }
     let builder = pool.db.get_database_backend();
@@ -1879,10 +1910,15 @@ impl From<PartialWorkerId> for i64 {
 /// Submits each task in the list and returns individual results for each (including failures).
 ///
 /// The tasks are inserted one at a time — each is its own transaction, and one
-/// rejected task must not take the rest with it — but a suite hears about all of
+/// rejected task must not take the rest with it — but a suite is *offered* all of
 /// its new tasks **once**. Offering them one by one would rank and reserve the
 /// suite once per task, against a backlog that is still growing, and re-run the
 /// idle-agent query every time.
+///
+/// Only the offer waits. Each task joins its suite's queue inside its own
+/// transaction, because from the moment it commits it is claimable and every
+/// dispatch decision — how much is waiting, whether the warm jobs can cover it —
+/// is made against that queue.
 pub async fn user_batch_submit_tasks(
     pool: &InfraPool,
     user_id: i64,
@@ -1896,20 +1932,18 @@ pub async fn user_batch_submit_tasks(
 
     let mut results = Vec::with_capacity(req.tasks.len());
     // A batch may spread over several suites: each request names its own.
-    let mut per_suite: HashMap<i64, Vec<(i64, i32)>> = HashMap::new();
+    let mut offer: HashSet<i64> = HashSet::new();
 
     for task_req in req.tasks {
         let result = async {
             let submitted = internal_submit_task(pool, user_id, Submitter::User, task_req).await?;
             let resp = submitted.resp();
             match submitted.suite_id {
-                // Held back to the end of the batch, when the whole of its
-                // suite's new work can be offered in one round.
+                // Already queued by its own transaction; only the offer waits,
+                // so the suite's new work is ranked and reserved in one round
+                // rather than per task.
                 Some(suite_id) if !matches!(submitted.task.state, TaskState::Pending) => {
-                    per_suite
-                        .entry(suite_id)
-                        .or_default()
-                        .push((submitted.task.id, submitted.task.priority));
+                    offer.insert(suite_id);
                 }
                 _ => dispatch_submitted_task(pool, submitted).await?,
             }
@@ -1928,8 +1962,8 @@ pub async fn user_batch_submit_tasks(
         results.push(result);
     }
 
-    for (suite_id, tasks) in per_suite {
-        crate::service::agent::notify_suite_tasks_ready(pool, suite_id, tasks).await;
+    for suite_id in offer {
+        crate::service::agent::notify_suite_available(pool, suite_id).await;
     }
 
     Ok(crate::schema::TasksSubmitResp { results })

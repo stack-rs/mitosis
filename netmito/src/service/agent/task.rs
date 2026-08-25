@@ -322,16 +322,22 @@ pub async fn agent_report_task(
             pool.db
                 .transaction::<_, (), Error>(|txn| {
                     Box::pin(async move {
-                        archived.insert(txn).await?;
-                        ActiveTasks::Entity::delete_by_id(inner_task_id)
-                            .exec(txn)
-                            .await?;
+                        // Suite row first, then the task rows: every writer of
+                        // the pair takes them in that order, and a cancel that
+                        // holds the suite while deleting its tasks would
+                        // otherwise close a cycle against this, the hottest
+                        // path there is. Ordering only — the three writes commit
+                        // together either way.
                         if let Some(suite_id) = suite_id {
                             crate::service::suite::decrement_incomplete_tasks(
                                 txn, suite_id, 1, now,
                             )
                             .await?;
                         }
+                        archived.insert(txn).await?;
+                        ActiveTasks::Entity::delete_by_id(inner_task_id)
+                            .exec(txn)
+                            .await?;
                         Ok(())
                     })
                 })

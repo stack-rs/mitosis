@@ -123,6 +123,9 @@ pub async fn sweep_inactive_suites(
 /// hold its job — and its provisioned environment — open for a late arrival.
 /// [`sweep_inactive_suites`] settles it afterwards. A `Closed` suite has no such
 /// window to wait out, so it is completed here.
+///
+/// The suite row must be taken before any task row, either by this call or by
+/// the caller before it — see the lock-order note on [`crate::service`].
 pub(crate) async fn decrement_incomplete_tasks<C: ConnectionTrait>(
     db: &C,
     suite_id: i64,

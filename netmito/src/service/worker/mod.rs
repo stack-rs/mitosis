@@ -705,17 +705,19 @@ pub async fn report_task(
             // The suite's counter goes down in the same transaction that
             // archives the task. Split across two, a failure in between leaves
             // `incomplete_tasks` permanently too high, and a suite that never
-            // reaches zero never completes.
+            // reaches zero never completes. It goes down *first* so this takes
+            // the suite row before the task rows, the order every writer of the
+            // pair uses.
             let (worker_id, worker_state) = pool
                 .db
                 .transaction::<_, (i64, WorkerState), Error>(|txn| {
                     Box::pin(async move {
-                        archived_task.insert(txn).await?;
-                        ActiveTask::Entity::delete_by_id(task_id).exec(txn).await?;
                         if let Some(suite_id) = suite_id {
                             service::suite::decrement_incomplete_tasks(txn, suite_id, 1, now)
                                 .await?;
                         }
+                        archived_task.insert(txn).await?;
+                        ActiveTask::Entity::delete_by_id(task_id).exec(txn).await?;
                         let worker = worker.update(txn).await?;
                         let worker_id = worker.id;
                         let worker_state = worker.state;

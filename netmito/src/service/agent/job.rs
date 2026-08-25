@@ -26,10 +26,9 @@ pub const IN_FLIGHT: [SuiteJobState; 3] = [
 ///
 /// `job_id` is `max(job_id) + 1` scoped to the suite — irreducibly read →
 /// compute → write, so the suite row is locked here to serialize concurrent
-/// accepts against the `(task_suite_id, job_id)` unique index. This is the one
-/// explicit lock left on the accept path, and it is taken *last*, after every
-/// runnable check, so nothing is held while the caller is still choosing between
-/// suites. A `next_job_id` column on `task_suites` would retire it.
+/// accepts against the `(task_suite_id, job_id)` unique index. Taken *last*,
+/// after every runnable check, so nothing is held while the caller is still
+/// choosing between suites.
 ///
 /// Must run inside the caller's transaction, or the lock is released the moment
 /// the `SELECT` commits on its own and protects nothing.

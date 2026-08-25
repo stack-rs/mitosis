@@ -1,6 +1,6 @@
 use sea_orm::sea_query::{
     extension::postgres::PgExpr, Alias, CommonTableExpression, DeleteStatement, ExprTrait,
-    InsertStatement, PgFunc, Query,
+    InsertStatement, LockType, Order, PgFunc, Query, WithClause,
 };
 use sea_orm::ActiveValue::NotSet;
 use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, Set, TransactionTrait};
@@ -865,14 +865,16 @@ pub async fn user_cancel_task(
                     downstream_task_uuid: Set(task.downstream_task_uuid),
                     task_suite_id: Set(task.task_suite_id),
                 };
-                archived_task.insert(txn).await?;
-                ActiveTasks::Entity::delete_by_id(task.id).exec(txn).await?;
                 // A cancelled suite task never reaches an agent `Commit`, so
-                // this is the only chance to give the suite its count back.
+                // this is the only chance to give the suite its count back. It
+                // goes first so the suite row is taken before the task rows —
+                // the order every writer of the pair uses.
                 if let Some(suite_id) = suite_id {
                     crate::service::suite::decrement_incomplete_tasks(txn, suite_id, 1, now)
                         .await?;
                 }
+                archived_task.insert(txn).await?;
+                ActiveTasks::Entity::delete_by_id(task.id).exec(txn).await?;
                 Ok((task.id, suite_id, user_group_role.username))
             })
         })
@@ -1502,7 +1504,9 @@ async fn decrement_incomplete_tasks_by_suite<C: ConnectionTrait>(
     }
     // Sorted, not iterated straight off the map: each decrement writes its
     // suite row and holds that lock to commit, so two cancels over overlapping
-    // suites in opposite orders deadlock.
+    // suites in opposite orders deadlock. `lock_suites_of_tasks` has normally
+    // taken these rows already, which makes this a backstop — it still matters
+    // for the straggler suite that call cannot cover.
     let mut per_suite: Vec<(i64, i32)> = per_suite.into_iter().collect();
     per_suite.sort_unstable_by_key(|(suite_id, _)| *suite_id);
     for (suite_id, count) in per_suite {
@@ -1601,15 +1605,69 @@ pub async fn cancel_tasks_by_filter(
 
     // Build the complete CTE statement before the transaction to avoid lifetime issues
 
+    // The suite rows this cancel will decrement. Every other writer of the pair
+    // takes the suite row before the task rows, and this is how a batch cancel
+    // joins them — on its own it learns its suites from the archive's `RETURNING`,
+    // far too late to lock anything.
+    //
+    // In the same statement as the delete, so one snapshot covers both: the filter
+    // selects the same tasks in each CTE, and a task submitted in between is
+    // invisible to either.
+    //
+    // `ORDER BY id` is load-bearing. Postgres puts `LockRows` above the sort, so
+    // rows are locked in id order; any scan is therefore a prefix of ascending
+    // ids, and overlapping cancels cannot take two rows in opposite orders.
+    let locked_suites = Query::select()
+        .column(TaskSuites::Column::Id)
+        .from(TaskSuites::Entity)
+        .and_where(
+            Expr::col(TaskSuites::Column::Id).in_subquery(
+                Query::select()
+                    .column(ActiveTasks::Column::TaskSuiteId)
+                    .from(ActiveTasks::Entity)
+                    .and_where(
+                        Expr::col(ActiveTasks::Column::Id).in_subquery(task_id_subquery.clone()),
+                    )
+                    .and_where(Expr::col(ActiveTasks::Column::TaskSuiteId).is_not_null())
+                    .to_owned(),
+            ),
+        )
+        .order_by(TaskSuites::Column::Id, Order::Asc)
+        .lock(LockType::Update)
+        .to_owned();
+    let locked_cte = CommonTableExpression::new()
+        .query(locked_suites)
+        .table_name(Alias::new("locked"))
+        .to_owned();
+
     let delete_stmt = DeleteStatement::new()
         .from_table(ActiveTasks::Entity)
         .and_where(Expr::col(ActiveTasks::Column::Id).in_subquery(task_id_subquery))
+        // This predicate is the guarantee, not a nicety: a task is deleted only if
+        // its suite came out of `locked`, and producing that row is what locked it.
+        // So the suite row is always taken before the task row, whatever plan the
+        // subquery gets.
+        .and_where(
+            Expr::col(ActiveTasks::Column::TaskSuiteId)
+                .is_null()
+                .or(Expr::col(ActiveTasks::Column::TaskSuiteId).in_subquery(
+                    Query::select()
+                        .expr(Expr::col(Alias::new("id")))
+                        .from(Alias::new("locked"))
+                        .to_owned(),
+                )),
+        )
         .returning_all()
         .to_owned();
 
-    let cte = CommonTableExpression::new()
+    let deleted_cte = CommonTableExpression::new()
         .query(delete_stmt)
         .table_name(Alias::new("deleted"))
+        .to_owned();
+
+    let with_ctes = WithClause::new()
+        .cte(locked_cte)
+        .cte(deleted_cte)
         .to_owned();
 
     // Get the database backend before the transaction
@@ -1620,7 +1678,7 @@ pub async fn cancel_tasks_by_filter(
     let cancelled = pool
         .db
         .transaction::<_, Vec<IdResult>, crate::error::Error>(|txn| {
-            let cte = cte.clone();
+            let with_ctes = with_ctes.clone();
             Box::pin(async move {
                 let now = TimeDateTimeWithTimeZone::now_utc();
                 let res = TaskResultSpec {
@@ -1681,7 +1739,7 @@ pub async fn cancel_tasks_by_filter(
 
                 insert_stmt.select_from(select_from_cte).unwrap();
                 insert_stmt.returning_all();
-                let insert_with_cte = insert_stmt.with(cte.into());
+                let insert_with_cte = insert_stmt.with(with_ctes);
 
                 let stmt = builder.build(&insert_with_cte);
 
@@ -1793,15 +1851,69 @@ pub async fn cancel_tasks_by_uuids(
 
         // Build CTE for DELETE RETURNING + INSERT SELECT to avoid parameter limits
         // Convert the SELECT statement into a subquery for the DELETE
+        // The suite rows this cancel will decrement. Every other writer of the pair
+        // takes the suite row before the task rows, and this is how a batch cancel
+        // joins them — on its own it learns its suites from the archive's `RETURNING`,
+        // far too late to lock anything.
+        //
+        // In the same statement as the delete, so one snapshot covers both: the filter
+        // selects the same tasks in each CTE, and a task submitted in between is
+        // invisible to either.
+        //
+        // `ORDER BY id` is load-bearing. Postgres puts `LockRows` above the sort, so
+        // rows are locked in id order; any scan is therefore a prefix of ascending
+        // ids, and overlapping cancels cannot take two rows in opposite orders.
+        let locked_suites = Query::select()
+            .column(TaskSuites::Column::Id)
+            .from(TaskSuites::Entity)
+            .and_where(
+                Expr::col(TaskSuites::Column::Id).in_subquery(
+                    Query::select()
+                        .column(ActiveTasks::Column::TaskSuiteId)
+                        .from(ActiveTasks::Entity)
+                        .and_where(
+                            Expr::col(ActiveTasks::Column::Id).in_subquery(id_subquery.clone()),
+                        )
+                        .and_where(Expr::col(ActiveTasks::Column::TaskSuiteId).is_not_null())
+                        .to_owned(),
+                ),
+            )
+            .order_by(TaskSuites::Column::Id, Order::Asc)
+            .lock(LockType::Update)
+            .to_owned();
+        let locked_cte = CommonTableExpression::new()
+            .query(locked_suites)
+            .table_name(Alias::new("locked"))
+            .to_owned();
+
         let delete_stmt = DeleteStatement::new()
             .from_table(ActiveTasks::Entity)
             .and_where(Expr::col(ActiveTasks::Column::Id).in_subquery(id_subquery))
+            // This predicate is the guarantee, not a nicety: a task is deleted only if
+            // its suite came out of `locked`, and producing that row is what locked it.
+            // So the suite row is always taken before the task row, whatever plan the
+            // subquery gets.
+            .and_where(
+                Expr::col(ActiveTasks::Column::TaskSuiteId)
+                    .is_null()
+                    .or(Expr::col(ActiveTasks::Column::TaskSuiteId).in_subquery(
+                        Query::select()
+                            .expr(Expr::col(Alias::new("id")))
+                            .from(Alias::new("locked"))
+                            .to_owned(),
+                    )),
+            )
             .returning_all()
             .to_owned();
 
-        let cte = CommonTableExpression::new()
+        let deleted_cte = CommonTableExpression::new()
             .query(delete_stmt)
             .table_name(Alias::new("deleted"))
+            .to_owned();
+
+        let with_ctes = WithClause::new()
+            .cte(locked_cte)
+            .cte(deleted_cte)
             .to_owned();
 
         // Execute delete and insert in a single transaction
@@ -1810,7 +1922,7 @@ pub async fn cancel_tasks_by_uuids(
             .db
             .transaction::<_, (Vec<(Option<i64>, i64)>, HashSet<Uuid>), crate::error::Error>(
                 |txn| {
-                    let cte = cte.clone();
+                    let with_ctes = with_ctes.clone();
                     Box::pin(async move {
                         let now = TimeDateTimeWithTimeZone::now_utc();
                         let res = TaskResultSpec {
@@ -1873,7 +1985,7 @@ pub async fn cancel_tasks_by_uuids(
 
                         insert_stmt.select_from(select_from_cte).unwrap();
                         insert_stmt.returning_all();
-                        let insert_with_cte = insert_stmt.with(cte.into());
+                        let insert_with_cte = insert_stmt.with(with_ctes);
 
                         let stmt = builder.build(&insert_with_cte);
 

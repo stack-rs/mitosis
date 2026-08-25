@@ -1,9 +1,9 @@
 use sea_orm::sea_query::{
     extension::postgres::PgExpr, Alias, CommonTableExpression, DeleteStatement, ExprTrait,
-    InsertStatement, LockType, PgFunc, Query,
+    InsertStatement, PgFunc, Query,
 };
 use sea_orm::ActiveValue::NotSet;
-use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, QuerySelect, Set, TransactionTrait};
+use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, Set, TransactionTrait};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
@@ -154,12 +154,6 @@ async fn internal_submit_task(
                                     Expr::col((UserGroup::Entity, UserGroup::Column::UserId))
                                         .eq(creator_id),
                                 )
-                                // The counters below are bumped from this row's
-                                // values, and the `can_accept_tasks` check reads
-                                // its state, so the row must not move under us.
-                                // `OF task_suites` keeps the joined `user_group`
-                                // row out of the lock.
-                                .lock_with_tables(LockType::Update, [TaskSuites::Entity])
                                 .to_owned();
                             let suite =
                                 TaskSuites::Model::find_by_statement(builder.build(&suite_stmt))
@@ -182,8 +176,6 @@ async fn internal_submit_task(
                             TaskSuites::Entity::find()
                                 .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
                                 .filter(TaskSuites::Column::GroupId.eq(parent_group_id))
-                                // Same reason as the user path above.
-                                .lock_exclusive()
                                 .one(txn)
                                 .await?
                                 .ok_or_else(|| {
@@ -197,7 +189,10 @@ async fn internal_submit_task(
                         ),
                     };
 
-                    // The suite must be able to accept new tasks.
+                    // A first, unlocked look, so a suite that is plainly closed to
+                    // new work is rejected with its actual state named. The
+                    // binding check is the `WHERE` on the counter bump below —
+                    // this one is only the better error message.
                     if let Some(suite) = &suite {
                         if !suite.state.can_accept_tasks() {
                             return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
@@ -310,25 +305,55 @@ async fn internal_submit_task(
                         }
                     };
 
-                    // Safe as a read-modify-write only because the row was read
-                    // `FOR UPDATE` above: concurrent submits to the same suite
-                    // serialize on that lock, so neither can overwrite the
-                    // other's increment and undercount the suite into an early
-                    // `Complete`.
+                    // One statement, so both increments are evaluated server-side
+                    // on the row this `UPDATE` itself locked. Read the counters
+                    // first and write literals back and two concurrent submits
+                    // both see `total = n` and both write `n + 1`: the suite
+                    // undercounts, `decrement_incomplete_tasks` reaches zero with
+                    // tasks still `Ready`, and the surplus is stranded in a
+                    // `Complete` suite that hands out nothing.
+                    //
+                    // The state predicate carries the accepts-tasks check, so no
+                    // row is bumped after a cancellation that committed since the
+                    // read above.
                     let suite = match suite {
                         None => None,
-                        Some(suite) => {
-                            let prev_total_tasks = suite.total_tasks;
-                            let prev_incomplete_tasks = suite.incomplete_tasks;
-                            let mut suite: TaskSuites::ActiveModel = suite.into();
-                            suite.total_tasks = Set(prev_total_tasks + 1);
-                            suite.incomplete_tasks = Set(prev_incomplete_tasks + 1);
-                            suite.last_task_submitted_at = Set(Some(now));
-                            suite.updated_at = Set(now);
-                            suite.state = Set(TaskSuiteState::Open);
-                            suite.completed_at = Set(None);
-                            Some(suite.update(txn).await?)
-                        }
+                        Some(suite) => Some(
+                            TaskSuites::Entity::update_many()
+                                .col_expr(
+                                    TaskSuites::Column::TotalTasks,
+                                    Expr::col(TaskSuites::Column::TotalTasks).add(1),
+                                )
+                                .col_expr(
+                                    TaskSuites::Column::IncompleteTasks,
+                                    Expr::col(TaskSuites::Column::IncompleteTasks).add(1),
+                                )
+                                .col_expr(
+                                    TaskSuites::Column::LastTaskSubmittedAt,
+                                    Expr::value(Some(now)),
+                                )
+                                .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+                                .col_expr(
+                                    TaskSuites::Column::State,
+                                    Expr::value(TaskSuiteState::Open),
+                                )
+                                .col_expr(
+                                    TaskSuites::Column::CompletedAt,
+                                    Expr::value(None::<TimeDateTimeWithTimeZone>),
+                                )
+                                .filter(TaskSuites::Column::Id.eq(suite.id))
+                                .filter(TaskSuites::Column::State.ne(TaskSuiteState::Cancelled))
+                                .exec_with_returning(txn)
+                                .await?
+                                .into_iter()
+                                .next()
+                                .ok_or_else(|| {
+                                    // Cancelled between the read above and here.
+                                    Error::ApiError(crate::error::ApiError::InvalidRequest(
+                                        format!("Suite {} stopped accepting new tasks", suite.uuid),
+                                    ))
+                                })?,
+                        ),
                     };
 
                     let task_uuid = Uuid::new_v4();
@@ -1475,6 +1500,11 @@ async fn decrement_incomplete_tasks_by_suite<C: ConnectionTrait>(
     for suite_id in suite_ids.into_iter().flatten() {
         *per_suite.entry(suite_id).or_default() += 1;
     }
+    // Sorted, not iterated straight off the map: each decrement writes its
+    // suite row and holds that lock to commit, so two cancels over overlapping
+    // suites in opposite orders deadlock.
+    let mut per_suite: Vec<(i64, i32)> = per_suite.into_iter().collect();
+    per_suite.sort_unstable_by_key(|(suite_id, _)| *suite_id);
     for (suite_id, count) in per_suite {
         crate::service::suite::decrement_incomplete_tasks(txn, suite_id, count, now).await?;
     }

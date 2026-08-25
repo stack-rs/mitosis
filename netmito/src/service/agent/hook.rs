@@ -109,15 +109,21 @@ pub async fn agent_report_hook(
             let hook_uuid = hook.uuid;
             let group_id = suite.group_id;
             let content_length = content_length as i64;
-            let pool_cloned = pool.clone();
 
-            let (_, url) = pool
-                .db
-                .transaction::<_, (bool, String), Error>(|txn| {
+            // Signed before the transaction opens — see `group_upload_artifact`.
+            let url = crate::service::s3::get_presigned_upload_link(
+                &pool.s3,
+                &pool.artifacts_bucket,
+                crate::service::s3::artifact_object_key(hook_uuid, content_type),
+                content_length,
+            )
+            .await
+            .map_err(ApiError::from)?;
+            pool.db
+                .transaction::<_, bool, Error>(|txn| {
                     Box::pin(async move {
                         reserve_artifact_upload(
                             txn,
-                            &pool_cloned,
                             group_id,
                             hook_uuid,
                             content_type,

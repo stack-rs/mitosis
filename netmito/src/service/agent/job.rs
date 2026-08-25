@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::entity::{
     active_tasks as ActiveTasks,
     state::{SuiteJobState, TaskState},
-    suite_agent_jobs as SuiteAgentJobs,
+    suite_agent_jobs as SuiteAgentJobs, task_suites as TaskSuites,
 };
 use crate::error::{ApiError, Error, Result};
 
@@ -24,16 +24,29 @@ pub const IN_FLIGHT: [SuiteJobState; 3] = [
 
 /// Create the job row for an agent that just accepted a suite (`Provisioning`).
 ///
-/// `job_id` is allocated as `max(job_id) + 1` scoped to the suite. The caller
-/// MUST hold an exclusive lock on the suite row (`.lock_exclusive()` in the same
-/// transaction) so concurrent accepts serialize and the `(task_suite_id, job_id)`
-/// unique index never trips.
+/// `job_id` is `max(job_id) + 1` scoped to the suite — irreducibly read →
+/// compute → write, so the suite row is locked here to serialize concurrent
+/// accepts against the `(task_suite_id, job_id)` unique index. This is the one
+/// explicit lock left on the accept path, and it is taken *last*, after every
+/// runnable check, so nothing is held while the caller is still choosing between
+/// suites. A `next_job_id` column on `task_suites` would retire it.
+///
+/// Must run inside the caller's transaction, or the lock is released the moment
+/// the `SELECT` commits on its own and protects nothing.
 pub async fn create_job<C: ConnectionTrait>(
     db: &C,
     suite_id: i64,
     agent_id: i64,
     now: TimeDateTimeWithTimeZone,
 ) -> Result<SuiteAgentJobs::Model> {
+    TaskSuites::Entity::find_by_id(suite_id)
+        .lock_exclusive()
+        .one(db)
+        .await?
+        .ok_or_else(|| {
+            Error::ApiError(ApiError::NotFound(format!("Suite {suite_id} not found")))
+        })?;
+
     let next_job_id = SuiteAgentJobs::Entity::find()
         .filter(SuiteAgentJobs::Column::TaskSuiteId.eq(suite_id))
         .order_by_desc(SuiteAgentJobs::Column::JobId)
@@ -67,23 +80,64 @@ pub async fn load_validate_job<C: ConnectionTrait>(
     validate_job_owner(model, job, agent_id)
 }
 
-/// [`load_validate_job`] with the row locked `FOR UPDATE`.
+/// Write `to` onto a job this agent owns, but only from one of `from`.
 ///
-/// The caller must be inside a transaction: the lock is what turns a later
-/// check-then-write (`reject_if_terminal` plus an update) into something atomic
-/// rather than advisory. Outside a transaction every statement commits on its
-/// own and the lock is released immediately, which only *looks* like protection
-/// — hence the separate entry point instead of a flag on the plain loader.
-pub async fn load_validate_job_locked<C: ConnectionTrait>(
+/// The state check and the write are the same statement, so a coordinator
+/// terminal (`Lost`/`Killed`) racing it either lands first — and this matches
+/// nothing — or lands after. Loading the row, testing it in Rust and writing it
+/// back needs a held `FOR UPDATE` to mean anything at all.
+///
+/// `Ok(None)` covers every way it can fail to match; the caller decides whether
+/// that is an error, and [`explain_failed_transition`] builds the message when
+/// it is.
+pub async fn transition_job<C: ConnectionTrait>(
     db: &C,
     job: i64,
     agent_id: i64,
-) -> Result<SuiteAgentJobs::Model> {
-    let model = SuiteAgentJobs::Entity::find_by_id(job)
-        .lock_exclusive()
-        .one(db)
+    from: &[SuiteJobState],
+    to: SuiteJobState,
+    now: TimeDateTimeWithTimeZone,
+) -> Result<Option<SuiteAgentJobs::Model>> {
+    let updated = SuiteAgentJobs::Entity::update_many()
+        .col_expr(SuiteAgentJobs::Column::State, Expr::value(to))
+        .col_expr(SuiteAgentJobs::Column::UpdatedAt, Expr::value(now))
+        .filter(SuiteAgentJobs::Column::Id.eq(job))
+        .filter(SuiteAgentJobs::Column::AgentId.eq(agent_id))
+        .filter(SuiteAgentJobs::Column::State.is_in(from.iter().copied()))
+        .exec_with_returning(db)
         .await?;
-    validate_job_owner(model, job, agent_id)
+    Ok(updated.into_iter().next())
+}
+
+/// Why a [`transition_job`] matched nothing: gone or another agent's
+/// (`NotFound`), terminal (`Conflict`), or the wrong non-terminal state (`400`).
+/// `expected` names the source state for an ordered transition; `None` means any
+/// non-terminal state was acceptable.
+///
+/// The re-read is unlocked and only builds the message, so it costs nothing on
+/// the path that succeeds.
+pub async fn explain_failed_transition<C: ConnectionTrait>(
+    db: &C,
+    job: i64,
+    agent_id: i64,
+    expected: Option<SuiteJobState>,
+) -> Error {
+    let row = match load_validate_job(db, job, agent_id).await {
+        Ok(row) => row,
+        Err(e) => return e,
+    };
+    let rejection = match expected {
+        Some(expected) => expect_state(&row, expected),
+        None => reject_if_terminal(&row),
+    };
+    match rejection {
+        Err(e) => e,
+        // It moved again between the update and this read.
+        Ok(()) => Error::ApiError(ApiError::Conflict(format!(
+            "Job {} changed state concurrently",
+            row.job_id
+        ))),
+    }
 }
 
 fn validate_job_owner(

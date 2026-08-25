@@ -649,6 +649,9 @@ pub async fn user_close_task_suite(user_id: i64, pool: &InfraPool, suite_uuid: U
                         Err(ResolveError::Fatal(e)) => return Err(e),
                     };
 
+                // `authorize_suite` takes no lock, so this only names the state
+                // in the error; the `WHERE` below is what actually rejects a
+                // second close.
                 if suite.state != TaskSuiteState::Open {
                     return Err(Error::ApiError(ApiError::InvalidRequest(format!(
                         "Cannot transition from {} to Closed",
@@ -656,10 +659,21 @@ pub async fn user_close_task_suite(user_id: i64, pool: &InfraPool, suite_uuid: U
                     ))));
                 }
 
-                let mut suite: TaskSuites::ActiveModel = suite.into();
-                suite.state = Set(TaskSuiteState::Closed);
-                suite.updated_at = Set(now);
-                suite.update(txn).await?;
+                let closed = TaskSuites::Entity::update_many()
+                    .col_expr(
+                        TaskSuites::Column::State,
+                        Expr::value(TaskSuiteState::Closed),
+                    )
+                    .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+                    .filter(TaskSuites::Column::Id.eq(suite.id))
+                    .filter(TaskSuites::Column::State.eq(TaskSuiteState::Open))
+                    .exec(txn)
+                    .await?;
+                if closed.rows_affected == 0 {
+                    return Err(Error::ApiError(ApiError::InvalidRequest(format!(
+                        "Suite {suite_uuid} is no longer Open"
+                    ))));
+                }
                 Ok(())
             })
         })
@@ -701,6 +715,35 @@ pub async fn user_cancel_task_suite(
                     };
 
                 if matches!(suite.state, TaskSuiteState::Cancelled) {
+                    return Err(Error::ApiError(ApiError::InvalidRequest(format!(
+                        "Suite {suite_uuid} is already in cancelled state"
+                    ))));
+                }
+
+                // The suite is cancelled *before* its tasks are archived, not
+                // after. This statement locks the suite row, and every submit
+                // bumps that same row under a `state <> Cancelled` predicate — so
+                // once this commits, a concurrent submit either got in ahead of
+                // the delete below or is rejected outright. Write the suite last
+                // instead and a submit landing between the delete and the write
+                // leaves a live task in a cancelled suite that nothing will ever
+                // claim, with `incomplete_tasks` already zeroed.
+                //
+                // Zero is exact for the same reason: the delete below takes every
+                // active row of the suite, and nothing can add another.
+                let fenced = TaskSuites::Entity::update_many()
+                    .col_expr(
+                        TaskSuites::Column::State,
+                        Expr::value(TaskSuiteState::Cancelled),
+                    )
+                    .col_expr(TaskSuites::Column::IncompleteTasks, Expr::value(0))
+                    .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+                    .col_expr(TaskSuites::Column::CompletedAt, Expr::value(Some(now)))
+                    .filter(TaskSuites::Column::Id.eq(suite.id))
+                    .filter(TaskSuites::Column::State.ne(TaskSuiteState::Cancelled))
+                    .exec(txn)
+                    .await?;
+                if fenced.rows_affected == 0 {
                     return Err(Error::ApiError(ApiError::InvalidRequest(format!(
                         "Suite {suite_uuid} is already in cancelled state"
                     ))));
@@ -771,17 +814,6 @@ pub async fn user_cancel_task_suite(
                         .exec(txn)
                         .await?;
                 }
-
-                let mut suite: TaskSuites::ActiveModel = suite.into();
-                suite.state = Set(TaskSuiteState::Cancelled);
-                // Exact, not an assumption: the delete above took every active
-                // row of this suite in this transaction, so nothing is left to
-                // be incomplete, and no later `Commit` can find a row to
-                // decrement against.
-                suite.incomplete_tasks = Set(0);
-                suite.updated_at = Set(now);
-                suite.completed_at = Set(Some(now));
-                suite.update(txn).await?;
 
                 Ok((suite_id, cancelled_task_uuids))
             })

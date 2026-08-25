@@ -765,19 +765,26 @@ pub(crate) async fn stop_agent_job(
             .transaction::<_, Option<Vec<(i64, Option<i64>, i32)>>, Error>(move |txn| {
                 let queues = queues;
                 Box::pin(async move {
-                    // Locked, so the terminal check and the write below cannot
+                    // One statement, so the terminal check and the write cannot
                     // straddle the agent's own `complete`.
-                    let job_row = job::load_validate_job_locked(txn, job_handle, agent_id).await?;
-                    // It finished under us — nothing to stop, and no error either.
-                    if job_row.state.is_terminal() {
+                    let killed = job::transition_job(
+                        txn,
+                        job_handle,
+                        agent_id,
+                        &job::IN_FLIGHT,
+                        SuiteJobState::Killed,
+                        now,
+                    )
+                    .await?;
+                    let Some(job_row) = killed else {
+                        // Gone or another agent's is an error; already terminal
+                        // is not — it finished under us, so there is nothing to
+                        // stop and nothing to report.
+                        job::load_validate_job(txn, job_handle, agent_id).await?;
                         return Ok(None);
-                    }
+                    };
 
                     let suite_id = job_row.task_suite_id;
-                    let mut job_row: SuiteAgentJobs::ActiveModel = job_row.into();
-                    job_row.state = Set(SuiteJobState::Killed);
-                    job_row.updated_at = Set(now);
-                    job_row.update(txn).await?;
 
                     // Same guard as `agent_complete_job`: only release an agent
                     // still bound to this job's suite, never one teardown has
@@ -1078,13 +1085,8 @@ pub async fn agent_accept_suite(
                     // What the agent asked for, if it is still worth running.
                     let requested = match req.suite_uuid {
                         Some(suite_uuid) => {
-                            lock_runnable_suite(
-                                txn,
-                                agent_id,
-                                SuiteTarget::Uuid(suite_uuid),
-                                &blocked,
-                            )
-                            .await?
+                            runnable_suite(txn, agent_id, SuiteTarget::Uuid(suite_uuid), &blocked)
+                                .await?
                         }
                         None => None,
                     };
@@ -1095,7 +1097,7 @@ pub async fn agent_accept_suite(
                             match matching::best_available_suite_id(txn, agent_id, &blocked).await?
                             {
                                 Some(suite_id) => {
-                                    match lock_runnable_suite(
+                                    match runnable_suite(
                                         txn,
                                         agent_id,
                                         SuiteTarget::Id(suite_id),
@@ -1122,6 +1124,10 @@ pub async fn agent_accept_suite(
                     };
 
                     let suite_id = suite.id;
+                    // Before the agent write, so this transaction takes the suite
+                    // row ahead of the agent row — the order every other writer
+                    // of the pair uses.
+                    let job = job::create_job(txn, suite_id, agent_id, now).await?;
                     let spec = suite_to_spec(txn, suite).await?;
 
                     let mut agent: Agent::ActiveModel = agent.into();
@@ -1129,7 +1135,6 @@ pub async fn agent_accept_suite(
                     agent.updated_at = Set(now);
                     agent.update(txn).await?;
 
-                    let job = job::create_job(txn, suite_id, agent_id, now).await?;
                     Ok(Ok((spec, job.id, job.job_id, suite_id)))
                 })
             },
@@ -1186,17 +1191,22 @@ enum SuiteTarget {
     Id(i64),
 }
 
-/// Lock one candidate suite and answer whether this agent may run it now.
+/// Answer whether this agent may run one candidate suite now.
 ///
 /// `None` covers every way a candidate can fail — gone, not this agent's,
 /// terminal, or drained — since the caller falls through to the next candidate
-/// for all of them. The checks are re-run under the lock even for a suite
-/// `best_available_suite_id` just returned: that query takes no locks, so its
-/// answer can go stale before we take one.
+/// for all of them.
 /// `blocked` names the suites reserved for other agents, which are refused here
 /// too: `best_available_suite_id` never offers one, but an agent may still ask
 /// for one by uuid.
-async fn lock_runnable_suite<C: ConnectionTrait>(
+///
+/// Deliberately unlocked. These checks were once run under a `FOR UPDATE` taken
+/// before the first of them, and a `None` return does not release a row lock —
+/// so an agent whose suite hint had gone stale sat on a suite it would not run
+/// while reaching for another, and two of them in opposite orders deadlocked.
+/// The checks are advisory either way; the one hard invariant on this path is
+/// the job-id unique index, and `create_job` takes its lock at the end.
+async fn runnable_suite<C: ConnectionTrait>(
     txn: &C,
     agent_id: i64,
     target: SuiteTarget,
@@ -1207,7 +1217,6 @@ async fn lock_runnable_suite<C: ConnectionTrait>(
         SuiteTarget::Uuid(uuid) => query.filter(TaskSuites::Column::Uuid.eq(uuid)),
         SuiteTarget::Id(id) => query.filter(TaskSuites::Column::Id.eq(id)),
     }
-    .lock_exclusive()
     .one(txn)
     .await?;
 
@@ -1277,17 +1286,22 @@ async fn advance_job(
     pool.db
         .transaction::<_, (), Error>(|txn| {
             Box::pin(async move {
-                // The lock is what makes `expect_state` binding: a coordinator
-                // terminal written between the read and the write would
-                // otherwise drag a dead job's agent into a live-looking state.
-                let job_row = job::load_validate_job_locked(txn, job_handle, agent_id).await?;
-                job::expect_state(&job_row, from)?;
+                // The source state is in the `WHERE`, so a coordinator terminal
+                // written between check and write cannot drag a dead job's agent
+                // into a live-looking state.
+                let advanced =
+                    job::transition_job(txn, job_handle, agent_id, &[from], to, now).await?;
+                let Some(job_row) = advanced else {
+                    return Err(job::explain_failed_transition(
+                        txn,
+                        job_handle,
+                        agent_id,
+                        Some(from),
+                    )
+                    .await);
+                };
 
                 let suite_id = job_row.task_suite_id;
-                let mut job: SuiteAgentJobs::ActiveModel = job_row.into();
-                job.state = Set(to);
-                job.updated_at = Set(now);
-                job.update(txn).await?;
 
                 // Same guard as `agent_complete_job`: never write over an agent
                 // that teardown has already unassigned.
@@ -1340,31 +1354,41 @@ pub async fn agent_complete_job(
             move |txn| {
                 let queues = queues;
                 Box::pin(async move {
-                    // Locked, so the terminal check and the write below cannot
-                    // straddle a `Killed`/`Lost` written by teardown.
-                    let job_row = job::load_validate_job_locked(txn, job_handle, agent_id).await?;
-                    job::reject_if_terminal(&job_row)?;
-
                     let terminal = match &req.outcome {
                         SuiteJobOutcome::Completed => SuiteJobState::Completed,
-                        SuiteJobOutcome::Failed { reason } => {
-                            tracing::warn!(
-                                job = job_handle,
-                                job_id = job_row.job_id,
-                                kind = ?reason.kind,
-                                "Agent reported a failed job: {}",
-                                reason.message
-                            );
-                            SuiteJobState::Failed
-                        }
+                        SuiteJobOutcome::Failed { .. } => SuiteJobState::Failed,
                     };
+
+                    // One statement, so the terminal check and the write cannot
+                    // straddle a `Killed`/`Lost` written by teardown.
+                    let finished = job::transition_job(
+                        txn,
+                        job_handle,
+                        agent_id,
+                        &job::IN_FLIGHT,
+                        terminal,
+                        now,
+                    )
+                    .await?;
+                    let Some(job_row) = finished else {
+                        return Err(job::explain_failed_transition(
+                            txn, job_handle, agent_id, None,
+                        )
+                        .await);
+                    };
+
+                    if let SuiteJobOutcome::Failed { reason } = &req.outcome {
+                        tracing::warn!(
+                            job = job_handle,
+                            job_id = job_row.job_id,
+                            kind = ?reason.kind,
+                            "Agent reported a failed job: {}",
+                            reason.message
+                        );
+                    }
 
                     let suite_id = job_row.task_suite_id;
                     let job_id = job_row.job_id;
-                    let mut job_row: SuiteAgentJobs::ActiveModel = job_row.into();
-                    job_row.state = Set(terminal);
-                    job_row.updated_at = Set(now);
-                    job_row.update(txn).await?;
 
                     // Release the agent to Idle only while it is still bound to *this*
                     // job's suite. A force shutdown or a heartbeat timeout parks it

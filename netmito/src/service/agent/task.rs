@@ -85,7 +85,7 @@ pub async fn agent_fetch_tasks(
 
     let budget = queue::task_budget(&serde_json::from_value(suite.worker_schedule).inspect_err(
         |e| {
-            tracing::error!(suite_uuid = %suite_uuid, "Stored worker schedule is unreadable: {e}");
+            tracing::error!("Stored worker schedule is unreadable: {e}");
         },
     )?);
 
@@ -93,11 +93,7 @@ pub async fn agent_fetch_tasks(
     // is answered as if it were drained. `hold_job_open` still stands: an agent
     // that is holding stays holding, and comes back when the window is over.
     let Some((max_count, hinted)) = pool.suite_queues.take(suite_id, agent_id, budget) else {
-        tracing::debug!(
-            agent_uuid = %agent_uuid,
-            suite_uuid = %suite_uuid,
-            "Suite is reserved for the agents already running it; handing out nothing"
-        );
+        tracing::debug!("Suite is reserved for the agents already running it; handing out nothing");
         pool.suite_queues.served(suite_id, agent_id, 0, &[]);
         return Ok(FetchTasksResp {
             tasks: Vec::new(),
@@ -107,11 +103,7 @@ pub async fn agent_fetch_tasks(
     // Full: it is holding as much as its workers and their buffer can take. It
     // asks again the moment one of them commits.
     if max_count == 0 {
-        tracing::debug!(
-            agent_uuid = %agent_uuid,
-            suite_uuid = %suite_uuid,
-            "Agent is holding a full batch already; handing out nothing"
-        );
+        tracing::debug!("Agent is holding a full batch already; handing out nothing");
         pool.suite_queues.served(suite_id, agent_id, 0, &[]);
         return Ok(FetchTasksResp {
             tasks: Vec::new(),
@@ -188,12 +180,7 @@ pub async fn agent_fetch_tasks(
         });
     }
 
-    tracing::debug!(
-        agent_uuid = %agent_uuid,
-        suite_uuid = %suite_uuid,
-        count = tasks.len(),
-        "Agent claimed tasks from a suite"
-    );
+    tracing::debug!(count = tasks.len(), "Agent claimed tasks from a suite");
     Ok(FetchTasksResp {
         tasks,
         hold_job_open,

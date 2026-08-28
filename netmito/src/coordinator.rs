@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use argon2::password_hash::rand_core::OsRng;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::layer::SubscriberExt;
 
 use crate::api::router;
 use crate::config::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
@@ -47,31 +47,41 @@ pub struct MitoCoordinator {
 
 impl MitoCoordinator {
     pub async fn main(cli: CoordinatorConfigCli) {
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "netmito=info".into()),
-            )
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_file(true)
-                    .with_line_number(true),
-            )
-            .init();
-        match CoordinatorConfig::new(&cli) {
-            Ok(config) => {
-                let _guards = config.setup_tracing_subscriber().inspect_err(|e| {
+        // `set_default` rather than `init`: config loading is the only thing
+        // this has to cover, and the real subscriber replaces it below
+        let bootstrap = tracing::dispatcher::set_default(&tracing::Dispatch::new(
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "netmito=info".into()),
+                )
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_file(true)
+                        .with_line_number(true),
+                ),
+        ));
+        let config = match CoordinatorConfig::new(&cli) {
+            Ok(config) => config,
+            Err(e) => {
+                tracing::error!("{}", e);
+                return;
+            }
+        };
+        // Nothing below would be logged anywhere if this failed: the bootstrap
+        // is about to go and it is what installs the replacement.
+        let _guards = match config.setup_tracing_subscriber() {
+            Ok(guards) => guards,
+            Err(e) => {
+                tracing::error!("{}", e);
+                return;
+            }
+        };
+        drop(bootstrap);
+        match Self::setup(config).await {
+            Ok(coordinator) => {
+                if let Err(e) = coordinator.run().await {
                     tracing::error!("{}", e);
-                });
-                match Self::setup(config).await {
-                    Ok(coordinator) => {
-                        if let Err(e) = coordinator.run().await {
-                            tracing::error!("{}", e);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("{}", e);
-                    }
                 }
             }
             Err(e) => {

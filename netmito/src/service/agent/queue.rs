@@ -234,6 +234,17 @@ impl SuiteQueues {
                 outstanding,
             },
         );
+        tracing::trace!(
+            suite_id,
+            agent_id,
+            job_id,
+            budget,
+            outstanding,
+            opened,
+            jobs = queue.jobs.len(),
+            ready = queue.ready.len(),
+            "A job joined the suite's queue"
+        );
         opened
     }
 
@@ -281,9 +292,18 @@ impl SuiteQueues {
             reservation.awaited.retain(|id| *id != agent_id);
         }
         queue.settle_reservation();
+        let (jobs, ready) = (queue.jobs.len(), queue.ready.len());
         if queue.jobs.is_empty() {
             queues.remove(&suite_id);
         }
+        tracing::trace!(
+            suite_id,
+            agent_id,
+            reclaimed,
+            jobs,
+            ready,
+            "A job left the suite's queue"
+        );
     }
 
     /// Every job on this suite ended at once (the suite was force-cancelled).
@@ -292,7 +312,14 @@ impl SuiteQueues {
     /// suite's tasks itself, in the transaction that kills the jobs, so nothing
     /// is reclaimed per agent to compare against.
     pub fn close_suite(&self, suite_id: i64) {
-        self.lock().remove(&suite_id);
+        if let Some(queue) = self.lock().remove(&suite_id) {
+            tracing::trace!(
+                suite_id,
+                jobs = queue.jobs.len(),
+                ready = queue.ready.len(),
+                "Dropped the suite's queue along with every job on it"
+            );
+        }
     }
 
     /// These tasks of the suite are claimable now — newly submitted, triggered
@@ -319,6 +346,7 @@ impl SuiteQueues {
         let Some(queue) = queues.get_mut(&suite_id) else {
             return;
         };
+        let before = queue.ready.len();
         queue.ready.extend(
             tasks
                 .into_iter()
@@ -326,6 +354,14 @@ impl SuiteQueues {
         );
         queue.ready.sort_unstable();
         queue.ready.dedup();
+        // Pending, not done: the transaction that made these claimable has not
+        // committed yet, and a rollback leaves them for `drop_unclaimable`.
+        tracing::trace!(
+            suite_id,
+            added = queue.ready.len().saturating_sub(before),
+            ready = queue.ready.len(),
+            "Queued tasks as claimable, ahead of the commit that makes them so"
+        );
     }
 
     /// Queue what a reclaim handed back, in the shape
@@ -338,7 +374,7 @@ impl SuiteQueues {
     /// [`job::reclaim_agent_tasks`]: crate::service::agent::job::reclaim_agent_tasks
     pub fn push_reclaimed(&self, reclaimed: &[(i64, Option<i64>, i32)]) {
         let mut queues = self.lock();
-        let mut touched: HashSet<i64> = HashSet::new();
+        let mut touched: HashMap<i64, usize> = HashMap::new();
         for (task_id, suite_id, priority) in reclaimed {
             let Some(suite_id) = *suite_id else { continue };
             let Some(queue) = queues.get_mut(&suite_id) else {
@@ -348,12 +384,18 @@ impl SuiteQueues {
                 id: *task_id,
                 priority: *priority,
             });
-            touched.insert(suite_id);
+            *touched.entry(suite_id).or_default() += 1;
         }
-        for suite_id in touched {
+        for (suite_id, pushed) in touched {
             if let Some(queue) = queues.get_mut(&suite_id) {
                 queue.ready.sort_unstable();
                 queue.ready.dedup();
+                tracing::trace!(
+                    suite_id,
+                    pushed,
+                    ready = queue.ready.len(),
+                    "Queued back what a reclaim took off an agent"
+                );
             }
         }
     }
@@ -372,8 +414,15 @@ impl SuiteQueues {
         let Some(queue) = queues.get_mut(&suite_id) else {
             return;
         };
+        let before = queue.ready.len();
         queue.ready.retain(|task| !gone.contains(&task.id));
         queue.settle_reservation();
+        tracing::trace!(
+            suite_id,
+            removed = before.saturating_sub(queue.ready.len()),
+            ready = queue.ready.len(),
+            "Dropped tasks a cancellation took out from under the queue"
+        );
     }
 
     /// The suites with a live entry, which is what the reconcile tick asks the
@@ -416,16 +465,28 @@ impl SuiteQueues {
             let condemned: HashSet<i64> = missing.intersection(&queue.suspects).copied().collect();
             queue.suspects = missing.difference(&condemned).copied().collect();
             if condemned.is_empty() {
+                if !queue.suspects.is_empty() {
+                    tracing::trace!(
+                        suite_id,
+                        suspects = queue.suspects.len(),
+                        ready = queue.ready.len(),
+                        "Queued tasks the database does not call claimable yet; one pass is not proof"
+                    );
+                }
                 continue;
             }
             queue.ready.retain(|task| !condemned.contains(&task.id));
             queue.settle_reservation();
             // Nothing reaches here without a bug or a rolled-back transaction:
             // every path that makes a suite task unclaimable is supposed to say
-            // so itself.
+            // so itself. The ids are the whole evidence — they are what a
+            // postmortem looks up in `archived_tasks`.
             tracing::warn!(
                 suite_id,
                 dropped = condemned.len(),
+                ?condemned,
+                suspects = queue.suspects.len(),
+                ready = queue.ready.len(),
                 "Dropped queued tasks the database has not called claimable for two passes"
             );
         }
@@ -487,7 +548,13 @@ impl SuiteQueues {
     pub fn release_reservation(&self, suite_id: i64) {
         let mut queues = self.lock();
         if let Some(queue) = queues.get_mut(&suite_id) {
-            queue.reservation = None;
+            if queue.reservation.take().is_some() {
+                tracing::trace!(
+                    suite_id,
+                    ready = queue.ready.len(),
+                    "Released the suite's reservation: the queue outgrew what its jobs can take"
+                );
+            }
         }
     }
 
@@ -502,11 +569,20 @@ impl SuiteQueues {
         if queue.jobs.is_empty() {
             return;
         }
+        let awaited = notified.len();
         queue.reservation = Some(Reservation {
             agents: queue.jobs.keys().copied().collect(),
             awaited: notified,
             until: Instant::now() + window,
         });
+        tracing::trace!(
+            suite_id,
+            agents = queue.jobs.len(),
+            awaited,
+            ready = queue.ready.len(),
+            ?window,
+            "Reserved the suite for the jobs already running it"
+        );
     }
 
     /// Is a window in force on this suite? Then it is nobody else's to be
@@ -569,10 +645,24 @@ impl SuiteQueues {
         let now = Instant::now();
         let mut queues = self.lock();
         let Some(queue) = queues.get_mut(&suite_id) else {
+            // `open` and `restore` between them are supposed to cover every live
+            // job, so this is a gap in one of them rather than a normal fetch.
+            tracing::debug!(
+                suite_id,
+                agent_id,
+                budget,
+                "A job fetched against a suite the queue is not tracking"
+            );
             return Some((budget, Vec::new()));
         };
         queue.expire(now);
         if queue.reserved_against(agent_id) {
+            tracing::trace!(
+                suite_id,
+                agent_id,
+                ready = queue.ready.len(),
+                "Refused a claim: the suite is reserved for the jobs already on it"
+            );
             return None;
         }
         // The schedule is the authority on the budget, so a fetch is also when a
@@ -581,12 +671,21 @@ impl SuiteQueues {
             job.budget = budget;
             budget.saturating_sub(job.outstanding)
         });
-        let hinted = queue
+        let hinted: Vec<i64> = queue
             .ready
             .iter()
             .take(want as usize)
             .map(|task| task.id)
             .collect();
+        tracing::trace!(
+            suite_id,
+            agent_id,
+            budget,
+            want,
+            hinted = hinted.len(),
+            ready = queue.ready.len(),
+            "Sized a claim batch and offered the queue's pick of it"
+        );
         Some((want, hinted))
     }
 
@@ -609,28 +708,61 @@ impl SuiteQueues {
     /// whoever else could help. A fetch that was refused, or that found nothing,
     /// still counts as the turn.
     pub fn served(&self, suite_id: i64, agent_id: i64, hinted: usize, claimed: &[i64]) {
+        let taken: HashSet<i64> = claimed.iter().copied().collect();
+        let mut queues = self.lock();
+        let Some(queue) = queues.get_mut(&suite_id) else {
+            if !claimed.is_empty() {
+                tracing::warn!(
+                    suite_id,
+                    agent_id,
+                    claimed = claimed.len(),
+                    "A claim was served for a suite the queue is not tracking"
+                );
+            }
+            return;
+        };
         if claimed.len() > hinted {
+            // Which ids, not just how many: `take` only reads the hinted ones,
+            // so anything claimed that is not in `ready` now is work some path
+            // made claimable without saying so. An empty list means the tasks
+            // arrived between the two calls, which is the harmless way to be
+            // here.
+            let queued: HashSet<i64> = queue.ready.iter().map(|task| task.id).collect();
+            let unknown: Vec<i64> = claimed
+                .iter()
+                .copied()
+                .filter(|id| !queued.contains(id))
+                .collect();
             tracing::warn!(
                 suite_id,
                 agent_id,
                 hinted,
                 claimed = claimed.len(),
+                unknown = unknown.len(),
+                unknown_ids = ?unknown,
+                ready = queue.ready.len(),
                 "A claim found more of a suite's tasks than the queue knew were claimable"
             );
         }
-        let taken: HashSet<i64> = claimed.iter().copied().collect();
-        let mut queues = self.lock();
-        let Some(queue) = queues.get_mut(&suite_id) else {
-            return;
-        };
+        let mut outstanding = 0;
         if let Some(job) = queue.jobs.get_mut(&agent_id) {
             job.outstanding = job.outstanding.saturating_add(claimed.len() as u32);
+            outstanding = job.outstanding;
         }
         queue.ready.retain(|task| !taken.contains(&task.id));
         if let Some(reservation) = queue.reservation.as_mut() {
             reservation.awaited.retain(|id| *id != agent_id);
         }
         queue.settle_reservation();
+        tracing::trace!(
+            suite_id,
+            agent_id,
+            claimed = claimed.len(),
+            outstanding,
+            ready = queue.ready.len(),
+            reserved = queue.reservation.is_some(),
+            "Recorded what a claim took"
+        );
     }
 
     /// A queued task's priority changed, so its place in the queue changes with
@@ -653,6 +785,12 @@ impl SuiteQueues {
         }
         task.priority = priority;
         queue.ready.sort_unstable();
+        tracing::trace!(
+            suite_id,
+            task_id,
+            priority,
+            "Moved a queued task to where a claim would now take it"
+        );
     }
 
     /// A task this job was holding is committed and gone, so the job has room
@@ -665,6 +803,13 @@ impl SuiteQueues {
             .and_then(|queue| queue.jobs.get_mut(&agent_id))
         {
             job.outstanding = job.outstanding.saturating_sub(1);
+            tracing::trace!(
+                suite_id,
+                agent_id,
+                outstanding = job.outstanding,
+                budget = job.budget,
+                "A job committed a task and has room for another"
+            );
         }
     }
 }
@@ -703,11 +848,20 @@ pub async fn ready_tasks<C: ConnectionTrait>(
 ///
 /// See [`SuiteQueues::drop_unclaimable`] for why a task is only dropped on the
 /// second pass that misses it.
+/// Runs on a tick with no caller to inherit context from, so it opens a span of
+/// its own: without one, the warnings raised below carry a bare `suite_id` and
+/// nothing to say which pass raised them.
+#[tracing::instrument(
+    name = "suite_queue_reconcile",
+    skip_all,
+    fields(suites = tracing::field::Empty)
+)]
 pub async fn reconcile(pool: &InfraPool) -> crate::error::Result<()> {
     let suite_ids = pool.suite_queues.tracked_suites();
     if suite_ids.is_empty() {
         return Ok(());
     }
+    tracing::Span::current().record("suites", suite_ids.len());
     // Seeded with every suite asked about, so one with nothing claimable is told
     // apart from one the query did not cover.
     let mut claimable: HashMap<i64, HashSet<i64>> =
@@ -715,6 +869,10 @@ pub async fn reconcile(pool: &InfraPool) -> crate::error::Result<()> {
     for (suite_id, task_id, _) in ready_tasks(&pool.db, suite_ids).await? {
         claimable.entry(suite_id).or_default().insert(task_id);
     }
+    tracing::debug!(
+        claimable = claimable.values().map(HashSet::len).sum::<usize>(),
+        "Read what the database calls claimable for the tracked suites"
+    );
     pool.suite_queues.drop_unclaimable(&claimable);
     Ok(())
 }

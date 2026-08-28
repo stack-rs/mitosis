@@ -1143,6 +1143,13 @@ pub async fn agent_accept_suite(
 
     match outcome {
         Ok((suite, job, job_id, suite_id)) => {
+            // Which suite and which job, for every line the rest of this
+            // request emits — including the ones raised in `SuiteQueues`, which
+            // knows the suite only by its row id.
+            let span = tracing::Span::current();
+            span.record("suite_uuid", tracing::field::display(suite.uuid));
+            span.record("job_id", job_id);
+
             // The suite's first job: nothing has been pushed at an entry that
             // did not exist, so the work already waiting has to be read in.
             if pool.suite_queues.open(

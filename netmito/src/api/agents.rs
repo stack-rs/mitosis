@@ -137,6 +137,17 @@ async fn heartbeat(
 /// `POST /agents/suite` — pick a suite and claim it, opening a job. The body's
 /// optional `suite_uuid` is a preference; a stale one falls back to the best
 /// available.
+///
+/// Which suite it lands on is decided inside the transaction, so `suite_uuid`
+/// and `job_id` are recorded once they are known rather than declared here.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        agent_uuid = %a.uuid,
+        suite_uuid = tracing::field::Empty,
+        job_id = tracing::field::Empty,
+    )
+)]
 async fn accept_suite(
     Extension(a): Extension<AuthAgent>,
     State(pool): State<InfraPool>,
@@ -197,6 +208,7 @@ async fn report_hook(
 }
 
 /// `POST /agents/tasks/fetch` — claim a batch of the suite's ready tasks.
+#[tracing::instrument(skip_all, fields(agent_uuid = %a.uuid, suite_uuid = %req.suite_uuid))]
 async fn fetch_tasks(
     Extension(a): Extension<AuthAgent>,
     State(pool): State<InfraPool>,

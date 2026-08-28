@@ -460,7 +460,7 @@ impl CoordinatorConfig {
             let (non_blocking, guard) = tracing_appender::non_blocking(file_logger);
             let env_filter = tracing_subscriber::EnvFilter::try_from_env("MITO_FILE_LOG_LEVEL")
                 .unwrap_or_else(|_| "netmito=info".into());
-            let coordinator_guard = tracing_subscriber::registry()
+            tracing_subscriber::registry()
                 .with(
                     tracing_subscriber::fmt::layer()
                         .with_file(true)
@@ -477,13 +477,13 @@ impl CoordinatorConfig {
                         .with_writer(non_blocking)
                         .with_filter(env_filter),
                 )
-                .set_default();
+                .init();
             Ok(TracingGuard {
-                subscriber_guard: Some(coordinator_guard),
+                subscriber_guard: None,
                 file_guard: Some(guard),
             })
         } else {
-            let coordinator_guard = tracing_subscriber::registry()
+            tracing_subscriber::registry()
                 .with(
                     tracing_subscriber::fmt::layer()
                         .with_file(true)
@@ -493,9 +493,9 @@ impl CoordinatorConfig {
                                 .unwrap_or_else(|_| "netmito=info".into()),
                         ),
                 )
-                .set_default();
+                .init();
             Ok(TracingGuard {
-                subscriber_guard: Some(coordinator_guard),
+                subscriber_guard: None,
                 file_guard: None,
             })
         }

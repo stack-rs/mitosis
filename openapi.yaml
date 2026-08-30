@@ -5308,6 +5308,7 @@ components:
       required:
         - info
         - eligible_agents
+        - active_jobs
       properties:
         info:
           $ref: "#/components/schemas/ParsedTaskSuiteInfo"
@@ -5320,6 +5321,15 @@ components:
             UUIDs of every agent that may run this suite:
             `(tag-matched ∪ included) − excluded`, restricted to agents the
             suite's group has write access to
+        active_jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/SuiteJobInfo"
+          description: >-
+            The suite's non-terminal jobs (`Provisioning`, `Executing`,
+            `Cleanup`), oldest first — the agents actually running it right now,
+            as opposed to the ones merely eligible. Empty when nothing holds the
+            suite.
 
     SuiteAgentOverrideAction:
       type: string

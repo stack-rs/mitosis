@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::entity::state::TaskSuiteState;
 
+use super::agent::SuiteJobInfo;
 use super::exec::ExecHooks;
 
 /// Request to create a new task suite
@@ -180,13 +181,17 @@ pub struct ParsedTaskSuiteInfo {
     pub completed_at: Option<OffsetDateTime>,
 }
 
-/// Detailed suite response: the suite plus the UUIDs of the agents currently
+/// Detailed suite response: the suite, the UUIDs of the agents currently
 /// eligible to run it — tag-matched plus manual includes, minus manual excludes,
-/// computed at query time rather than stored
+/// computed at query time rather than stored — and the jobs running it right now.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSuiteQueryResp {
     pub info: ParsedTaskSuiteInfo,
     pub eligible_agents: Vec<Uuid>,
+    /// The suite's non-terminal jobs, oldest first: who is running it and how
+    /// far along each runner is. Empty means nothing holds the suite. Eligible
+    /// agents are the ones that *may* run it, these are the ones that *are*.
+    pub active_jobs: Vec<SuiteJobInfo>,
 }
 
 /// Query parameter for `DELETE /suites/{uuid}` selecting the cancellation mode

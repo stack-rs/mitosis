@@ -10,8 +10,8 @@ use crate::{
     config::client::ClientInteractiveShell,
     entity::role::GroupWorkerRole,
     schema::{
-        AdminChangePasswordReq, CreateUserReq, GroupQueryInfo, ParsedTaskQueryInfo,
-        ParsedTaskSuiteInfo, TaskQueryInfo, TaskSuiteInfo, UserChangePasswordReq, WorkerQueryInfo,
+        AdminChangePasswordReq, CreateUserReq, GroupQueryInfo, ParsedTaskQueryInfo, TaskQueryInfo,
+        TaskSuiteInfo, TaskSuiteQueryResp, UserChangePasswordReq, WorkerQueryInfo,
     },
     service::auth::{get_and_prompt_password, get_and_prompt_username},
 };
@@ -255,7 +255,12 @@ pub(crate) fn output_suite_info(info: &TaskSuiteInfo) {
     );
 }
 
-pub(crate) fn output_parsed_suite_info(info: &ParsedTaskSuiteInfo, eligible_agents: &[uuid::Uuid]) {
+pub(crate) fn output_parsed_suite_info(resp: &TaskSuiteQueryResp) {
+    let TaskSuiteQueryResp {
+        info,
+        eligible_agents,
+        active_jobs,
+    } = resp;
     tracing::info!("Suite UUID: {}", info.uuid);
     if let Some(ref name) = info.name {
         tracing::info!("Name: {}", name);
@@ -298,6 +303,22 @@ pub(crate) fn output_parsed_suite_info(info: &ParsedTaskSuiteInfo, eligible_agen
         tracing::info!("Currently eligible agents:");
         for agent in eligible_agents {
             tracing::info!(" > {}", agent);
+        }
+    }
+    if active_jobs.is_empty() {
+        tracing::info!("Active jobs: None");
+    } else {
+        tracing::info!("Active jobs:");
+        for job in active_jobs {
+            tracing::info!(
+                " > Job {} ({}), agent: {}, updated {}",
+                job.job_id,
+                job.state,
+                job.agent_uuid
+                    .map(|u| u.to_string())
+                    .unwrap_or("[detached]".to_string()),
+                job.updated_at,
+            );
         }
     }
 }

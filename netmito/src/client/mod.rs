@@ -2149,7 +2149,7 @@ impl MitoClient {
                 }
                 SuitesCommands::Get(args) => match self.suites_get(args).await {
                     Ok(resp) => {
-                        output_parsed_suite_info(&resp.info, &resp.eligible_agents);
+                        output_parsed_suite_info(&resp);
                     }
                     Err(e) => {
                         tracing::error!("{}", e);

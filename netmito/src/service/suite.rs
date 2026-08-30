@@ -608,6 +608,46 @@ pub async fn user_get_task_suite_by_uuid(
     let eligible_agents =
         crate::service::agent::matching::eligible_agent_uuids(&pool.db, suite.id).await?;
 
+    // The jobs holding the suite right now — the same shape `user_query_suite_jobs`
+    // lists, narrowed to the non-terminal states so this answers "who is running
+    // it", not "who ever ran it".
+    let jobs_stmt = Query::select()
+        .columns([
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::JobId),
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::State),
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::CreatedAt),
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::UpdatedAt),
+        ])
+        .expr_as(
+            Expr::col((Agent::Entity, Agent::Column::Uuid)),
+            Alias::new("agent_uuid"),
+        )
+        .from(SuiteAgentJobs::Entity)
+        // Left join: `agent_id` is nullable to leave room for a future detach.
+        .join(
+            sea_orm::JoinType::LeftJoin,
+            Agent::Entity,
+            Expr::col((Agent::Entity, Agent::Column::Id)).eq(Expr::col((
+                SuiteAgentJobs::Entity,
+                SuiteAgentJobs::Column::AgentId,
+            ))),
+        )
+        .and_where(
+            Expr::col((SuiteAgentJobs::Entity, SuiteAgentJobs::Column::TaskSuiteId)).eq(suite.id),
+        )
+        .and_where(
+            Expr::col((SuiteAgentJobs::Entity, SuiteAgentJobs::Column::State))
+                .is_in(crate::service::agent::job::IN_FLIGHT),
+        )
+        .order_by_expr(
+            Expr::col((SuiteAgentJobs::Entity, SuiteAgentJobs::Column::JobId)).into(),
+            sea_orm::Order::Asc,
+        )
+        .to_owned();
+    let active_jobs = SuiteJobInfo::find_by_statement(builder.build(&jobs_stmt))
+        .all(&pool.db)
+        .await?;
+
     let worker_schedule: WorkerSchedulePlan = serde_json::from_value(suite.worker_schedule)?;
     let exec_hooks: Option<ExecHooks> = suite.exec_hooks.map(serde_json::from_value).transpose()?;
 
@@ -632,6 +672,7 @@ pub async fn user_get_task_suite_by_uuid(
             completed_at: suite.completed_at,
         },
         eligible_agents,
+        active_jobs,
     })
 }
 

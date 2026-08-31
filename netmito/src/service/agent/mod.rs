@@ -551,6 +551,9 @@ pub enum RetireCause {
     /// A new process registered against the same machine, so whatever was
     /// running under the old one is over whether it knows it or not.
     Reregistered,
+    /// The agent said it was exiting. Normally it has already drained and
+    /// completed its job by then, so this is only a teardown of what is left.
+    SelfExit,
 }
 
 impl RetireCause {
@@ -558,7 +561,9 @@ impl RetireCause {
         match self {
             // The agent was told to stop; the jobs died with it, not on their own.
             Self::ForceShutdown => SuiteJobState::Killed,
-            Self::HeartbeatTimeout | Self::Reregistered => SuiteJobState::Lost,
+            // A drained self-exit leaves nothing here to terminate; a job still
+            // open at that point is one whose `complete` never landed.
+            Self::HeartbeatTimeout | Self::Reregistered | Self::SelfExit => SuiteJobState::Lost,
         }
     }
 }

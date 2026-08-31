@@ -37,6 +37,7 @@ pub fn agents_router(st: InfraPool) -> Router<InfraPool> {
         .with_state(st.clone());
 
     let agent_router = Router::new()
+        .route("/", delete(agent_exit))
         .route("/heartbeat", post(heartbeat))
         .route("/suite", post(accept_suite))
         .route("/job/start", post(start_job))
@@ -121,6 +122,22 @@ async fn stop_agent_job(
 }
 
 // ── execution loop (agent-authed) ──
+
+/// `DELETE /agents` — the agent is exiting, park it `Offline` now.
+///
+/// Sent on the way out so the fleet stops counting a process that is gone
+/// instead of waiting out its heartbeat. Idempotent, and safe on a job the
+/// agent never got to finish: whatever is still open is torn down as if it had
+/// been lost.
+async fn agent_exit(
+    Extension(a): Extension<AuthAgent>,
+    State(pool): State<InfraPool>,
+) -> Result<(), ApiError> {
+    service::agent::retire_agent(&pool, a.id, service::agent::RetireCause::SelfExit)
+        .await
+        .map_err(map_service_error)?;
+    Ok(())
+}
 
 /// `POST /agents/heartbeat` — liveness plus the notifications the agent missed.
 async fn heartbeat(

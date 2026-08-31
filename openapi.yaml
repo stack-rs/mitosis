@@ -2004,6 +2004,25 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+    delete:
+      summary: Report that the agent is exiting
+      description: >-
+        Sent by the agent itself on the way out, so the fleet stops counting a
+        process that is gone instead of waiting out its heartbeat. **The agent
+        record is never deleted** — this marks it Offline, the same teardown a
+        missed heartbeat performs. An agent normally drains and completes its
+        job before calling this, but a job still open is closed out as Lost and
+        its uncommitted tasks reclaimed. Idempotent.
+      operationId: agentExit
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      responses:
+        "200":
+          description: Agent marked Offline
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /agents/query:
     post:

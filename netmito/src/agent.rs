@@ -298,7 +298,12 @@ impl MitoAgent {
             fetch_wake: watch::Sender::new(0),
         };
 
-        client.run_loop().await
+        let res = client.run_loop().await;
+        // A double ctrl-c never reaches here
+        // We are reporting either user gracefully shutdown the agent, or
+        // the job thread failed.
+        client.deregister().await;
+        res
     }
 
     /// Resolve a stable machine code for this host.
@@ -518,6 +523,24 @@ impl AgentClient {
             }
             tracing::debug!("Agent WebSocket task stopped");
         })
+    }
+
+    /// Tell the coordinator this process is gone, so it stops counting the
+    /// agent live instead of waiting out its heartbeat.
+    ///
+    /// Best-effort with a short timeout: a coordinator we cannot reach must not
+    /// hold the exit open, and its heartbeat sweep retires us anyway.
+    async fn deregister(&self) {
+        if let Err(e) = self
+            .http_client
+            .delete(self.api_url("agents").as_str())
+            .bearer_auth(&self.token)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+        {
+            tracing::warn!("Failed to tell the coordinator we are exiting: {e}");
+        }
     }
 
     /// Wind down and stop: the tasks in hand finish and cleanup runs, but

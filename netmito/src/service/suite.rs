@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use sea_orm::sea_query::extension::postgres::PgExpr;
-use sea_orm::sea_query::{Alias, Func, PgFunc, Query};
+use sea_orm::sea_query::{
+    Alias, CommonTableExpression, DeleteStatement, Func, InsertStatement, PgFunc, Query, WithClause,
+};
 use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, Set, TransactionTrait};
 use uuid::Uuid;
 
@@ -27,6 +29,11 @@ use crate::service::task::{parse_operators_with_number, OperatorWithNumber};
 #[derive(FromQueryResult)]
 struct GroupIdResult {
     id: i64,
+}
+
+#[derive(FromQueryResult)]
+struct TaskUuidResult {
+    uuid: Uuid,
 }
 
 /// Sweep suites that have gone quiet out of `Open`.
@@ -743,6 +750,7 @@ pub async fn user_cancel_task_suite(
     op: CancelTaskSuiteOp,
 ) -> Result<()> {
     let now = TimeDateTimeWithTimeZone::now_utc();
+    let builder = pool.db.get_database_backend();
 
     let (suite_id, cancelled_task_uuids) = pool
         .db
@@ -800,65 +808,119 @@ pub async fn user_cancel_task_suite(
                 })
                 .inspect_err(|e| tracing::error!("{}", e))?;
 
-                // Archive every task of the suite as Cancelled. `Cancelled` rows
-                // are included deliberately: that state means an agent reported
-                // `Cancel` and has not yet sent the `Commit` that would archive
-                // the task. Leaving them behind stalls them in `active_tasks`
-                // forever — the `Commit` is about to be refused by a terminal
-                // job, no other agent can claim a non-`Ready` task, and nothing
-                // reclaims that state. Taking them here is what lets the counter
-                // below be exact.
-                let tasks = ActiveTasks::Entity::delete_many()
-                    .filter(ActiveTasks::Column::TaskSuiteId.eq(suite.id))
-                    .filter(ActiveTasks::Column::State.is_not_in([TaskState::Unknown]))
-                    .exec_with_returning(txn)
-                    .await?;
+                // Avoid returning the rows so that we won't trigger psql's too many
+                // argument error when archiving many tasks.
+                //
+                // `Cancelled` rows are taken deliberately: that state means an
+                // agent reported `Cancel` and has not yet sent the `Commit` that
+                // would archive the task. Leaving them behind stalls them in
+                // `active_tasks` forever — the `Commit` is about to be refused by
+                // a terminal job, no other agent can claim a non-`Ready` task, and
+                // nothing reclaims that state.
+                let delete_stmt = DeleteStatement::new()
+                    .from_table(ActiveTasks::Entity)
+                    .and_where(Expr::col(ActiveTasks::Column::TaskSuiteId).eq(suite.id))
+                    .and_where(
+                        Expr::col(ActiveTasks::Column::State).is_not_in([TaskState::Unknown]),
+                    )
+                    .returning_all()
+                    .to_owned();
+                let deleted_cte = CommonTableExpression::new()
+                    .query(delete_stmt)
+                    .table_name(Alias::new("deleted"))
+                    .to_owned();
+
+                // The archived copy: every column read out of `deleted` by name,
+                // with `updated_at`, `state` and `result` overwritten by three
+                // values bound once for the whole statement.
+                let select_from_deleted = Query::select()
+                    .expr(Expr::col(Alias::new("id")))
+                    .expr(Expr::col(Alias::new("creator_id")))
+                    .expr(Expr::col(Alias::new("group_id")))
+                    .expr(Expr::col(Alias::new("task_id")))
+                    .expr(Expr::col(Alias::new("uuid")))
+                    .expr(Expr::col(Alias::new("tags")))
+                    .expr(Expr::col(Alias::new("labels")))
+                    .expr(Expr::col(Alias::new("created_at")))
+                    .expr(Expr::value(now))
+                    .expr(Expr::value(TaskState::Cancelled))
+                    .expr(Expr::col(Alias::new("runner_uuid")))
+                    .expr(Expr::col(Alias::new("exec_options")))
+                    .expr(Expr::col(Alias::new("priority")))
+                    .expr(Expr::col(Alias::new("spec")))
+                    .expr(Expr::value(result))
+                    .expr(Expr::col(Alias::new("upstream_task_uuid")))
+                    .expr(Expr::col(Alias::new("downstream_task_uuid")))
+                    .expr(Expr::col(Alias::new("task_suite_id")))
+                    .from(Alias::new("deleted"))
+                    .to_owned();
+
+                let mut insert_stmt = InsertStatement::new()
+                    .into_table(ArchivedTasks::Entity)
+                    .columns([
+                        ArchivedTasks::Column::Id,
+                        ArchivedTasks::Column::CreatorId,
+                        ArchivedTasks::Column::GroupId,
+                        ArchivedTasks::Column::TaskId,
+                        ArchivedTasks::Column::Uuid,
+                        ArchivedTasks::Column::Tags,
+                        ArchivedTasks::Column::Labels,
+                        ArchivedTasks::Column::CreatedAt,
+                        ArchivedTasks::Column::UpdatedAt,
+                        ArchivedTasks::Column::State,
+                        ArchivedTasks::Column::RunnerUuid,
+                        ArchivedTasks::Column::ExecOptions,
+                        ArchivedTasks::Column::Priority,
+                        ArchivedTasks::Column::Spec,
+                        ArchivedTasks::Column::Result,
+                        ArchivedTasks::Column::UpstreamTaskUuid,
+                        ArchivedTasks::Column::DownstreamTaskUuid,
+                        // Without this the archived copy of a suite task loses
+                        // its suite.
+                        ArchivedTasks::Column::TaskSuiteId,
+                    ])
+                    .to_owned();
+                // Infallible here: the column list and the select have the same
+                // arity, which is a property of this code, not of the request.
+                insert_stmt.select_from(select_from_deleted).unwrap();
+                let archived_cte = CommonTableExpression::new()
+                    .query(insert_stmt)
+                    .table_name(Alias::new("archived"))
+                    .to_owned();
 
                 // The in-flight subset is the only one an agent is holding right
                 // now. Those agents are told which task uuids vanished, so they
                 // stop rather than reporting against rows we just archived.
-                let cancelled_task_uuids: Vec<Uuid> = tasks
-                    .iter()
-                    .filter(|t| {
-                        matches!(
-                            t.state,
-                            TaskState::Running | TaskState::Finished | TaskState::Cancelled
-                        )
-                    })
-                    .map(|t| t.uuid)
-                    .collect();
+                //
+                // This reads `deleted`, not `archived`, because it needs each
+                // task's state as it stood *before* the archive rewrote it to
+                // `Cancelled`. `archived` is never referenced, and does not have
+                // to be: Postgres runs a data-modifying CTE exactly once and to
+                // completion whether or not the primary query reads its output.
+                let in_flight_stmt = Query::select()
+                    .expr(Expr::col(Alias::new("uuid")))
+                    .from(Alias::new("deleted"))
+                    .and_where(Expr::col(Alias::new("state")).is_in([
+                        TaskState::Running,
+                        TaskState::Finished,
+                        TaskState::Cancelled,
+                    ]))
+                    .to_owned();
+
+                let with_ctes = WithClause::new()
+                    .cte(deleted_cte)
+                    .cte(archived_cte)
+                    .to_owned();
+                let cancelled_task_uuids: Vec<Uuid> = TaskUuidResult::find_by_statement(
+                    builder.build(&in_flight_stmt.with(with_ctes)),
+                )
+                .all(txn)
+                .await?
+                .into_iter()
+                .map(|t| t.uuid)
+                .collect();
 
                 let suite_id = suite.id;
-                if !tasks.is_empty() {
-                    let archived: Vec<ArchivedTasks::ActiveModel> = tasks
-                        .into_iter()
-                        .map(|task| ArchivedTasks::ActiveModel {
-                            id: Set(task.id),
-                            creator_id: Set(task.creator_id),
-                            group_id: Set(task.group_id),
-                            task_id: Set(task.task_id),
-                            uuid: Set(task.uuid),
-                            tags: Set(task.tags),
-                            labels: Set(task.labels),
-                            created_at: Set(task.created_at),
-                            updated_at: Set(now),
-                            state: Set(TaskState::Cancelled),
-                            runner_uuid: Set(task.runner_uuid),
-                            priority: Set(task.priority),
-                            spec: Set(task.spec),
-                            exec_options: Set(task.exec_options),
-                            result: Set(Some(result.clone())),
-                            upstream_task_uuid: Set(task.upstream_task_uuid),
-                            downstream_task_uuid: Set(task.downstream_task_uuid),
-                            task_suite_id: Set(task.task_suite_id),
-                        })
-                        .collect();
-
-                    ArchivedTasks::Entity::insert_many(archived)
-                        .exec(txn)
-                        .await?;
-                }
-
                 Ok((suite_id, cancelled_task_uuids))
             })
         })

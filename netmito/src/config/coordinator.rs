@@ -428,7 +428,7 @@ impl CoordinatorConfig {
     }
 
     pub fn setup_tracing_subscriber(&self) -> crate::error::Result<TracingGuard> {
-        if self.file_log {
+        let (file_layer, file_guard) = if self.file_log {
             let file_logger = self
                 .log_path
                 .as_ref()
@@ -460,45 +460,32 @@ impl CoordinatorConfig {
             let (non_blocking, guard) = tracing_appender::non_blocking(file_logger);
             let env_filter = tracing_subscriber::EnvFilter::try_from_env("MITO_FILE_LOG_LEVEL")
                 .unwrap_or_else(|_| "netmito=info".into());
-            tracing_subscriber::registry()
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .with_file(true)
-                        .with_line_number(true)
-                        .with_filter(
-                            tracing_subscriber::EnvFilter::try_from_default_env()
-                                .unwrap_or_else(|_| "netmito=info".into()),
-                        ),
-                )
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .with_file(true)
-                        .with_line_number(true)
-                        .with_writer(non_blocking)
-                        .with_filter(env_filter),
-                )
-                .init();
-            Ok(TracingGuard {
-                subscriber_guard: None,
-                file_guard: Some(guard),
-            })
+            let layer = tracing_subscriber::fmt::layer()
+                .with_file(true)
+                .with_line_number(true)
+                .with_writer(non_blocking)
+                .with_filter(env_filter);
+            (Some(layer), Some(guard))
         } else {
-            tracing_subscriber::registry()
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .with_file(true)
-                        .with_line_number(true)
-                        .with_filter(
-                            tracing_subscriber::EnvFilter::try_from_default_env()
-                                .unwrap_or_else(|_| "netmito=info".into()),
-                        ),
-                )
-                .init();
-            Ok(TracingGuard {
-                subscriber_guard: None,
-                file_guard: None,
-            })
-        }
+            (None, None)
+        };
+
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_file(true)
+                    .with_line_number(true)
+                    .with_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "netmito=info".into()),
+                    ),
+            )
+            .with(file_layer)
+            .init();
+        Ok(TracingGuard {
+            subscriber_guard: None,
+            file_guard,
+        })
     }
 }
 

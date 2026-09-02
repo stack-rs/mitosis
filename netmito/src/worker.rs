@@ -8,7 +8,7 @@ use redis::AsyncCommands;
 use reqwest::{Client, StatusCode};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::layer::SubscriberExt;
 use url::Url;
 use uuid::Uuid;
 
@@ -354,19 +354,23 @@ impl ExecClient for WorkerTaskClient {
 
 impl MitoWorker {
     pub async fn main(cli: WorkerConfigCli) {
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "netmito=info".into()),
-            )
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_file(true)
-                    .with_line_number(true),
-            )
-            .init();
+        // `set_default` rather than `init`: this only has to cover config
+        // loading and registration. The real subscriber needs the worker id the
+        // coordinator hands back, so `setup` installs it and drops this one.
+        let bootstrap = tracing::dispatcher::set_default(&tracing::Dispatch::new(
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "netmito=info".into()),
+                )
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_file(true)
+                        .with_line_number(true),
+                ),
+        ));
         match WorkerConfig::new(&cli) {
-            Ok(config) => match Self::setup(config).await {
+            Ok(config) => match Self::setup(config, bootstrap).await {
                 Ok((mut worker, _guards)) => {
                     if let Err(e) = worker.run().await {
                         tracing::error!("{}", e);
@@ -383,7 +387,14 @@ impl MitoWorker {
         }
     }
 
-    pub async fn setup(mut config: WorkerConfig) -> crate::error::Result<(Self, TracingGuard)> {
+    /// `bootstrap` is `main`'s temporary subscriber, released as soon as the
+    /// real one is installed below. Holding it across the awaits before that is
+    /// sound only because the worker runs on a current-thread runtime — a
+    /// `DefaultGuard` is thread-local.
+    pub async fn setup(
+        mut config: WorkerConfig,
+        bootstrap: tracing::subscriber::DefaultGuard,
+    ) -> crate::error::Result<(Self, TracingGuard)> {
         tracing::debug!("Worker is setting up");
         let http_client = Client::new();
         let mut credential_guard = CredentialGuard::new(
@@ -444,6 +455,8 @@ impl MitoWorker {
             crate::executor::reset_workspace(&cache_path).await?;
             tokio::fs::create_dir_all(&log_dir).await?;
             let guards = config.setup_tracing_subscriber::<&uuid::Uuid, _>(&resp.worker_id)?;
+            // The worker's own subscriber is live now; stop shadowing it.
+            drop(bootstrap);
             let redis_client = if config.skip_redis {
                 None
             } else {

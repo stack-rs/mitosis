@@ -481,11 +481,22 @@ impl CoordinatorConfig {
                     ),
             )
             .with(file_layer)
+            // Temporary workaround for tokio-rs/tracing#2519; drop this layer
+            // once its fix (PR #3572) is released.
+            //
+            // A `with_filter` per-layer filter records its verdict in
+            // thread-local state that only a dispatched event clears. sqlx asks
+            // the log bridge whether `sqlx::query` is on, is wrongly told yes,
+            // then emits through a `tracing` macro whose callsite the filter has
+            // already short-circuited — so the verdict is never cleared and
+            // swallows our next log line instead. Every query does this, so
+            // under load all of our log get rejected. `Identity` is
+            // unfiltered, which keeps rejected callsites at `sometimes` interest
+            // so they reach the subscriber and clear the verdict on their way
+            // out.
+            .with(tracing_subscriber::layer::Identity::new())
             .init();
-        Ok(TracingGuard {
-            subscriber_guard: None,
-            file_guard,
-        })
+        Ok(TracingGuard { file_guard })
     }
 }
 

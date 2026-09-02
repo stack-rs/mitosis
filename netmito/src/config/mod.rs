@@ -11,11 +11,9 @@ pub(crate) use coordinator::{
     SHUTDOWN_SECRET,
 };
 pub use manager::ManagerConfigCli;
-use tracing::subscriber::DefaultGuard;
 use tracing_appender::non_blocking::WorkerGuard;
 pub use worker::{WorkerConfig, WorkerConfigCli};
 
 pub struct TracingGuard {
-    pub subscriber_guard: Option<DefaultGuard>,
     pub file_guard: Option<WorkerGuard>,
 }

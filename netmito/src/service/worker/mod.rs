@@ -6,7 +6,7 @@ use std::{
     str::FromStr,
 };
 
-pub use heartbeat::{HeartbeatOp, HeartbeatQueue};
+pub use heartbeat::{HeartbeatOp, WorkerHeartbeatQueue};
 pub use queue::{TaskDispatcher, TaskDispatcherOp};
 
 use sea_orm::{

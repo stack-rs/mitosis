@@ -21,7 +21,7 @@ use std::collections::{HashMap, VecDeque};
 use axum::extract::ws::Message;
 use crossfire::{AsyncRx, MTx};
 use speedy::Writable;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -38,10 +38,7 @@ const MAX_BUFFERED_NOTIFICATIONS: usize = 256;
 #[derive(Debug)]
 pub enum RouterOp {
     /// A WebSocket connected; attach its sender to the agent's session.
-    Register {
-        uuid: Uuid,
-        sender: mpsc::Sender<Message>,
-    },
+    Register { uuid: Uuid, sender: MTx<Message> },
     /// The WebSocket dropped; the session and its buffer survive.
     Unregister { uuid: Uuid },
     /// Forget the agent entirely (buffer included).
@@ -70,7 +67,7 @@ pub enum RouterOp {
 /// One agent's notification state.
 struct AgentSession {
     /// Sender of the live WebSocket, if any.
-    sender: Option<mpsc::Sender<Message>>,
+    sender: Option<MTx<Message>>,
     /// Last allocated sequence ID.
     counter: u64,
     /// Notifications not yet acknowledged, oldest first.
@@ -169,7 +166,7 @@ impl AgentWsRouter {
                 let sender = session.sender.clone();
                 if let Some(sender) = sender {
                     for event in &pending {
-                        if !Self::try_push(&sender, event, uuid) {
+                        if !Self::push_to_socket(&sender, event, uuid) {
                             break;
                         }
                     }
@@ -202,7 +199,7 @@ impl AgentWsRouter {
                     return;
                 };
                 if let Some(sender) = session.sender.clone() {
-                    Self::try_push(&sender, &event, uuid);
+                    Self::push_to_socket(&sender, &event, uuid);
                 }
             }
             RouterOp::PendingNotifications { uuid, after_id, tx } => {
@@ -221,10 +218,7 @@ impl AgentWsRouter {
         }
     }
 
-    /// Non-blocking push over the socket. The actor must never await on a slow
-    /// consumer, so a full channel simply skips the push — the event stays
-    /// buffered and reaches the agent on its next heartbeat.
-    fn try_push(sender: &mpsc::Sender<Message>, event: &WsNotificationEvent, uuid: Uuid) -> bool {
+    fn push_to_socket(sender: &MTx<Message>, event: &WsNotificationEvent, uuid: Uuid) -> bool {
         let payload = match event.write_to_vec() {
             Ok(payload) => payload,
             Err(e) => {
@@ -232,7 +226,7 @@ impl AgentWsRouter {
                 return false;
             }
         };
-        match sender.try_send(Message::Binary(payload.into())) {
+        match sender.send(Message::Binary(payload.into())) {
             Ok(()) => true,
             Err(e) => {
                 tracing::debug!(
@@ -247,7 +241,7 @@ impl AgentWsRouter {
 
     // ── convenience senders, used from the service layer ──
 
-    pub fn register(tx: &MTx<RouterOp>, uuid: Uuid, sender: mpsc::Sender<Message>) {
+    pub fn register(tx: &MTx<RouterOp>, uuid: Uuid, sender: MTx<Message>) {
         let _ = tx.send(RouterOp::Register { uuid, sender });
     }
 

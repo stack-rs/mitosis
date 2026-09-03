@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use argon2::password_hash::rand_core::OsRng;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -12,28 +13,19 @@ use crate::service::agent::heartbeat::AgentHeartbeatQueue;
 use crate::service::agent::queue;
 use crate::service::s3::setup_buckets;
 use crate::service::suite::sweep_inactive_suites;
-use crate::service::worker::{restore_workers, HeartbeatQueue, TaskDispatcher};
+use crate::service::worker::{restore_workers, TaskDispatcher, WorkerHeartbeatQueue};
 use crate::signal::shutdown_signal;
 use crate::ws::AgentWsRouter;
 
 /// How often the idle-suite sweep runs, given the configured idle window.
-///
-/// Half the window, so a drained suite lingers in `Open` at most about one and a
-/// half windows past its last task — and an agent holds its job for no longer
-/// than that. Scaling with the window is what keeps a small one meaningful: a
-/// fixed period would swamp a 5-second window and waste queries on an hour-long
-/// one. Clamped at both ends so neither extreme misbehaves.
 fn suite_sweep_period(idle_window: std::time::Duration) -> std::time::Duration {
-    (idle_window / 2).clamp(
-        std::time::Duration::from_secs(1),
-        std::time::Duration::from_secs(30),
-    )
+    (idle_window / 2).max(Duration::from_secs(1))
 }
 
 pub struct MitoCoordinator {
     pub infra_pool: InfraPool,
     pub worker_task_queue: TaskDispatcher,
-    pub worker_heartbeat_queue: HeartbeatQueue,
+    pub worker_heartbeat_queue: WorkerHeartbeatQueue,
     pub agent_heartbeat_queue: AgentHeartbeatQueue,
     pub ws_router: AgentWsRouter,
     pub cancel_token: CancellationToken,

@@ -14,18 +14,12 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use speedy::Readable;
-use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::{
     config::InfraPool, schema::AgentWsMessage, service::auth::AuthAgent,
     ws::connection::AgentWsRouter,
 };
-
-/// How many notifications may sit in a single connection's outbound queue
-/// before the router starts skipping pushes (the events stay buffered and are
-/// delivered on the next heartbeat instead).
-const OUTBOUND_QUEUE_LEN: usize = 128;
 
 pub async fn websocket_handler(
     ws: WebSocketUpgrade,
@@ -39,7 +33,7 @@ pub async fn websocket_handler(
 
 async fn handle_agent_socket(socket: WebSocket, agent_uuid: Uuid, pool: InfraPool) {
     let (mut sender, mut receiver) = socket.split();
-    let (tx, mut rx) = mpsc::channel::<Message>(OUTBOUND_QUEUE_LEN);
+    let (tx, rx) = crossfire::mpsc::unbounded_async::<Message>();
 
     AgentWsRouter::register(&pool.ws_router_tx, agent_uuid, tx);
 
@@ -64,13 +58,13 @@ async fn handle_agent_socket(socket: WebSocket, agent_uuid: Uuid, pool: InfraPoo
             },
 
             outgoing = rx.recv() => match outgoing {
-                Some(msg) => {
+                Ok(msg) => {
                     if let Err(e) = sender.send(msg).await {
                         tracing::debug!(agent_uuid = %agent_uuid, "Failed to push to agent: {e}");
                         break;
                     }
                 }
-                None => break,
+                Err(_) => break,
             },
 
             _ = keepalive.tick() => {

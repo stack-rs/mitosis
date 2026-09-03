@@ -10,7 +10,7 @@ use crate::{config::InfraPool, entity::workers as Worker};
 
 // MARK: HeartbeatQueue
 #[derive(Debug)]
-pub struct HeartbeatQueue {
+pub struct WorkerHeartbeatQueue {
     pub workers: PriorityQueue<i64, Reverse<Instant>>,
     cancel_token: CancellationToken,
     heartbeat_timeout: Duration,
@@ -23,7 +23,7 @@ pub enum HeartbeatOp {
     Heartbeat(i64),
 }
 
-impl HeartbeatQueue {
+impl WorkerHeartbeatQueue {
     pub fn new(
         cancel_token: CancellationToken,
         heartbeat_timeout: Duration,

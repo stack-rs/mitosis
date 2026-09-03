@@ -25,7 +25,7 @@ use crate::{
     error::Error,
     service::agent::heartbeat::{AgentHeartbeatOp, AgentHeartbeatQueue},
     service::agent::queue::SuiteQueues,
-    service::worker::{HeartbeatOp, HeartbeatQueue, TaskDispatcher, TaskDispatcherOp},
+    service::worker::{HeartbeatOp, TaskDispatcher, TaskDispatcherOp, WorkerHeartbeatQueue},
     ws::{AgentWsRouter, RouterOp},
 };
 
@@ -280,8 +280,8 @@ impl CoordinatorConfig {
         cancel_token: CancellationToken,
         pool: InfraPool,
         rx: AsyncRx<HeartbeatOp>,
-    ) -> HeartbeatQueue {
-        HeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
+    ) -> WorkerHeartbeatQueue {
+        WorkerHeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
     }
 
     pub fn build_agent_heartbeat_queue(

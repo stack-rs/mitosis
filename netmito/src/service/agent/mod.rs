@@ -1337,7 +1337,7 @@ async fn advance_job(
 ///
 /// The agent reports only what it did — `Completed` or `Failed` with a reason.
 /// `Lost` and `Killed` are the coordinator's to write. A job that is already
-/// terminal answers 409 so the agent knows it was torn down under it.
+/// terminal answers 400 so the agent knows it was torn down under it.
 ///
 /// Both writes — the job's terminal and the agent's release — land in one
 /// transaction: a half-applied pair would leave the agent pointing at a finished

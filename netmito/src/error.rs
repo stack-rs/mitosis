@@ -135,12 +135,6 @@ pub enum ApiError {
     AlreadyExists(String),
     #[error("{0} not found")]
     NotFound(String),
-    /// The request is well-formed but the target has already moved past the
-    /// state it addressed. The agent protocol leans on this: a report against a
-    /// terminal job answers 409, which the agent reads as "the job is closed,
-    /// stop reporting and go idle".
-    #[error("Conflicting request: {0}")]
-    Conflict(String),
     #[error("Resource quota exceeded")]
     QuotaExceeded,
     #[error(transparent)]
@@ -207,7 +201,6 @@ impl GetStatusCode for ApiError {
             ApiError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::AlreadyExists(_) => StatusCode::CONFLICT,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
-            ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::QuotaExceeded => StatusCode::FORBIDDEN,
             ApiError::PresignS3Error(_) => StatusCode::BAD_REQUEST,
         }

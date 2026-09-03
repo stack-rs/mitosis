@@ -132,7 +132,7 @@ pub async fn explain_failed_transition<C: ConnectionTrait>(
     match rejection {
         Err(e) => e,
         // It moved again between the update and this read.
-        Ok(()) => Error::ApiError(ApiError::Conflict(format!(
+        Ok(()) => Error::ApiError(ApiError::InvalidRequest(format!(
             "Job {} changed state concurrently",
             row.job_id
         ))),
@@ -154,13 +154,13 @@ fn validate_job_owner(
     Ok(model)
 }
 
-/// Reject a state-mutating report against an already-terminal job with `409
-/// Conflict`. The agent reads that as "job already closed → I'm free"; teardown
+/// Reject a state-mutating report against an already-terminal job with `400
+/// Bad Request`. The agent reads that as "job already closed → I'm free"; teardown
 /// already owns any stranded task's fate. Used where any non-terminal state is a
 /// valid source (`/complete`, task reports).
 pub fn reject_if_terminal(job: &SuiteAgentJobs::Model) -> Result<()> {
     if job.state.is_terminal() {
-        return Err(Error::ApiError(ApiError::Conflict(format!(
+        return Err(Error::ApiError(ApiError::InvalidRequest(format!(
             "Job {} is already in terminal state {}",
             job.job_id, job.state
         ))));
@@ -171,7 +171,7 @@ pub fn reject_if_terminal(job: &SuiteAgentJobs::Model) -> Result<()> {
 /// Validate that a job is in the exact `expected` source state for an ordered
 /// transition (`/start` expects `Provisioning`, `/cleanup` expects `Executing`):
 /// - already in `expected` → `Ok`.
-/// - terminal → `409 Conflict` (the agent frees itself).
+/// - terminal → `400 Bad Request` (the agent frees itself).
 /// - any other non-terminal state → `400` — an out-of-order protocol error, and
 ///   deliberately *not* the "closed" signal, so the agent does not release
 ///   itself off a still-live job.
@@ -180,7 +180,7 @@ pub fn expect_state(job: &SuiteAgentJobs::Model, expected: SuiteJobState) -> Res
         return Ok(());
     }
     if job.state.is_terminal() {
-        return Err(Error::ApiError(ApiError::Conflict(format!(
+        return Err(Error::ApiError(ApiError::InvalidRequest(format!(
             "Job {} is already in terminal state {}",
             job.job_id, job.state
         ))));

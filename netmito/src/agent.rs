@@ -1336,7 +1336,7 @@ impl SuiteRunner {
             .map_err(error::map_reqwest_err)?;
         // The suite going terminal under us is an ordinary end of run, not a
         // failure: stop the loop and let cleanup proceed.
-        if resp.status() == StatusCode::CONFLICT {
+        if resp.status() == StatusCode::BAD_REQUEST {
             tracing::info!("Suite {suite_uuid} stopped handing out tasks");
             self.job_token.cancel();
             return Ok(FetchTasksResp {
@@ -1417,7 +1417,7 @@ struct AgentConnection {
     coordinator_addr: Url,
     connect_retry_interval: Duration,
     /// The job's token. Cancelling it stops every unit of this job at once,
-    /// which is how a 409 ("this job is closed") propagates.
+    /// which is how a 400 ("this job is closed") propagates.
     job_token: CancellationToken,
 }
 
@@ -1436,7 +1436,7 @@ impl AgentConnection {
 
     /// POST a report, retrying connection failures until the job is cancelled.
     /// `None` means the coordinator answered something that ends the reporting:
-    /// 409 (the job is closed — which also stops the job) or 404 (it is gone).
+    /// 400 (the job is closed — which also stops the job) or 404 (it is gone).
     async fn post_report<Req: serde::Serialize, Resp: serde::de::DeserializeOwned>(
         &self,
         path: &str,
@@ -1468,7 +1468,7 @@ impl AgentConnection {
                 Err(e) => return Err(error::RequestError::from(e).into()),
             };
 
-            if resp.status() == StatusCode::CONFLICT {
+            if resp.status() == StatusCode::BAD_REQUEST {
                 tracing::info!("The job is closed; stopping this run");
                 self.job_token.cancel();
                 return Ok(None);

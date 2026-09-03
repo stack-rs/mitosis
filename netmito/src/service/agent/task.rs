@@ -22,7 +22,7 @@
 //! Agents use the same [`ReportTaskOp`] variants as workers, with the suite job
 //! handle attached. Every report is validated against the job first: it must
 //! exist, belong to this agent, and be non-terminal — a terminal job answers
-//! `409 Conflict`, which the agent reads as "the job is closed, stop".
+//! `400 Bad Request`, which the agent reads as "the job is closed, stop".
 //!
 //! | Op | Behaviour |
 //! |---|---|
@@ -69,7 +69,7 @@ pub async fn agent_fetch_tasks(
         ))));
     }
     if !suite.state.allows_task_execution() {
-        return Err(Error::ApiError(ApiError::Conflict(format!(
+        return Err(Error::ApiError(ApiError::InvalidRequest(format!(
             "Suite {suite_uuid} is {} and hands out no more tasks",
             suite.state
         ))));

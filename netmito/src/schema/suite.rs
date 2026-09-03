@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::entity::state::TaskSuiteState;
 
+use super::agent::SuiteJobInfo;
 use super::exec::ExecHooks;
 
 /// Request to create a new task suite
@@ -58,9 +59,17 @@ pub enum WorkerSchedulePlan {
         /// Optional CPU core binding strategy
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cpu_binding: Option<CpuBinding>,
-        /// How many tasks to prefetch locally per worker (default: 16)
-        #[serde(default = "default_prefetch_count")]
-        task_prefetch_count: u32,
+        /// Whether the agent may hold claimed tasks beyond the ones it is
+        /// running, so a slot that frees has one waiting instead of paying a
+        /// round trip for it. The depth is not configurable: it is one more
+        /// worker's worth per worker, which is what makes the agent's buffer
+        /// the same size as its slot count.
+        ///
+        /// Turning it off costs a round trip per task and is worth it only for
+        /// suites whose tasks run far longer than that, where holding a task
+        /// claimed on a busy agent is worse than leaving it for a free one.
+        #[serde(default = "default_prefetch")]
+        prefetch: bool,
     },
     // Future extensions:
     // AutoScale { min_workers, max_workers, scale_up_threshold, scale_down_threshold, ... }
@@ -68,8 +77,8 @@ pub enum WorkerSchedulePlan {
     // Priority { high_priority_workers, low_priority_workers, ... }
 }
 
-fn default_prefetch_count() -> u32 {
-    16
+fn default_prefetch() -> bool {
+    true
 }
 
 /// CPU core binding configuration
@@ -172,11 +181,17 @@ pub struct ParsedTaskSuiteInfo {
     pub completed_at: Option<OffsetDateTime>,
 }
 
-/// Detailed suite response: the suite plus the UUIDs of its assigned agents
+/// Detailed suite response: the suite, the UUIDs of the agents currently
+/// eligible to run it — tag-matched plus manual includes, minus manual excludes,
+/// computed at query time rather than stored — and the jobs running it right now.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSuiteQueryResp {
     pub info: ParsedTaskSuiteInfo,
     pub eligible_agents: Vec<Uuid>,
+    /// The suite's non-terminal jobs, oldest first: who is running it and how
+    /// far along each runner is. Empty means nothing holds the suite. Eligible
+    /// agents are the ones that *may* run it, these are the ones that *are*.
+    pub active_jobs: Vec<SuiteJobInfo>,
 }
 
 /// Query parameter for `DELETE /suites/{uuid}` selecting the cancellation mode

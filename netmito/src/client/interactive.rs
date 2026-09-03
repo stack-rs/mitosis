@@ -10,8 +10,8 @@ use crate::{
     config::client::ClientInteractiveShell,
     entity::role::GroupWorkerRole,
     schema::{
-        AdminChangePasswordReq, CreateUserReq, GroupQueryInfo, ParsedTaskQueryInfo,
-        ParsedTaskSuiteInfo, TaskQueryInfo, TaskSuiteInfo, UserChangePasswordReq, WorkerQueryInfo,
+        AdminChangePasswordReq, CreateUserReq, GroupQueryInfo, ParsedTaskQueryInfo, TaskQueryInfo,
+        TaskSuiteInfo, TaskSuiteQueryResp, UserChangePasswordReq, WorkerQueryInfo,
     },
     service::auth::{get_and_prompt_password, get_and_prompt_username},
 };
@@ -111,6 +111,9 @@ pub(crate) fn output_parsed_task_info(info: &ParsedTaskQueryInfo) {
     if let Some(downstream_task_uuid) = info.downstream_task_uuid {
         tracing::info!("Downstream Task UUID: {:?}", downstream_task_uuid);
     }
+    if let Some(suite_uuid) = info.suite_uuid {
+        tracing::info!("Task Suite UUID: {}", suite_uuid);
+    }
     if let Some(runner_uuid) = info.runner_uuid {
         tracing::info!("Runner UUID: {}", runner_uuid);
     }
@@ -148,6 +151,9 @@ pub(crate) fn output_task_info(info: &TaskQueryInfo) {
     }
     if let Some(downstream_task_uuid) = info.downstream_task_uuid {
         tracing::info!("Downstream Task UUID: {:?}", downstream_task_uuid);
+    }
+    if let Some(suite_uuid) = info.suite_uuid {
+        tracing::info!("Task Suite UUID: {}", suite_uuid);
     }
     if let Some(runner_uuid) = info.runner_uuid {
         tracing::info!("Runner UUID: {}", runner_uuid);
@@ -255,7 +261,12 @@ pub(crate) fn output_suite_info(info: &TaskSuiteInfo) {
     );
 }
 
-pub(crate) fn output_parsed_suite_info(info: &ParsedTaskSuiteInfo, assigned_agents: &[uuid::Uuid]) {
+pub(crate) fn output_parsed_suite_info(resp: &TaskSuiteQueryResp) {
+    let TaskSuiteQueryResp {
+        info,
+        eligible_agents,
+        active_jobs,
+    } = resp;
     tracing::info!("Suite UUID: {}", info.uuid);
     if let Some(ref name) = info.name {
         tracing::info!("Name: {}", name);
@@ -292,12 +303,28 @@ pub(crate) fn output_parsed_suite_info(info: &ParsedTaskSuiteInfo, assigned_agen
     if let Some(completed) = info.completed_at {
         tracing::info!("Completed at {}", completed);
     }
-    if assigned_agents.is_empty() {
-        tracing::info!("Manually-included agents: None");
+    if eligible_agents.is_empty() {
+        tracing::info!("Currently eligible agents: None");
     } else {
-        tracing::info!("Manually-included agents:");
-        for agent in assigned_agents {
+        tracing::info!("Currently eligible agents:");
+        for agent in eligible_agents {
             tracing::info!(" > {}", agent);
+        }
+    }
+    if active_jobs.is_empty() {
+        tracing::info!("Active jobs: None");
+    } else {
+        tracing::info!("Active jobs:");
+        for job in active_jobs {
+            tracing::info!(
+                " > Job {} ({}), agent: {}, updated {}",
+                job.job_id,
+                job.state,
+                job.agent_uuid
+                    .map(|u| u.to_string())
+                    .unwrap_or("[detached]".to_string()),
+                job.updated_at,
+            );
         }
     }
 }

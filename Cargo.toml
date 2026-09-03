@@ -59,9 +59,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [features]
-default = ["crossfire-channel"]
 debugging = ["netmito/debugging"]
-crossfire-channel = ["netmito/crossfire-channel"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]

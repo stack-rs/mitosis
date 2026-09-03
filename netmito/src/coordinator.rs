@@ -1,48 +1,79 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use argon2::password_hash::rand_core::OsRng;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::layer::SubscriberExt;
 
 use crate::api::router;
 use crate::config::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 use crate::migration::{Migrator, MigratorTrait};
+use crate::service::agent::heartbeat::AgentHeartbeatQueue;
+use crate::service::agent::queue;
 use crate::service::s3::setup_buckets;
-use crate::service::worker::{restore_workers, HeartbeatQueue, TaskDispatcher};
+use crate::service::suite::sweep_inactive_suites;
+use crate::service::worker::{restore_workers, TaskDispatcher, WorkerHeartbeatQueue};
 use crate::signal::shutdown_signal;
+use crate::ws::AgentWsRouter;
+
+/// How often the idle-suite sweep runs, given the configured idle window.
+fn suite_sweep_period(idle_window: std::time::Duration) -> std::time::Duration {
+    (idle_window / 2).max(Duration::from_secs(1))
+}
 
 pub struct MitoCoordinator {
     pub infra_pool: InfraPool,
     pub worker_task_queue: TaskDispatcher,
-    pub worker_heartbeat_queue: HeartbeatQueue,
+    pub worker_heartbeat_queue: WorkerHeartbeatQueue,
+    pub agent_heartbeat_queue: AgentHeartbeatQueue,
+    pub ws_router: AgentWsRouter,
     pub cancel_token: CancellationToken,
     pub log_dir: PathBuf,
+    /// How long a suite may go without a new task before the sweep settles it
+    /// out of `Open`.
+    pub suite_auto_close_timeout: std::time::Duration,
+    /// How often the in-memory suite queues are checked against the database.
+    pub suite_queue_reconcile_interval: std::time::Duration,
 }
 
 impl MitoCoordinator {
     pub async fn main(cli: CoordinatorConfigCli) {
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "netmito=info".into()),
-            )
-            .with(tracing_subscriber::fmt::layer())
-            .init();
-        match CoordinatorConfig::new(&cli) {
-            Ok(config) => {
-                let _guards = config.setup_tracing_subscriber().inspect_err(|e| {
+        // `set_default` rather than `init`: config loading is the only thing
+        // this has to cover, and the real subscriber replaces it below
+        let bootstrap = tracing::dispatcher::set_default(&tracing::Dispatch::new(
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "netmito=info".into()),
+                )
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_file(true)
+                        .with_line_number(true),
+                ),
+        ));
+        let config = match CoordinatorConfig::new(&cli) {
+            Ok(config) => config,
+            Err(e) => {
+                tracing::error!("{}", e);
+                return;
+            }
+        };
+        // Nothing below would be logged anywhere if this failed: the bootstrap
+        // is about to go and it is what installs the replacement.
+        let _guards = match config.setup_tracing_subscriber() {
+            Ok(guards) => guards,
+            Err(e) => {
+                tracing::error!("{}", e);
+                return;
+            }
+        };
+        drop(bootstrap);
+        match Self::setup(config).await {
+            Ok(coordinator) => {
+                if let Err(e) = coordinator.run().await {
                     tracing::error!("{}", e);
-                });
-                match Self::setup(config).await {
-                    Ok(coordinator) => {
-                        if let Err(e) = coordinator.run().await {
-                            tracing::error!("{}", e);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("{}", e);
-                    }
                 }
             }
             Err(e) => {
@@ -85,16 +116,13 @@ impl MitoCoordinator {
             .map_err(|_| crate::error::Error::Custom("set shutdown secret failed".to_string()))?;
         let cancel_token = CancellationToken::new();
 
-        #[cfg(not(feature = "crossfire-channel"))]
-        let (worker_task_queue_tx, worker_task_queue_rx) = tokio::sync::mpsc::unbounded_channel();
-        #[cfg(feature = "crossfire-channel")]
         let (worker_task_queue_tx, worker_task_queue_rx) = crossfire::mpsc::unbounded_async();
-        #[cfg(not(feature = "crossfire-channel"))]
-        let (worker_heartbeat_queue_tx, worker_heartbeat_queue_rx) =
-            tokio::sync::mpsc::unbounded_channel();
-        #[cfg(feature = "crossfire-channel")]
         let (worker_heartbeat_queue_tx, worker_heartbeat_queue_rx) =
             crossfire::mpsc::unbounded_async();
+
+        let (agent_heartbeat_queue_tx, agent_heartbeat_queue_rx) =
+            crossfire::mpsc::unbounded_async();
+        let (ws_router_tx, ws_router_rx) = crossfire::mpsc::unbounded_async();
 
         // Setup worker task queue
         let worker_task_queue =
@@ -102,7 +130,12 @@ impl MitoCoordinator {
 
         // Setup infra pool
         let infra_pool = config
-            .build_infra_pool(worker_task_queue_tx, worker_heartbeat_queue_tx)
+            .build_infra_pool(
+                worker_task_queue_tx,
+                worker_heartbeat_queue_tx,
+                agent_heartbeat_queue_tx,
+                ws_router_tx,
+            )
             .await?;
 
         // Setup worker heartbeat queue
@@ -111,6 +144,16 @@ impl MitoCoordinator {
             infra_pool.clone(),
             worker_heartbeat_queue_rx,
         );
+
+        // Setup the agent-side actors: liveness tracking and the notification router
+        let agent_heartbeat_queue = config.build_agent_heartbeat_queue(
+            cancel_token.clone(),
+            infra_pool.clone(),
+            agent_heartbeat_queue_rx,
+        );
+        let ws_router = config.build_ws_router(cancel_token.clone(), ws_router_rx);
+        let suite_auto_close_timeout = config.suite_auto_close_timeout;
+        let suite_queue_reconcile_interval = config.suite_queue_reconcile_interval;
 
         // Setup s3 storage
         // List all buckets and create if not exist
@@ -137,8 +180,12 @@ impl MitoCoordinator {
             infra_pool,
             worker_task_queue,
             worker_heartbeat_queue,
+            agent_heartbeat_queue,
+            ws_router,
             cancel_token,
             log_dir,
+            suite_auto_close_timeout,
+            suite_queue_reconcile_interval,
         })
     }
 
@@ -148,12 +195,53 @@ impl MitoCoordinator {
             infra_pool,
             mut worker_task_queue,
             mut worker_heartbeat_queue,
+            mut agent_heartbeat_queue,
+            mut ws_router,
             cancel_token,
+            suite_auto_close_timeout,
+            suite_queue_reconcile_interval,
             ..
         } = self;
 
         // Create TaskTracker to manage background tasks
         let task_tracker = TaskTracker::new();
+
+        // The suite housekeeping ticks: settle idle suites out of `Open`, and
+        // keep the in-memory queues honest about what is still claimable.
+        {
+            let pool = infra_pool.clone();
+            let cancel = cancel_token.clone();
+            let mut sweep = tokio::time::interval(suite_sweep_period(suite_auto_close_timeout));
+            let mut reconcile = tokio::time::interval(suite_queue_reconcile_interval);
+            // A tick missed because the other branch was still working is
+            // dropped rather than fired straight after it: neither job is worth
+            // catching up on, and both are cheaper spread out.
+            sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            task_tracker.spawn(async move {
+                // Both tick immediately: the first sweep settles whatever went
+                // idle while the coordinator was down, and the first reconcile
+                // only takes note of suspects, since nothing is dropped before a
+                // second pass misses it too.
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => break,
+                        _ = sweep.tick() => {
+                            if let Err(e) = sweep_inactive_suites(&pool.db, suite_auto_close_timeout).await {
+                                tracing::error!("Failed to sweep inactive suites: {e}");
+                            }
+                        }
+                        _ = reconcile.tick() => {
+                            if let Err(e) = queue::reconcile(&pool).await {
+                                tracing::error!("Failed to reconcile the suite queues: {e}");
+                            }
+                        }
+                    }
+                }
+                tracing::info!("Suite housekeeping stopped");
+            });
+        }
 
         // Spawn background tasks using TaskTracker
         task_tracker.spawn(async move {
@@ -166,7 +254,21 @@ impl MitoCoordinator {
             tracing::info!("Heartbeat queue stopped");
         });
 
+        task_tracker.spawn(async move {
+            ws_router.run().await;
+        });
+
+        task_tracker.spawn(async move {
+            agent_heartbeat_queue.run().await;
+        });
+
         restore_workers(&infra_pool).await?;
+        // Agents run through a coordinator restart, so their jobs have to be
+        // back in the dispatch state before the first submission looks for one.
+        crate::service::agent::queue::restore(&infra_pool).await?;
+        // Agents keep their rows across a coordinator restart, so tell them this
+        // is a new boot and their notification sequence starts over.
+        crate::service::agent::notify_agents_of_restart(&infra_pool).await?;
         let app = router(infra_pool, cancel_token.clone());
         let addr = crate::config::SERVER_CONFIG
             .get()

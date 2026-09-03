@@ -1,0 +1,1760 @@
+//! The agent: an orchestrator process that claims task suites from the
+//! coordinator and runs them.
+//!
+//! ```text
+//!  register ─▶ ws connect (unless --no-ws) ─┐
+//!  heartbeat every N ───────────────────────┼─▶ main loop ─▶ (idle + work) ─▶ accept suite
+//!  idle poll every N (if configured) ───────┘                                      │
+//!                                                                                  ▼
+//!                        complete ◀─ cleanup hook ◀─ cleanup ◀─ tasks ◀─ start ◀─ provision hook
+//! ```
+//!
+//! The main loop only ever services heartbeats and notifications; a claimed
+//! suite runs in a spawned [`SuiteRunner`] so neither starves the other.
+
+use std::{
+    collections::VecDeque,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
+};
+
+use crossfire::{MAsyncRx, MAsyncTx};
+use futures::{SinkExt as _, StreamExt as _};
+use reqwest::StatusCode;
+use speedy::{Readable as _, Writable as _};
+use tokio::{
+    sync::{watch, Notify},
+    task::JoinHandle,
+};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_util::sync::CancellationToken;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use url::Url;
+use uuid::Uuid;
+
+use crate::{
+    config::{AgentConfig, AgentConfigCli},
+    entity::{
+        content::ArtifactContentType,
+        hook_tasks::HookType,
+        state::{AgentState, TaskExecState},
+    },
+    error::{self, Result},
+    executor::{
+        create_shared_dir, ensure_traversable_dir, reset_workspace, warn_unreachable_ancestors,
+        ExecClient, Executor, UploadTarget,
+    },
+    schema::*,
+    service::auth::{
+        cred::get_user_credential, credential_guard::CredentialGuard, get_and_prompt_username,
+    },
+};
+
+/// How many task slots a job runs at a time. A slot is a working directory plus
+/// an [`Executor`]; two concurrent tasks must never share one, since the
+/// process's `result/` directory is what becomes its artifact.
+///
+/// This is the suite's `FixedWorkers.worker_count` — the plan asks for that many
+/// workers, and the agent gives it that many slots. A count of zero would leave
+/// the job with nothing to drain it, so it is floored at one.
+fn task_slots(suite: &TaskSuiteSpec) -> usize {
+    match suite.worker_schedule {
+        WorkerSchedulePlan::FixedWorkers { worker_count, .. } => (worker_count as usize).max(1),
+    }
+}
+
+/// What the slots tell the keeper as they work.
+///
+/// Shared by all of them, so it says how the job is doing rather than any one
+/// slot: how many tasks have ended in total, and that one just did.
+#[derive(Debug, Default)]
+struct SlotProgress {
+    /// Tasks that have ended, however they ended.
+    completed: AtomicUsize,
+    /// Raised with it, so a keeper the coordinator has told to hold — because
+    /// the job was holding as many tasks as it may at once — comes back for
+    /// another the moment there is somewhere to put it, rather than at the end
+    /// of a poll interval.
+    freed: Notify,
+}
+
+impl SlotProgress {
+    /// A slot is done with a task, whatever became of it.
+    fn task_ended(&self) {
+        self.completed.fetch_add(1, Ordering::Release);
+        self.freed.notify_one();
+    }
+
+    fn completed(&self) -> usize {
+        self.completed.load(Ordering::Acquire)
+    }
+}
+
+/// How often a poll-based `watch` re-asks the coordinator.
+const WATCH_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How often a job with nothing to do re-checks its suite for late work. The
+/// backstop, not the mechanism: a task submitted into a suite this job is
+/// holding is pushed to it as `TasksAvailable`, and this only covers the times
+/// the push cannot arrive — a dropped socket, or a task one of our own slots
+/// spawned.
+const HOLD_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+pub struct MitoAgent;
+
+struct AgentClient {
+    coordinator_addr: Url,
+    token: String,
+    /// Highest notification id processed; echoed on every heartbeat
+    notification_counter: u64,
+    /// Which coordinator boot our counter belongs to. A different one means the
+    /// coordinator restarted and our sequence is meaningless.
+    coordinator_boot_id: Option<Uuid>,
+    state: AgentState,
+    assigned_suite_uuid: Option<Uuid>,
+    has_pending_suite: bool,
+    heartbeat_interval: Duration,
+    connect_retry_interval: Duration,
+    /// How often an idle agent asks for a suite unprompted; `None` waits for a
+    /// notification instead.
+    idle_poll_interval: Option<Duration>,
+    /// How long to wait before reopening a notification socket that dropped.
+    ws_reconnect_interval: Duration,
+    /// Skip the notification socket and take everything from the heartbeat.
+    no_ws: bool,
+    /// Root of this agent's working directories; one subtree per job.
+    cache_path: PathBuf,
+    http_client: reqwest::Client,
+    /// Cancels the running suite (notification-driven); `None` while idle.
+    job_token: Option<CancellationToken>,
+    /// Stops the running suite from claiming any more tasks, without aborting
+    /// its wind-down; `None` while idle.
+    drain_token: Option<CancellationToken>,
+    /// The suite in flight. Resolves to `complete`'s answer to "is there more
+    /// for this agent".
+    current_run: Option<JoinHandle<bool>>,
+    /// Cancelling this exits the main loop.
+    shutdown_token: CancellationToken,
+    /// Set by a graceful `Shutdown` notification or by Ctrl+C: finish the
+    /// current suite, then stop instead of taking another.
+    stop_after_current: bool,
+    /// Bumped when the coordinator says the running job's suite has tasks. A
+    /// counter rather than a flag: the receiver only has to see that it moved,
+    /// and a bump that lands while the job is fetching is still there when it
+    /// next looks.
+    fetch_wake: watch::Sender<u64>,
+}
+
+impl MitoAgent {
+    pub async fn main(cli: AgentConfigCli) {
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "netmito=info".into()),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_file(true)
+                    .with_line_number(true),
+            )
+            .init();
+
+        match AgentConfig::new(&cli) {
+            Ok(config) => {
+                if let Err(e) = Self::run(config).await {
+                    tracing::error!("Agent failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                tracing::error!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    /// Register with the coordinator and drive the agent loop until shutdown.
+    /// Public so tests (and embedders) can run an agent in-process.
+    pub async fn run(mut config: AgentConfig) -> Result<()> {
+        tracing::info!("Starting agent against {}", config.coordinator_addr);
+        tracing::info!(
+            "groups={:?} tags={:?} labels={:?}",
+            config.groups,
+            config.tags,
+            config.labels
+        );
+
+        let http_client = reqwest::Client::new();
+        let mut credential_guard = CredentialGuard::new(
+            config
+                .credential_path
+                .as_ref()
+                .map(|credential_path| credential_path.relative()),
+            &config.coordinator_addr,
+        )
+        .await;
+        let username = match &config.user {
+            Some(name) => name.to_string(),
+            None => get_and_prompt_username(None, "Please input username")?,
+        };
+        // Like the worker: an agent restart must not rotate the user's auth
+        // signature, which would invalidate every token minted before it.
+        let (_, user_credential) = get_user_credential(
+            &mut credential_guard,
+            &http_client,
+            config.coordinator_addr.clone(),
+            username,
+            config.password.take(),
+            false,
+        )
+        .await?;
+
+        let machine_code = Self::resolve_machine_code(config.machine_code.take());
+        tracing::info!("Machine code: {machine_code}");
+
+        let mut register_url = config.coordinator_addr.clone();
+        register_url.set_path("agents");
+        let req = RegisterAgentReq {
+            tags: config.tags.clone(),
+            labels: config.labels.clone(),
+            admin_group: config.admin_group.clone(),
+            groups: config.groups.clone(),
+            lifetime: config.lifetime,
+            machine_code,
+            metadata: Some(AgentMetadata {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                long_version: env!("CARGO_PKG_VERSION").to_string(),
+            }),
+        };
+        let resp = http_client
+            .post(register_url.as_str())
+            .bearer_auth(&user_credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_request() && e.is_connect() {
+                    error::RequestError::ConnectionError(config.coordinator_addr.to_string())
+                } else {
+                    e.into()
+                }
+            })?;
+        let register: RegisterAgentResp = parse_json(resp, "register agent").await?;
+
+        tracing::info!(
+            "Registered as agent {} ({})",
+            register.agent_uuid,
+            if register.reused {
+                "re-adopted this machine's existing agent"
+            } else {
+                "new agent"
+            }
+        );
+
+        let mut coordinator_addr = config.coordinator_addr;
+        coordinator_addr.set_path("");
+
+        let mut cache_path =
+            dirs::cache_dir().ok_or(error::Error::Custom("Cache dir not found".to_string()))?;
+        // Built one level at a time so each is made traversable as it appears:
+        // `create_dir_all` would apply the umask to the levels it creates, and a
+        // single `0700` link is enough to hide the workspace from a task that
+        // switched user.
+        warn_unreachable_ancestors(&cache_path).await;
+        cache_path.push("mitosis");
+        ensure_traversable_dir(&cache_path).await?;
+        cache_path.push("agent");
+        ensure_traversable_dir(&cache_path).await?;
+        cache_path.push(register.agent_uuid.to_string());
+        ensure_traversable_dir(&cache_path).await?;
+        tracing::info!("Working directory: {}", cache_path.display());
+
+        let mut client = AgentClient {
+            coordinator_addr,
+            token: register.token,
+            notification_counter: register.notification_counter,
+            coordinator_boot_id: None,
+            state: AgentState::Idle,
+            assigned_suite_uuid: None,
+            // Registration is itself a reason to look for work: the coordinator
+            // could not have notified us before we existed.
+            has_pending_suite: false,
+            heartbeat_interval: config.heartbeat_interval,
+            connect_retry_interval: config.connect_retry_interval,
+            idle_poll_interval: config.idle_poll_interval,
+            ws_reconnect_interval: config.ws_reconnect_interval,
+            no_ws: config.no_ws,
+            cache_path,
+            http_client,
+            job_token: None,
+            drain_token: None,
+            current_run: None,
+            shutdown_token: CancellationToken::new(),
+            stop_after_current: false,
+            fetch_wake: watch::Sender::new(0),
+        };
+
+        let res = client.run_loop().await;
+        // A double ctrl-c never reaches here
+        // We are reporting either user gracefully shutdown the agent, or
+        // the job thread failed.
+        client.deregister().await;
+        res
+    }
+
+    /// Resolve a stable machine code for this host.
+    ///
+    /// Precedence: explicit config → the cached value under the mitosis config dir →
+    /// `/etc/machine-id` → a fresh UUID. Whatever is resolved (unless explicitly
+    /// overridden) is cached, so the identity survives restarts even where
+    /// `/etc/machine-id` does not exist — containers, non-Linux hosts. The identity
+    /// matters: the coordinator keys the agent row on it, and a machine that comes
+    /// back with a different code strands its old row.
+    fn resolve_machine_code(explicit: Option<String>) -> String {
+        if let Some(code) = explicit
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return code;
+        }
+
+        let cache_path = dirs::config_dir().map(|mut p| {
+            p.push("mitosis");
+            p.push("machine-id");
+            p
+        });
+        if let Some(ref path) = cache_path {
+            if let Ok(cached) = std::fs::read_to_string(path) {
+                let cached = cached.trim().to_string();
+                if !cached.is_empty() {
+                    return cached;
+                }
+            }
+        }
+
+        let code = std::fs::read_to_string("/etc/machine-id")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                tracing::info!("No /etc/machine-id available; generating a machine code");
+                Uuid::new_v4().simple().to_string()
+            });
+
+        match cache_path {
+        Some(path) => {
+            let res = path
+                .parent()
+                .map(std::fs::create_dir_all)
+                .unwrap_or(Ok(()))
+                .and_then(|_| std::fs::write(&path, &code));
+            if let Err(e) = res {
+                tracing::warn!(
+                    "Failed to cache the machine code at {}: {e}; a new one may be generated next start",
+                    path.display()
+                );
+            }
+        }
+        None => tracing::warn!(
+            "No config directory to cache the machine code in; a new one may be generated next start"
+        ),
+    }
+
+        code
+    }
+}
+
+impl AgentClient {
+    fn api_url(&self, path: &str) -> Url {
+        let mut url = self.coordinator_addr.clone();
+        url.set_path(path);
+        url
+    }
+
+    async fn run_loop(&mut self) -> Result<()> {
+        let cancel_token = self.shutdown_token.clone();
+
+        // token that signals ctrl-c has been pressed once.
+        let signal_token = CancellationToken::new();
+        tokio::spawn({
+            let shutdown_token = cancel_token.clone();
+            let signal_token = signal_token.clone();
+            async move {
+                crate::signal::shutdown_signal(shutdown_token).await;
+                // When ctrlc is pressed once, the await above ends.
+                signal_token.cancel();
+            }
+        });
+
+        // `no_ws` opens no socket at all and disables the branch that reads it.
+        // The channel is built either way: `select!` evaluates a branch's
+        // expression even when its guard is false, so `ws_rx` has to exist.
+        let ws_enabled = !self.no_ws;
+        let (ws_tx, ws_rx) = crossfire::mpsc::bounded_async::<WsNotificationEvent>(32);
+        let ws_handle = if ws_enabled {
+            Some(self.spawn_websocket_client(ws_tx, cancel_token.clone()))
+        } else {
+            tracing::info!("WebSocket disabled; Notifications rely purely on heartbeat");
+            None
+        };
+
+        let mut heartbeat_timer = tokio::time::interval(self.heartbeat_interval);
+        heartbeat_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let (idle_poll_enabled, mut idle_poll_timer) = match self.idle_poll_interval {
+            Some(interval) => {
+                tracing::info!(
+                    "Idle agent will poll for a suite every {}s",
+                    interval.as_secs()
+                );
+                let mut timer = tokio::time::interval(interval);
+                timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                (true, timer)
+            }
+            None => {
+                // When idle_pool_enabled is false, the timer's select branch will be disabled so
+                // this timer never fires.
+                let mut timer = tokio::time::interval(self.heartbeat_interval);
+                timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                (false, timer)
+            }
+        };
+
+        tracing::info!("Agent entering its main loop");
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("Shutdown signalled, leaving the main loop");
+                    // Stop the in-flight suite so its reports cease; whatever it
+                    // was holding is reclaimed once our heartbeat lapses.
+                    if let Some(token) = &self.job_token {
+                        token.cancel();
+                    }
+                    break;
+                }
+
+                // Disarmed once a wind-down is under way, both so the arm stops
+                // resolving on every pass and so a second Ctrl+C falls through
+                // to the shared handler, which exits the process outright.
+                _ = signal_token.cancelled(), if !self.stop_after_current => {
+                    tracing::info!(
+                        "Signal received; finishing the current job before exiting \
+                         (Ctrl+C again to exit now)"
+                    );
+                    self.begin_graceful_shutdown();
+                }
+
+                Ok(event) = ws_rx.recv(), if ws_enabled => {
+                    self.notification_counter = self.notification_counter.max(event.id);
+                    self.handle_notification(event.event);
+                }
+
+                _ = heartbeat_timer.tick() => {
+                    if let Err(e) = self.send_heartbeat().await {
+                        tracing::error!("Heartbeat failed: {e}");
+                    }
+                }
+
+                _ = idle_poll_timer.tick(), if idle_poll_enabled => {
+                    // This arm fires and exit the select, entering the self.advance that fetches a new
+                    // suite.
+                    //
+                    // When the agent is in busy state, the self.advance returns almost immediately,
+                    // which shouldn't cause any trouble.
+                    if self.state == AgentState::Idle && !self.stop_after_current {
+                        self.has_pending_suite = true;
+                    }
+                }
+            }
+
+            if let Err(e) = self.advance().await {
+                tracing::error!("Agent state handling failed: {e}");
+            }
+            if self.stop_after_current && self.current_run.is_none() {
+                tracing::info!("Nothing left to run and a stop was requested; exiting");
+                cancel_token.cancel();
+                break;
+            }
+        }
+
+        // Let the in-flight suite drain so its last reports land.
+        if let Some(handle) = self.current_run.take() {
+            let _ = handle.await;
+        }
+        if let Some(handle) = ws_handle {
+            let _ = handle.await;
+        }
+        tracing::info!("Agent stopped");
+        Ok(())
+    }
+
+    fn spawn_websocket_client(
+        &self,
+        notification_tx: MAsyncTx<WsNotificationEvent>,
+        cancel_token: CancellationToken,
+    ) -> JoinHandle<()> {
+        let mut url = self.coordinator_addr.clone();
+        let _ = url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" });
+        url.set_path("ws/agents");
+        let ws_url = url.to_string();
+        let token = self.token.clone();
+        let reconnect_interval = self.ws_reconnect_interval;
+
+        tokio::spawn(async move {
+            while !cancel_token.is_cancelled() {
+                tracing::debug!("Connecting to {ws_url}");
+                match Self::websocket_session(&ws_url, &token, &notification_tx, &cancel_token)
+                    .await
+                {
+                    Ok(()) => tracing::debug!("Agent WebSocket closed"),
+                    // Notifications are an optimization — the heartbeat carries
+                    // the same events — so a failure here is never fatal.
+                    Err(e) => tracing::warn!("Agent WebSocket error: {e}"),
+                }
+                tokio::select! {
+                    _ = cancel_token.cancelled() => break,
+                    _ = tokio::time::sleep(reconnect_interval) => {}
+                }
+            }
+            tracing::debug!("Agent WebSocket task stopped");
+        })
+    }
+
+    /// Tell the coordinator this process is gone, so it stops counting the
+    /// agent live instead of waiting out its heartbeat.
+    ///
+    /// Best-effort with a short timeout: a coordinator we cannot reach must not
+    /// hold the exit open, and its heartbeat sweep retires us anyway.
+    async fn deregister(&self) {
+        if let Err(e) = self
+            .http_client
+            .delete(self.api_url("agents").as_str())
+            .bearer_auth(&self.token)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+        {
+            tracing::warn!("Failed to tell the coordinator we are exiting: {e}");
+        }
+    }
+
+    /// Wind down and stop: the tasks in hand finish and cleanup runs, but
+    /// nothing more is claimed and no next suite is picked. An idle agent
+    /// leaves the loop on the very next pass.
+    fn begin_graceful_shutdown(&mut self) {
+        self.stop_after_current = true;
+        self.has_pending_suite = false;
+        if let Some(token) = &self.drain_token {
+            token.cancel();
+        }
+    }
+
+    fn handle_notification(&mut self, notification: AgentNotification) {
+        match notification {
+            AgentNotification::SuiteAvailable => {
+                tracing::debug!("A suite is available");
+                self.has_pending_suite = true;
+            }
+            AgentNotification::TasksAvailable { suite_uuid } => {
+                // For the job we are running, not for the idle loop: the
+                // coordinator has tasks held for this job and is asking it to
+                // come back now rather than at the end of its hold interval.
+                if self.assigned_suite_uuid == Some(suite_uuid) {
+                    tracing::debug!(%suite_uuid, "Tasks are waiting for this job");
+                    self.fetch_wake.send_modify(|n| *n = n.wrapping_add(1));
+                } else {
+                    tracing::debug!(%suite_uuid, "Ignoring a task offer for a suite we left");
+                }
+            }
+            AgentNotification::PreemptSuite {
+                new_suite_uuid,
+                current_suite_uuid,
+                ..
+            } => {
+                // The coordinator does not emit this today (a running agent is
+                // never interrupted). Handled anyway, so turning preemption on
+                // is a coordinator-side change only.
+                if self.assigned_suite_uuid == Some(current_suite_uuid) {
+                    tracing::info!("Preempting suite {current_suite_uuid} for {new_suite_uuid}");
+                    if let Some(token) = &self.job_token {
+                        token.cancel();
+                    }
+                    self.has_pending_suite = true;
+                }
+            }
+            AgentNotification::SuiteCancelled { suite_uuid, reason } => {
+                if self.assigned_suite_uuid == Some(suite_uuid) {
+                    tracing::warn!("Suite {suite_uuid} was cancelled: {reason}");
+                    if let Some(token) = &self.job_token {
+                        token.cancel();
+                    }
+                }
+            }
+            AgentNotification::TasksCancelled { task_uuids } => {
+                // No client-side bookkeeping needed: a report against a task
+                // that is gone answers 404 and the runner moves on.
+                tracing::debug!(count = task_uuids.len(), "Tasks cancelled");
+            }
+            AgentNotification::StopJob {
+                suite_uuid,
+                graceful,
+            } => {
+                // Guarded on the suite: a stop that arrives after we moved on
+                // must not take down the job we started in the meantime.
+                if self.assigned_suite_uuid == Some(suite_uuid) {
+                    tracing::info!(
+                        "A user asked this agent to stop its job on suite {suite_uuid} \
+                         (graceful={graceful})"
+                    );
+                    // Deliberately no `stop_after_current`: the point of a stop
+                    // is to go straight back and pick a suite again, which is
+                    // how the agent lands on work that outranks this job.
+                    let token = if graceful {
+                        &self.drain_token
+                    } else {
+                        &self.job_token
+                    };
+                    if let Some(token) = token {
+                        token.cancel();
+                    }
+                }
+            }
+            AgentNotification::Shutdown { graceful } => {
+                tracing::warn!("Coordinator asked this agent to shut down (graceful={graceful})");
+                if graceful {
+                    self.begin_graceful_shutdown();
+                } else {
+                    if let Some(token) = &self.job_token {
+                        token.cancel();
+                    }
+                    self.shutdown_token.cancel();
+                }
+            }
+            AgentNotification::Ping { .. } => {}
+            AgentNotification::CounterSync { counter, boot_id } => {
+                if self.coordinator_boot_id != Some(boot_id) {
+                    if let Some(previous) = self.coordinator_boot_id {
+                        tracing::warn!("Coordinator restarted ({previous} → {boot_id})");
+                    }
+                    self.coordinator_boot_id = Some(boot_id);
+                    self.notification_counter = counter;
+                } else if counter > self.notification_counter {
+                    self.notification_counter = counter;
+                }
+            }
+        };
+    }
+
+    async fn send_heartbeat(&mut self) -> Result<()> {
+        let req = AgentHeartbeatReq {
+            state: self.state,
+            assigned_suite_uuid: self.assigned_suite_uuid,
+            last_notification_id: self.notification_counter,
+            metrics: None,
+        };
+        let resp = self
+            .http_client
+            .post(self.api_url("agents/heartbeat").as_str())
+            .bearer_auth(&self.token)
+            .json(&req)
+            .send()
+            .await
+            .map_err(error::map_reqwest_err)?;
+        let resp: AgentHeartbeatResp = parse_json(resp, "heartbeat").await?;
+
+        // Catch-up path: whatever the WebSocket did not deliver arrives here.
+        for event in resp.notifications {
+            self.notification_counter = self.notification_counter.max(event.id);
+            self.handle_notification(event.event);
+        }
+        Ok(())
+    }
+
+    // ── state machine ──
+
+    async fn advance(&mut self) -> Result<()> {
+        match self.state {
+            AgentState::Idle => {
+                if self.stop_after_current {
+                    return Ok(());
+                }
+                // Act only on a signal: a notification, the re-check the
+                // coordinator runs on every heartbeat, or the idle poll.
+                if !self.has_pending_suite {
+                    return Ok(());
+                }
+
+                // One attempt per signal: the slot was cleared above, so
+                // "nothing available" leaves us idle until the next
+                // notification rather than spinning.
+                let Some((suite, job, job_id)) = self.fetch_suite().await? else {
+                    return Ok(());
+                };
+                tracing::info!("Accepted suite {} as job {job_id}", suite.uuid);
+
+                self.assigned_suite_uuid = Some(suite.uuid);
+                let job_token = CancellationToken::new();
+                self.job_token = Some(job_token.clone());
+                let drain_token = CancellationToken::new();
+                self.drain_token = Some(drain_token.clone());
+                let runner = SuiteRunner {
+                    http_client: self.http_client.clone(),
+                    token: self.token.clone(),
+                    coordinator_addr: self.coordinator_addr.clone(),
+                    connect_retry_interval: self.connect_retry_interval,
+                    job_id,
+                    cache_path: self.cache_path.join("job"),
+                    job_token,
+                    drain_token,
+                    fetch_wake: self.fetch_wake.subscribe(),
+                };
+                self.current_run = Some(tokio::spawn(runner.run(suite, job)));
+                self.state = AgentState::Executing;
+            }
+            AgentState::Executing => {
+                // Reap without blocking the loop, so heartbeats keep flowing.
+                let finished = self
+                    .current_run
+                    .as_ref()
+                    .map(JoinHandle::is_finished)
+                    .unwrap_or(true);
+                if finished {
+                    if let Some(handle) = self.current_run.take() {
+                        match handle.await {
+                            // `complete` said more work is waiting for us.
+                            Ok(true) => self.has_pending_suite = true,
+                            Ok(false) => {}
+                            Err(e) => tracing::error!("The suite runner task failed: {e}"),
+                        }
+                    }
+                    self.assigned_suite_uuid = None;
+                    self.job_token = None;
+                    self.drain_token = None;
+                    self.state = AgentState::Idle;
+                    tracing::info!("Agent is idle again");
+                }
+            }
+            // Coordinator-owned: the agent only ever reports Idle/Executing,
+            // its other phases being bracketed by the start/cleanup calls.
+            AgentState::Provisioning | AgentState::Cleaning | AgentState::Offline => {}
+        }
+        Ok(())
+    }
+
+    /// Ask for a suite and claim it in one call, naming the one we were
+    /// notified about if there was one. `None` means nothing was available.
+    ///
+    /// The suite handed back need not be the one asked for: a stale hint is
+    /// answered with the best available instead.
+    async fn fetch_suite(&self) -> Result<Option<(TaskSuiteSpec, i64, i32)>> {
+        let resp = self
+            .http_client
+            .post(self.api_url("agents/suite").as_str())
+            .bearer_auth(&self.token)
+            .json(&AcceptSuiteReq { suite_uuid: None })
+            .send()
+            .await
+            .map_err(error::map_reqwest_err)?;
+        let resp: AcceptSuiteResp = parse_json(resp, "accept suite").await?;
+        if !resp.accepted {
+            tracing::debug!("No suite accepted: {}", resp.reason.unwrap_or_default());
+            return Ok(None);
+        }
+        let Some(suite) = resp.suite else {
+            return Err(error::Error::Custom(
+                "the coordinator accepted a suite but sent no spec".to_string(),
+            ));
+        };
+        Ok(resp.job.zip(resp.job_id).map(|(job, id)| (suite, job, id)))
+    }
+
+    /// One WebSocket session: read notifications, hand each to the main loop, then
+    /// acknowledge it. Returns when the socket closes or shutdown is signalled.
+    async fn websocket_session(
+        ws_url: &str,
+        token: &str,
+        notification_tx: &MAsyncTx<WsNotificationEvent>,
+        cancel_token: &CancellationToken,
+    ) -> Result<()> {
+        let host = Url::parse(ws_url)
+            .ok()
+            .and_then(|u| {
+                u.host_str().map(|h| match u.port() {
+                    Some(port) => format!("{h}:{port}"),
+                    None => h.to_string(),
+                })
+            })
+            .unwrap_or_default();
+        let request = tokio_tungstenite::tungstenite::http::Request::builder()
+            .uri(ws_url)
+            .header("Host", host)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Sec-WebSocket-Version", "13")
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header(
+                "Sec-WebSocket-Key",
+                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+            )
+            .body(())
+            .map_err(|e| error::Error::Custom(format!("Invalid WebSocket request: {e}")))?;
+
+        let (ws_stream, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .map_err(|e| error::Error::Custom(format!("WebSocket connect failed: {e}")))?;
+        tracing::info!("Agent WebSocket connected");
+
+        let (mut ws_write, mut ws_read) = ws_stream.split();
+        loop {
+            let msg = tokio::select! {
+                _ = cancel_token.cancelled() => return Ok(()),
+                msg = ws_read.next() => msg,
+            };
+            let Some(msg) = msg else { return Ok(()) };
+            match msg {
+                Ok(WsMessage::Binary(bytes)) => {
+                    let event = match WsNotificationEvent::read_from_buffer(&bytes) {
+                        Ok(event) => event,
+                        Err(e) => {
+                            tracing::warn!("Unparseable notification: {e}");
+                            continue;
+                        }
+                    };
+                    let id = event.id;
+                    if notification_tx.send(event).await.is_err() {
+                        return Ok(());
+                    }
+                    // Acknowledge only once the main loop has taken it, so an event
+                    // never leaves the coordinator's replay buffer before we own it.
+                    let ack = AgentWsMessage::Ack {
+                        notification_id: id,
+                    };
+                    if let Ok(payload) = ack.write_to_vec() {
+                        let _ = ws_write.send(WsMessage::Binary(payload.into())).await;
+                    }
+                }
+                Ok(WsMessage::Ping(_)) | Ok(WsMessage::Pong(_)) | Ok(WsMessage::Frame(_)) => {}
+                Ok(WsMessage::Text(text)) => {
+                    tracing::debug!(%text, "Ignoring an unexpected text frame")
+                }
+                Ok(WsMessage::Close(frame)) => {
+                    tracing::debug!(?frame, "Coordinator closed the WebSocket");
+                    return Ok(());
+                }
+                Err(e) => return Err(error::Error::Custom(format!("WebSocket error: {e}"))),
+            }
+        }
+    }
+}
+
+/// Drives one accepted suite from provision through to a terminal job state.
+#[derive(Clone)]
+struct SuiteRunner {
+    http_client: reqwest::Client,
+    token: String,
+    coordinator_addr: Url,
+    connect_retry_interval: Duration,
+    /// The suite's own job number, and the only one that belongs in a log or on
+    /// screen: it is what `suites jobs <suite> --job N` takes. The `job` handle
+    /// threaded through the calls below is `suite_agent_jobs.id`, an internal
+    /// key the user never sees.
+    job_id: i32,
+    /// This job's working subtree
+    cache_path: PathBuf,
+    /// Cancelled when the suite is cancelled, preempted, or the agent stops.
+    /// Everything the job runs (tasks, hooks, cleanup) runs under it.
+    job_token: CancellationToken,
+    /// Cancelled to stop claiming without stopping the wind-down: the tasks
+    /// already executing finish and commit, then cleanup runs — under
+    /// `job_token`, which is why the two are separate. Whatever a slot claimed
+    /// but had not started is abandoned; the coordinator reclaims it on
+    /// `complete`.
+    drain_token: CancellationToken,
+    /// Moves when the coordinator says this suite has tasks waiting for us. It
+    /// is what turns the hold below from a poll into a push; the poll stays as
+    /// the backstop for a dropped socket.
+    fetch_wake: watch::Receiver<u64>,
+}
+
+impl SuiteRunner {
+    fn api_url(&self, path: &str) -> Url {
+        let mut url = self.coordinator_addr.clone();
+        url.set_path(path);
+        url
+    }
+
+    /// Every phase logs and continues on error rather than bailing: only the
+    /// agent can walk the job to a terminal state and release itself.
+    ///
+    /// Returns whether `complete` said this agent has more work waiting.
+    async fn run(self, suite: TaskSuiteSpec, job: i64) -> bool {
+        let suite_uuid = suite.uuid;
+        let mut failure: Option<JobFailureReason> = None;
+
+        let provisioned = match self.prepare_workspace().await {
+            Ok(()) => self.run_hook(job, &suite, HookType::Provision).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = provisioned {
+            tracing::error!("Provisioning failed for suite {suite_uuid}: {e}");
+            failure = Some(JobFailureReason {
+                kind: JobFailureKind::ProvisionFailed,
+                message: e.to_string(),
+            });
+        }
+
+        if let Err(e) = self
+            .post_empty("agents/job/start", &StartJobReq { job })
+            .await
+        {
+            tracing::error!("Failed to start suite {suite_uuid}: {e}");
+        }
+
+        let background_token = CancellationToken::new();
+        let mut background = None;
+
+        if failure.is_none() {
+            background = self.spawn_background_hook(job, &suite, background_token.clone());
+            if let Err(e) = self.execute_tasks(&suite, job).await {
+                tracing::error!("Task execution failed for suite {suite_uuid}: {e}");
+                failure = Some(JobFailureReason {
+                    kind: JobFailureKind::ExecutionError,
+                    message: e.to_string(),
+                });
+            }
+        }
+
+        if let Some(handle) = background {
+            // Finishing before we ask it to is the failure mode a background
+            // hook has: it was supposed to outlive the tasks it serves.
+            let exited_early = handle.is_finished();
+            background_token.cancel();
+            if let Err(e) = handle.await {
+                tracing::error!("The background hook task failed for suite {suite_uuid}: {e}");
+            }
+            if exited_early {
+                failure.get_or_insert(JobFailureReason {
+                    kind: JobFailureKind::BackgroundExited,
+                    message: "the background hook exited before the tasks drained".to_string(),
+                });
+            } else {
+                self.record_stopped_hook(job, suite_uuid, HookType::Background)
+                    .await;
+            }
+        }
+
+        if let Err(e) = self
+            .post_empty("agents/job/cleanup", &EnterCleanupReq { job })
+            .await
+        {
+            tracing::error!("Failed to enter cleanup for suite {suite_uuid}: {e}");
+        }
+
+        if let Err(e) = self.run_hook(job, &suite, HookType::Cleanup).await {
+            tracing::error!("Cleanup hook failed for suite {suite_uuid}: {e}");
+            failure.get_or_insert(JobFailureReason {
+                kind: JobFailureKind::CleanupFailed,
+                message: e.to_string(),
+            });
+        }
+
+        let outcome = match failure {
+            None => SuiteJobOutcome::Completed,
+            Some(reason) => SuiteJobOutcome::Failed { reason },
+        };
+        let next_available = match self.report_complete(job, outcome).await {
+            Ok(next_available) => {
+                tracing::info!(
+                    "Finished suite {suite_uuid} (job {}); more work waiting: {next_available}",
+                    self.job_id
+                );
+                next_available
+            }
+            // A `complete` that never landed says nothing about what is next.
+            Err(e) => {
+                tracing::error!("Failed to complete suite {suite_uuid}: {e}");
+                false
+            }
+        };
+
+        // Everything worth keeping has been uploaded by now
+        let _ = tokio::fs::remove_dir_all(&self.cache_path).await;
+        next_available
+    }
+
+    /// The directory the provision hook, the tasks and the cleanup hook all see
+    /// as `MITO_SUITE_SHARED`.
+    fn shared_path(&self) -> PathBuf {
+        self.cache_path.join("share")
+    }
+
+    /// Create a job's file tree. The job root only has to be walked through;
+    /// `share/` is handed to the tasks and hooks as `MITO_SUITE_SHARED`, so it
+    /// is opened up to whatever user they end up running as.
+    async fn prepare_workspace(&self) -> Result<()> {
+        let _ = tokio::fs::remove_dir_all(&self.cache_path).await;
+        ensure_traversable_dir(&self.cache_path).await?;
+        create_shared_dir(&self.shared_path()).await?;
+        Ok(())
+    }
+
+    /// Claim the suite's tasks into a buffer and run them across `slots` slots.
+    ///
+    /// This call is the buffer's keeper: it does every claim, every hold-open
+    /// poll, and the decision to end the job. The slots only take what it hands
+    /// them, so none of that is duplicated `slots` times.
+    ///
+    /// How much may be claimed at once is the coordinator's to say — it knows
+    /// the suite's schedule and what this job is already holding. The channel
+    /// holds one task per slot, so `send` parks once every slot has its next
+    /// task waiting, and `staged` holds whatever a batch brought beyond that.
+    async fn execute_tasks(&self, suite: &TaskSuiteSpec, job: i64) -> Result<()> {
+        let slots = task_slots(suite);
+        tracing::info!(
+            "Running the tasks of suite {} across {slots} slots",
+            suite.uuid,
+        );
+
+        let (task_tx, task_rx) = crossfire::mpmc::bounded_async::<WorkerTaskResp>(slots);
+        // Paired with the keeper's own `pushed` count: equal means everything
+        // ever handed out has finished, which no snapshot of "are the slots
+        // idle" can say without racing a slot that has just taken a task.
+        let progress = Arc::new(SlotProgress::default());
+
+        let mut running = tokio::task::JoinSet::new();
+        for slot in 0..slots {
+            let runner = self.clone();
+            let task_rx = task_rx.clone();
+            let progress = progress.clone();
+            running.spawn(async move { runner.run_slot(job, slot, task_rx, progress).await });
+        }
+        // Only the solots hold the receivers.
+        drop(task_rx);
+
+        // Keep filling the job to the buffer so that workers and continously working on it.
+        let filled = self.fill_buffer(suite.uuid, task_tx, progress).await;
+
+        while let Some(joined) = running.join_next().await {
+            if let Err(e) = joined {
+                tracing::error!("A task slot of suite {} panicked: {e}", suite.uuid);
+            }
+        }
+        filled
+    }
+
+    /// Keep the buffer stocked until the suite has nothing left for us.
+    ///
+    /// Returns once the job is done claiming — drained, cancelled, or wound
+    /// down. Whatever is still staged at that point is abandoned unstarted;
+    /// `complete` hands those back to `Ready`.
+    async fn fill_buffer(
+        &self,
+        suite_uuid: Uuid,
+        task_tx: MAsyncTx<WorkerTaskResp>,
+        progress: Arc<SlotProgress>,
+    ) -> Result<()> {
+        let mut staged: VecDeque<WorkerTaskResp> = VecDeque::new();
+        // Cloned once for the whole loop, not per hold: a bump that lands while
+        // we are mid-fetch is then still unseen when we come back to wait on it.
+        let mut wake = self.fetch_wake.clone();
+        // How many tasks have been handed to the slots.
+        let mut pushed: usize = 0;
+        // Log-only edge detector, so a hold is announced once rather than once
+        // per poll.
+        // TODO: make this an `Option<Instant>` so the resume line can report how
+        // long the job sat warm
+        let mut holding = false;
+
+        loop {
+            if self.job_token.is_cancelled() {
+                tracing::info!("Suite {suite_uuid} cancelled; claiming no more tasks");
+                return Ok(());
+            }
+            // Checked before the claim, not only while waiting on work: a
+            // wind-down has to stop a keeper that still has tasks to claim,
+            // which is the whole difference between it and letting the suite
+            // drain on its own.
+            if self.drain_token.is_cancelled() {
+                tracing::info!(
+                    "Asked to wind down; job {} claims no more tasks",
+                    self.job_id
+                );
+                return Ok(());
+            }
+
+            if staged.is_empty() {
+                let resp = self.fetch_tasks(suite_uuid).await?;
+                if resp.tasks.is_empty() {
+                    // This expression means:
+                    // When 1. no thread is actually working (pushed == completed)
+                    // and 2. the suite is closed,
+                    // then we can stop this job.
+                    if !resp.hold_job_open && progress.completed() == pushed {
+                        tracing::debug!("Suite {suite_uuid} is idle and has no more tasks");
+                        return Ok(());
+                    }
+                    if !holding {
+                        // Either the suite is drained or this job is holding as
+                        // much as it may at once; both end here, and both end
+                        // when something changes rather than on a timer.
+                        tracing::debug!(
+                            "Nothing to claim from suite {suite_uuid} for now; job {} stays up \
+                             for more work",
+                            self.job_id
+                        );
+                        holding = true;
+                    }
+                    // A submission into a suite we are holding is pushed to
+                    // us, so the wake is the normal way out of here; the poll
+                    // covers a dropped socket and a task a running one spawned
+                    // while the push was in flight.
+                    tokio::select! {
+                        _ = self.job_token.cancelled() => return Ok(()),
+                        // The checks at the top of the loop would catch this
+                        // too; waking on it here is what keeps a wind-down from
+                        // sitting out the poll interval first.
+                        _ = self.drain_token.cancelled() => return Ok(()),
+                        _ = wake.changed() => {
+                            tracing::debug!(
+                                "Job {} was told suite {suite_uuid} has tasks",
+                                self.job_id
+                            );
+                        }
+                        // A slot came free, so a batch we were too full to be
+                        // given may be ours now.
+                        _ = progress.freed.notified() => {}
+                        _ = tokio::time::sleep(HOLD_POLL_INTERVAL) => {}
+                    }
+                    continue;
+                }
+                if holding {
+                    tracing::debug!(
+                        "Suite {suite_uuid} has work for job {} again; it resumes",
+                        self.job_id
+                    );
+                    holding = false;
+                }
+                staged.extend(resp.tasks);
+            }
+
+            // Hand the staged batch over one at a time. This parks once the
+            // channel is full and wakes as slots take them, so the refill above
+            // runs exactly when the buffer has drained to the low-water mark.
+            while let Some(task) = staged.pop_front() {
+                tokio::select! {
+                    _ = self.job_token.cancelled() => return Ok(()),
+                    _ = self.drain_token.cancelled() => return Ok(()),
+                    sent = task_tx.send(task) => {
+                        if sent.is_err() {
+                            // Every slot is gone; nothing left to feed.
+                            return Ok(());
+                        }
+                        pushed += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// One task slot: run what the keeper hands us, in `task-{slot}`, until the
+    /// channel closes.
+    ///
+    /// No drain check of its own — a wind-down closes the channel, and the slot
+    /// finishes the task in hand before it notices.
+    async fn run_slot(
+        &self,
+        job: i64,
+        slot: usize,
+        task_rx: MAsyncRx<WorkerTaskResp>,
+        progress: Arc<SlotProgress>,
+    ) {
+        let dir = self.cache_path.join(format!("task-{slot}"));
+        loop {
+            let task = tokio::select! {
+                _ = self.job_token.cancelled() => break,
+                task = task_rx.recv() => match task {
+                    Ok(task) => task,
+                    Err(_) => break,
+                },
+            };
+
+            // TODO: run the task in `dir` and report it.
+            tracing::info!("Slot {} running task {}", slot, task.uuid);
+            tracing::debug!("Slot {} task {} spec: {:?}", slot, task.uuid, task.spec);
+            if let Err(e) = reset_workspace(&dir).await {
+                tracing::error!(
+                    "Slot {} error prepare workspace for task {}: {}",
+                    slot,
+                    task.uuid,
+                    e
+                );
+                progress.task_ended();
+                continue;
+            }
+            let mut executor = Executor {
+                cancel_token: self.job_token.clone(),
+                polling_interval: self.connect_retry_interval,
+                cache_path: dir.clone(),
+                http_client: self.http_client.clone(),
+                client: Box::new(AgentTaskClient {
+                    http: self.connection(),
+                    job,
+                    task_id: task.id,
+                    task_uuid: task.uuid,
+                    upstream_task_uuid: task.upstream_task_uuid,
+                    shared_path: self.shared_path(),
+                }),
+            };
+            if let Err(e) = executor
+                .execute(task.spec, task.exec_options.as_ref())
+                .await
+            {
+                tracing::error!("Slot {} error executing task {}: {}", slot, task.uuid, e);
+            }
+
+            // After the task is over, whatever became of it: the keeper reads
+            // this to tell "still working" from "everything is done", and to
+            // know it has room for another.
+            progress.task_ended();
+        }
+        tracing::debug!("Slot {slot} of job {} released", self.job_id);
+    }
+
+    /// Run a suite hook, reporting it through the hook endpoint. An unconfigured
+    /// hook is not a failed one — it just leaves no record.
+    async fn run_hook(&self, job: i64, suite: &TaskSuiteSpec, hook_type: HookType) -> Result<()> {
+        let Some(spec) = Self::hook_spec(suite, hook_type) else {
+            tracing::debug!("No {hook_type} hook configured for suite {}", suite.uuid);
+            return Ok(());
+        };
+        self.run_hook_spec(job, suite, hook_type, spec, self.job_token.clone())
+            .await
+    }
+
+    async fn run_hook_spec(
+        &self,
+        job: i64,
+        suite: &TaskSuiteSpec,
+        hook_type: HookType,
+        spec: ExecSpec,
+        cancel_token: CancellationToken,
+    ) -> Result<()> {
+        tracing::info!("Running the {hook_type} hook of suite {}", suite.uuid);
+        let dir = self.cache_path.join(format!("hook-{hook_type}"));
+        reset_workspace(&dir).await?;
+        let outcome = HookOutcome::default();
+        let mut executor = Executor {
+            cancel_token,
+            polling_interval: self.connect_retry_interval,
+            cache_path: dir,
+            http_client: self.http_client.clone(),
+            client: Box::new(AgentHookClient {
+                http: self.connection(),
+                job,
+                hook_type,
+                suite_uuid: suite.uuid,
+                outcome: outcome.clone(),
+                shared_path: self.shared_path(),
+            }),
+        };
+        executor.execute(spec, None).await?;
+        match outcome.exit_status() {
+            Some(0) | None => Ok(()),
+            Some(status) => Err(error::Error::Custom(format!(
+                "the {hook_type} hook exited with status {status}"
+            ))),
+        }
+    }
+
+    /// Start the background hook, if the suite has one. Not awaited: it runs for
+    /// as long as the tasks do.
+    fn spawn_background_hook(
+        &self,
+        job: i64,
+        suite: &TaskSuiteSpec,
+        cancel_token: CancellationToken,
+    ) -> Option<JoinHandle<()>> {
+        let spec = Self::hook_spec(suite, HookType::Background)?;
+        let runner = self.clone();
+        let suite = suite.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) = runner
+                .run_hook_spec(job, &suite, HookType::Background, spec, cancel_token)
+                .await
+            {
+                tracing::error!("Background hook failed for suite {}: {e}", suite.uuid);
+            }
+        }))
+    }
+
+    /// Record a hook that ended by our own hand rather than by exiting — the
+    /// background hook, once the tasks it served have drained. The execution
+    /// core reports nothing on a cancellation, so without this the hook would
+    /// leave no row at all.
+    async fn record_stopped_hook(&self, job: i64, suite_uuid: Uuid, hook_type: HookType) {
+        let mut client = AgentHookClient {
+            http: self.connection(),
+            job,
+            hook_type,
+            suite_uuid,
+            outcome: HookOutcome::default(),
+            shared_path: self.shared_path(),
+        };
+        let result = TaskResultSpec {
+            exit_status: 0,
+            msg: None,
+        };
+        if let Err(e) = client.report_commit(result).await {
+            tracing::error!("Failed to record the stopped {hook_type} hook: {e}");
+        }
+    }
+
+    /// The connection context every per-unit client is built from.
+    fn connection(&self) -> AgentConnection {
+        AgentConnection {
+            http_client: self.http_client.clone(),
+            token: self.token.clone(),
+            coordinator_addr: self.coordinator_addr.clone(),
+            connect_retry_interval: self.connect_retry_interval,
+            job_token: self.job_token.clone(),
+        }
+    }
+
+    async fn fetch_tasks(&self, suite_uuid: Uuid) -> Result<FetchTasksResp> {
+        let resp = self
+            .http_client
+            .post(self.api_url("agents/tasks/fetch").as_str())
+            .bearer_auth(&self.token)
+            .json(&FetchTasksReq { suite_uuid })
+            .send()
+            .await
+            .map_err(error::map_reqwest_err)?;
+        // The suite going terminal under us is an ordinary end of run, not a
+        // failure: stop the loop and let cleanup proceed.
+        if resp.status() == StatusCode::BAD_REQUEST {
+            tracing::info!("Suite {suite_uuid} stopped handing out tasks");
+            self.job_token.cancel();
+            return Ok(FetchTasksResp {
+                tasks: Vec::new(),
+                hold_job_open: false,
+            });
+        }
+        parse_json(resp, "fetch tasks").await
+    }
+
+    async fn report_complete(&self, job: i64, outcome: SuiteJobOutcome) -> Result<bool> {
+        let resp = self
+            .http_client
+            .post(self.api_url("agents/job/complete").as_str())
+            .bearer_auth(&self.token)
+            .json(&CompleteJobReq { job, outcome })
+            .send()
+            .await
+            .map_err(error::map_reqwest_err)?;
+        let resp: CompleteJobResp = parse_json(resp, "complete job").await?;
+        Ok(resp.next_suite_available)
+    }
+
+    /// POST a request whose success carries no body.
+    async fn post_empty<T: serde::Serialize>(&self, path: &str, req: &T) -> Result<()> {
+        let resp = self
+            .http_client
+            .post(self.api_url(path).as_str())
+            .bearer_auth(&self.token)
+            .json(req)
+            .send()
+            .await
+            .map_err(error::map_reqwest_err)?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        Err(error::Error::Custom(format!(
+            "{path} failed: {}",
+            error::get_error_from_resp(resp).await
+        )))
+    }
+
+    /// The hook's `ExecSpec` from the suite definition, if it has one.
+    fn hook_spec(suite: &TaskSuiteSpec, hook_type: HookType) -> Option<ExecSpec> {
+        let hooks = suite.exec_hooks.as_ref()?;
+        match hook_type {
+            HookType::Provision => hooks.provision.clone(),
+            HookType::Cleanup => hooks.cleanup.clone(),
+            HookType::Background => hooks.background.clone(),
+        }
+    }
+}
+
+/// The result a hook committed, handed back out of the execution core so the
+/// runner can turn a non-zero exit into a job failure. Empty when the hook never
+/// got as far as committing (it was cancelled, or its inputs were unavailable).
+#[derive(Clone, Default)]
+struct HookOutcome(Arc<Mutex<Option<TaskResultSpec>>>);
+
+impl HookOutcome {
+    fn record(&self, result: &TaskResultSpec) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(result.clone());
+        }
+    }
+
+    fn exit_status(&self) -> Option<i32> {
+        self.0.lock().ok()?.as_ref().map(|r| r.exit_status)
+    }
+}
+
+/// What every agent-side [`ExecClient`] needs to reach the coordinator. Cloned
+/// per unit; the clones are all cheap handles.
+#[derive(Clone)]
+struct AgentConnection {
+    http_client: reqwest::Client,
+    token: String,
+    coordinator_addr: Url,
+    connect_retry_interval: Duration,
+    /// The job's token. Cancelling it stops every unit of this job at once,
+    /// which is how a 400 ("this job is closed") propagates.
+    job_token: CancellationToken,
+}
+
+impl AgentConnection {
+    fn api_url(&self, path: &str) -> Url {
+        let mut url = self.coordinator_addr.clone();
+        url.set_path(path);
+        url
+    }
+
+    fn get(&self, path: &str) -> reqwest::RequestBuilder {
+        self.http_client
+            .get(self.api_url(path).as_str())
+            .bearer_auth(&self.token)
+    }
+
+    /// POST a report, retrying connection failures until the job is cancelled.
+    /// `None` means the coordinator answered something that ends the reporting:
+    /// 400 (the job is closed — which also stops the job) or 404 (it is gone).
+    async fn post_report<Req: serde::Serialize, Resp: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        req: &Req,
+        what: &str,
+    ) -> Result<Option<Resp>> {
+        let url = self.api_url(path);
+        loop {
+            let resp = self
+                .http_client
+                .post(url.as_str())
+                .bearer_auth(&self.token)
+                .json(req)
+                .send()
+                .await;
+            let resp = match resp {
+                Ok(resp) => resp,
+                Err(e) if e.is_connect() && e.is_request() => {
+                    tracing::warn!(
+                        "{what} failed to connect ({e}); retrying in {:?}",
+                        self.connect_retry_interval
+                    );
+                    tokio::select! {
+                        _ = self.job_token.cancelled() => return Ok(None),
+                        _ = tokio::time::sleep(self.connect_retry_interval) => {}
+                    }
+                    continue;
+                }
+                Err(e) => return Err(error::RequestError::from(e).into()),
+            };
+
+            if resp.status() == StatusCode::BAD_REQUEST {
+                tracing::info!("The job is closed; stopping this run");
+                self.job_token.cancel();
+                return Ok(None);
+            }
+            if resp.status() == StatusCode::NOT_FOUND {
+                tracing::debug!("{what}: the target is gone; skipping the report");
+                return Ok(None);
+            }
+            return parse_json(resp, what).await.map(Some);
+        }
+    }
+}
+
+/// A task the agent runs on a suite's behalf. Same protocol as the worker's,
+/// addressed to `/agents/tasks/report` with the job handle attached.
+struct AgentTaskClient {
+    http: AgentConnection,
+    job: i64,
+    task_id: i64,
+    task_uuid: Uuid,
+    upstream_task_uuid: Option<Uuid>,
+    /// The job's `share/`, exported as `MITO_SUITE_SHARED`.
+    shared_path: PathBuf,
+}
+
+impl AgentTaskClient {
+    async fn report(&self, op: ReportTaskOp) -> Result<Option<ReportTaskResp>> {
+        self.http
+            .post_report(
+                "agents/tasks/report",
+                &ReportAgentTaskReq {
+                    job: self.job,
+                    id: self.task_id,
+                    op,
+                },
+                "report task",
+            )
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl ExecClient for AgentTaskClient {
+    fn describe(&self) -> String {
+        format!("task {}", self.task_uuid)
+    }
+
+    fn exec_env(&self) -> Vec<(&'static str, String)> {
+        let mut env = vec![
+            ("MITO_TASK_UUID", self.task_uuid.to_string()),
+            (
+                "MITO_SUITE_SHARED",
+                self.shared_path.to_string_lossy().into_owned(),
+            ),
+        ];
+        if let Some(uuid) = self.upstream_task_uuid {
+            env.push(("MITO_UPSTREAM_TASK_UUID", uuid.to_string()));
+        }
+        env
+    }
+
+    fn supports_child_tasks(&self) -> bool {
+        true
+    }
+
+    async fn report_finish(&mut self, finished: bool, _result: &TaskResultSpec) -> Result<()> {
+        let op = if finished {
+            ReportTaskOp::Finish
+        } else {
+            ReportTaskOp::Cancel
+        };
+        self.report(op).await.map(|_| ())
+    }
+
+    async fn request_upload(
+        &mut self,
+        content_type: ArtifactContentType,
+        content_length: u64,
+    ) -> Result<UploadTarget> {
+        let resp = self
+            .report(ReportTaskOp::Upload {
+                content_type,
+                content_length,
+            })
+            .await?;
+        Ok(match resp.and_then(|resp| resp.url) {
+            Some(url) => UploadTarget::Url(url),
+            None => UploadTarget::Skip,
+        })
+    }
+
+    async fn report_commit(&mut self, result: TaskResultSpec) -> Result<()> {
+        self.report(ReportTaskOp::Commit(result)).await.map(|_| ())
+    }
+
+    async fn submit_child_task(&mut self, req: SubmitTaskReq) -> Result<()> {
+        self.report(ReportTaskOp::Submit(Box::new(req)))
+            .await
+            .map(|_| ())
+    }
+
+    fn artifact_download_req(
+        &self,
+        uuid: Uuid,
+        content_type: ArtifactContentType,
+    ) -> reqwest::RequestBuilder {
+        self.http.get(&artifact_path(uuid, content_type))
+    }
+
+    fn attachment_download_req(&self, key: &str) -> reqwest::RequestBuilder {
+        let uuid = self.task_uuid;
+        self.http
+            .get(&format!("agents/tasks/{uuid}/attachments/{key}"))
+    }
+
+    /// No redis on the agent side yet, so an agent task's fine-grained states go
+    /// unpublished.
+    async fn announce_state(&mut self, _state: TaskExecState, _ex: Option<u64>) {}
+
+    fn can_watch(&self) -> bool {
+        true
+    }
+
+    /// Poll-only, which resolves the coarse milestones a `watch` asks for (has
+    /// the other task committed?) but not the intra-execution states.
+    async fn watch(&mut self, uuid: &Uuid, target: TaskExecState) {
+        tracing::debug!("Watch task: {} -> {:?}", uuid, target);
+        loop {
+            let resp = self.http.get(&format!("agents/tasks/{uuid}")).send().await;
+            match resp {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<TaskQueryResp>().await {
+                        Ok(task) => {
+                            if task.info.state.is_reach(&target, task.info.result) {
+                                return;
+                            }
+                        }
+                        Err(e) => tracing::warn!("Unreadable watched task {uuid}: {e}"),
+                    }
+                }
+                Ok(resp) => tracing::warn!(
+                    "Watching task {uuid} failed: {}",
+                    error::get_error_from_resp(resp).await
+                ),
+                Err(e) => tracing::warn!("Watching task {uuid} failed: {e}"),
+            }
+            tokio::select! {
+                _ = self.http.job_token.cancelled() => return,
+                _ = tokio::time::sleep(WATCH_POLL_INTERVAL) => {}
+            }
+        }
+    }
+}
+/// A suite hook. Keyed by `{job, hook_type}` rather than by a task, and reported
+/// to `/agents/job/hook`, whose `Result` op records the outcome and mints the
+/// uuid its artifacts hang off — hence the outcome is reported before the
+/// uploads.
+struct AgentHookClient {
+    http: AgentConnection,
+    job: i64,
+    hook_type: HookType,
+    suite_uuid: Uuid,
+    outcome: HookOutcome,
+    /// The job's `share/`, exported as `MITO_SUITE_SHARED`.
+    shared_path: PathBuf,
+}
+
+impl AgentHookClient {
+    async fn report(&self, op: HookReportOp) -> Result<Option<HookReportResp>> {
+        self.http
+            .post_report(
+                "agents/job/hook",
+                &HookReportReq {
+                    job: self.job,
+                    hook_type: self.hook_type,
+                    op,
+                },
+                "report hook",
+            )
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl ExecClient for AgentHookClient {
+    fn describe(&self) -> String {
+        format!("the {} hook of job {}", self.hook_type, self.job)
+    }
+
+    fn exec_env(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("MITO_HOOK_TYPE", self.hook_type.to_string()),
+            ("MITO_SUITE_UUID", self.suite_uuid.to_string()),
+            (
+                "MITO_SUITE_SHARED",
+                self.shared_path.to_string_lossy().into_owned(),
+            ),
+        ]
+    }
+
+    /// The hook report endpoint has no submit operation, so `MITO_NEW_TASK` is
+    /// not exported to a hook.
+    fn supports_child_tasks(&self) -> bool {
+        false
+    }
+
+    /// Writes the hook row. Its uuid is what the uploads that follow are keyed
+    /// by, so this must land before them.
+    async fn report_finish(&mut self, _finished: bool, result: &TaskResultSpec) -> Result<()> {
+        self.report(HookReportOp::Result(result.clone()))
+            .await
+            .map(|_| ())
+    }
+
+    async fn request_upload(
+        &mut self,
+        content_type: ArtifactContentType,
+        content_length: u64,
+    ) -> Result<UploadTarget> {
+        let resp = self
+            .report(HookReportOp::Upload {
+                content_type,
+                content_length,
+            })
+            .await?;
+        Ok(match resp.and_then(|resp| resp.url) {
+            Some(url) => UploadTarget::Url(url),
+            None => UploadTarget::Skip,
+        })
+    }
+
+    /// Re-reports the row with the final message. The endpoint upserts on
+    /// `{job, hook_type}` and never rewrites the uuid, so the artifacts uploaded
+    /// in between stay attached.
+    async fn report_commit(&mut self, result: TaskResultSpec) -> Result<()> {
+        self.outcome.record(&result);
+        self.report(HookReportOp::Result(result)).await.map(|_| ())
+    }
+
+    async fn submit_child_task(&mut self, _req: SubmitTaskReq) -> Result<()> {
+        Err(error::Error::Custom(
+            "a suite hook cannot submit a task".to_string(),
+        ))
+    }
+
+    fn artifact_download_req(
+        &self,
+        uuid: Uuid,
+        content_type: ArtifactContentType,
+    ) -> reqwest::RequestBuilder {
+        self.http.get(&artifact_path(uuid, content_type))
+    }
+
+    /// Through the suite, not a task: a hook has no task uuid to resolve the
+    /// owning group by.
+    fn attachment_download_req(&self, key: &str) -> reqwest::RequestBuilder {
+        let uuid = self.suite_uuid;
+        self.http
+            .get(&format!("agents/suites/{uuid}/attachments/{key}"))
+    }
+
+    async fn announce_state(&mut self, _state: TaskExecState, _ex: Option<u64>) {}
+}
+
+/// The artifact download path both agent clients use. Keyed by the artifact's
+/// owning uuid, which the service resolves without caring whose it is.
+fn artifact_path(uuid: Uuid, content_type: ArtifactContentType) -> String {
+    let content_type = serde_json::to_value(content_type)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "result".to_string());
+    format!("agents/tasks/{uuid}/artifacts/{content_type}")
+}
+
+/// Decode a successful JSON response, turning a non-2xx into a descriptive error.
+async fn parse_json<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+    what: &str,
+) -> Result<T> {
+    if !resp.status().is_success() {
+        return Err(error::Error::Custom(format!(
+            "{what} failed: {}",
+            error::get_error_from_resp(resp).await
+        )));
+    }
+    resp.json::<T>()
+        .await
+        .map_err(|e| error::Error::Custom(format!("Unreadable {what} response: {e}")))
+}

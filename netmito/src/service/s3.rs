@@ -7,8 +7,8 @@ use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use reqwest::{header::CONTENT_LENGTH, Response};
 use sea_orm::{
     prelude::*,
-    sea_query::{Expr, Query},
-    FromQueryResult, Set, TransactionTrait,
+    sea_query::{Expr, ExprTrait, Query},
+    FromQueryResult, QuerySelect, Set, TransactionTrait,
 };
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
@@ -23,7 +23,7 @@ use crate::{
     entity::{
         active_tasks as ActiveTask, archived_tasks as ArchivedTask, artifacts as Artifact,
         attachments as Attachment, content::ArtifactContentType, groups as Group,
-        role::UserGroupRole, user_group as UserGroup,
+        role::UserGroupRole, task_suites as TaskSuite, user_group as UserGroup,
     },
     error::AuthError,
 };
@@ -62,7 +62,7 @@ pub async fn setup_buckets(client: &Client, bucket_names: Vec<String>) -> Result
             }
             Ok(())
         }
-        Err(e) => Err(S3Error::ListBucketsError(e)),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -78,7 +78,7 @@ pub async fn create_bucket(client: &Client, bucket_name: &str) -> Result<(), S3E
             tracing::info!("Bucket {} already exists", bucket_name);
             Ok(())
         }
-        Err(e) => Err(S3Error::CreateBucketError(e)),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -137,7 +137,7 @@ pub async fn delete_object<T: Into<String>>(
         .send()
         .await
         .map(|_| ())
-        .map_err(S3Error::DeleteObjectError)
+        .map_err(|e| e.into())
 }
 
 pub async fn delete_objects<T: Into<String>>(
@@ -250,6 +250,7 @@ pub async fn batch_download_artifacts_by_filter(
     let query = TasksQueryReq {
         creator_usernames: req.creator_usernames,
         group_name: req.group_name,
+        suite_uuid: req.suite_uuid,
         tags: req.tags,
         labels: req.labels,
         states: req.states,
@@ -312,6 +313,73 @@ async fn find_task_by_uuid(
     Ok(res)
 }
 
+/// Move a group's `storage_used` by `delta` bytes in one statement, refusing the
+/// charge if it would break the quota.
+///
+/// Both the arithmetic and the quota test are evaluated server-side on the row
+/// this `UPDATE` locks. Read the counter, test it in Rust and write the result
+/// back — as every one of these sites used to — and concurrent uploads both pass
+/// the check at the limit while concurrent deletes lose each other's refunds,
+/// so the quota drifts up and is never reclaimed.
+///
+/// A refund (`delta < 0`) skips the quota test and the `Active` check: freeing
+/// space must never be refused, and a suspended group still deletes.
+///
+/// The subtraction is unguarded, like `decrement_incomplete_tasks`: every refund
+/// matches a charge that was made when the object was recorded, so it cannot
+/// legitimately go below zero. Clamping would only hide an accounting bug, so a
+/// negative counter is reported instead.
+async fn charge_group_storage<C: ConnectionTrait>(
+    txn: &C,
+    group_id: i64,
+    delta: i64,
+    now: TimeDateTimeWithTimeZone,
+    missing: &str,
+) -> Result<(), Error> {
+    if delta == 0 {
+        return Ok(());
+    }
+    let mut update = Group::Entity::update_many()
+        .col_expr(
+            Group::Column::StorageUsed,
+            Expr::col(Group::Column::StorageUsed).add(delta),
+        )
+        .col_expr(Group::Column::UpdatedAt, Expr::value(now))
+        .filter(Group::Column::Id.eq(group_id));
+    if delta > 0 {
+        update = update
+            .filter(Group::Column::State.eq(GroupState::Active))
+            .filter(
+                Expr::col(Group::Column::StorageUsed)
+                    .add(delta)
+                    .lte(Expr::col(Group::Column::StorageQuota)),
+            );
+    }
+    let updated = update.exec_with_returning(txn).await?;
+
+    let Some(group) = updated.into_iter().next() else {
+        // Zero rows means over quota, not active, or gone; only a re-read can
+        // say which, and it is off the hot path.
+        let group = Group::Entity::find_by_id(group_id).one(txn).await?;
+        return match group {
+            None => Err(ApiError::InvalidRequest(missing.to_string()).into()),
+            Some(group) if group.state != GroupState::Active => {
+                Err(ApiError::InvalidRequest("Group is not active".to_string()).into())
+            }
+            Some(_) => Err(ApiError::QuotaExceeded.into()),
+        };
+    };
+    if group.storage_used < 0 {
+        tracing::error!(
+            group_id,
+            storage_used = group.storage_used,
+            delta,
+            "A group's storage_used went negative: more was freed than was ever charged"
+        );
+    }
+    Ok(())
+}
+
 async fn delete_artifact(
     pool: &InfraPool,
     task: StoredTaskModel,
@@ -348,17 +416,14 @@ async fn delete_artifact(
                 delete_object(&s3_client, &artifacts_bucket, s3_key)
                     .await
                     .inspect_err(|e| tracing::debug!("delete object error: {}", e))?;
-                let group = Group::Entity::find_by_id(group_id).one(txn).await?.ok_or(
-                    ApiError::InvalidRequest("Group for the artifact not found".to_string()),
-                )?;
-                let new_storage_used = group.storage_used.saturating_sub(artifact.size);
-                let group = Group::ActiveModel {
-                    id: Set(group.id),
-                    storage_used: Set(new_storage_used),
-                    updated_at: Set(TimeDateTimeWithTimeZone::now_utc()),
-                    ..Default::default()
-                };
-                group.update(txn).await?;
+                charge_group_storage(
+                    txn,
+                    group_id,
+                    -artifact.size,
+                    TimeDateTimeWithTimeZone::now_utc(),
+                    "Group for the artifact not found",
+                )
+                .await?;
                 artifact.delete(txn).await?;
                 Ok(())
             })
@@ -413,22 +478,22 @@ pub(crate) async fn group_upload_artifact(
         StoredTaskModel::Active(ref task) => (task.uuid, task.group_id),
         StoredTaskModel::Archived(ref task) => (task.uuid, task.group_id),
     };
-    // Check if group is active and has enough storage quota
-    let group = Group::Entity::find_by_id(group_id)
-        .one(&pool.db)
-        .await?
-        .ok_or(ApiError::InvalidRequest(
-            "Group for the task not found".to_string(),
-        ))?;
-    if group.state != GroupState::Active {
-        return Err(ApiError::InvalidRequest("Group is not active".to_string()).into());
-    }
-    let s3_client = pool.s3.clone();
-    let artifacts_bucket = pool.artifacts_bucket.clone();
-    // This returns (exist, url)
-    let resp = pool
+    // Signed before the transaction opens, not inside it: the key needs nothing
+    // from the database, and holding the group row across the round trip stalls
+    // every other write in the group.
+    let url = get_presigned_upload_link(
+        &pool.s3,
+        &pool.artifacts_bucket,
+        artifact_object_key(uuid, content_type),
+        content_length,
+    )
+    .await
+    .map_err(ApiError::from)?;
+    // The group is loaded, checked and quota-allocated inside the transaction
+    // by `reserve_artifact_upload`.
+    let exist = pool
         .db
-        .transaction::<_, (bool, String), Error>(|txn| {
+        .transaction::<_, bool, Error>(|txn| {
             Box::pin(async move {
                 // Update the task to reflect the artifact upload
                 match task {
@@ -449,83 +514,95 @@ pub(crate) async fn group_upload_artifact(
                         updated_task.update(txn).await?;
                     }
                 }
-                let artifact = Artifact::Entity::find()
-                    .filter(Artifact::Column::TaskId.eq(uuid))
-                    .filter(Artifact::Column::ContentType.eq(content_type))
-                    .one(txn)
-                    .await?;
-                let s3_object_key = format!("{uuid}/{content_type}");
-                let url: String;
-                // Check group storage quota and allocate storage for the artifact
-                let exist = match artifact {
-                    Some(artifact) => {
-                        let recorded_content_length = content_length.max(artifact.size);
-                        let new_storage_used =
-                            group.storage_used + (recorded_content_length - artifact.size);
-                        if new_storage_used > group.storage_quota {
-                            return Err(ApiError::QuotaExceeded.into());
-                        }
-                        url = get_presigned_upload_link(
-                            &s3_client,
-                            &artifacts_bucket,
-                            s3_object_key,
-                            content_length,
-                        )
-                        .await
-                        .map_err(ApiError::from)?;
-                        let artifact = Artifact::ActiveModel {
-                            id: Set(artifact.id),
-                            size: Set(recorded_content_length),
-                            updated_at: Set(now),
-                            ..Default::default()
-                        };
-                        artifact.update(txn).await?;
-                        let group = Group::ActiveModel {
-                            id: Set(group_id),
-                            storage_used: Set(new_storage_used),
-                            updated_at: Set(now),
-                            ..Default::default()
-                        };
-                        group.update(txn).await?;
-                        true
-                    }
-                    None => {
-                        let new_storage_used = group.storage_used + content_length;
-                        if new_storage_used > group.storage_quota {
-                            return Err(ApiError::QuotaExceeded.into());
-                        }
-                        url = get_presigned_upload_link(
-                            &s3_client,
-                            &artifacts_bucket,
-                            s3_object_key,
-                            content_length,
-                        )
-                        .await
-                        .map_err(ApiError::from)?;
-                        let artifact = Artifact::ActiveModel {
-                            task_id: Set(uuid),
-                            content_type: Set(content_type),
-                            size: Set(content_length),
-                            created_at: Set(now),
-                            updated_at: Set(now),
-                            ..Default::default()
-                        };
-                        artifact.insert(txn).await?;
-                        let group = Group::ActiveModel {
-                            id: Set(group_id),
-                            storage_used: Set(new_storage_used),
-                            updated_at: Set(now),
-                            ..Default::default()
-                        };
-                        group.update(txn).await?;
-                        false
-                    }
-                };
-                Ok((exist, url))
+                reserve_artifact_upload(txn, group_id, uuid, content_type, content_length, now)
+                    .await
             })
         })
         .await?;
-    Ok(resp)
+    Ok((exist, url))
+}
+
+/// Account for one artifact upload inside the caller's transaction. Returns
+/// whether the artifact was already on record.
+///
+/// `owner_uuid` is what the artifact is filed under in `artifacts.task_id`.
+///
+/// Presigning is the caller's job, done *before* it opens the transaction: the
+/// object key is `{owner_uuid}/{content_type}` and needs nothing from the
+/// database, and signing in here held the group row across the round trip —
+/// which conflicts with the `FOR KEY SHARE` every task insert takes on the same
+/// group, so every submit, archive and cancel in that group queued behind it.
+///
+/// The artifact row is read `FOR UPDATE`, which is the one lock left here. The
+/// quota delta is `new size - old size`, so the read and the write have to be
+/// one indivisible step, and no single statement can hand back both values
+/// before Postgres 18's `RETURNING OLD`. Nothing else in the service locks
+/// `artifacts`, so this cannot join a cycle; contention is one client racing
+/// itself on one key.
+pub(crate) async fn reserve_artifact_upload<C: ConnectionTrait>(
+    txn: &C,
+    group_id: i64,
+    owner_uuid: Uuid,
+    content_type: ArtifactContentType,
+    content_length: i64,
+    now: TimeDateTimeWithTimeZone,
+) -> Result<bool, Error> {
+    let artifact = Artifact::Entity::find()
+        .filter(Artifact::Column::TaskId.eq(owner_uuid))
+        .filter(Artifact::Column::ContentType.eq(content_type))
+        // Locked because the quota delta needs both the old size and the new
+        // one, and no single statement can return both.
+        .lock_exclusive()
+        .one(txn)
+        .await?;
+    match artifact {
+        Some(artifact) => {
+            // The record only ever grows: a smaller re-upload does not free what
+            // the object it overwrites still occupies.
+            let recorded_content_length = content_length.max(artifact.size);
+            charge_group_storage(
+                txn,
+                group_id,
+                recorded_content_length - artifact.size,
+                now,
+                "Group for the artifact not found",
+            )
+            .await?;
+            let artifact = Artifact::ActiveModel {
+                id: Set(artifact.id),
+                size: Set(recorded_content_length),
+                updated_at: Set(now),
+                ..Default::default()
+            };
+            artifact.update(txn).await?;
+            Ok(true)
+        }
+        None => {
+            charge_group_storage(
+                txn,
+                group_id,
+                content_length,
+                now,
+                "Group for the artifact not found",
+            )
+            .await?;
+            let artifact = Artifact::ActiveModel {
+                task_id: Set(owner_uuid),
+                content_type: Set(content_type),
+                size: Set(content_length),
+                created_at: Set(now),
+                updated_at: Set(now),
+                ..Default::default()
+            };
+            artifact.insert(txn).await?;
+            Ok(false)
+        }
+    }
+}
+
+/// The S3 object key an artifact is stored under.
+pub(crate) fn artifact_object_key(owner_uuid: Uuid, content_type: ArtifactContentType) -> String {
+    format!("{owner_uuid}/{content_type}")
 }
 
 pub async fn user_upload_artifact(
@@ -609,6 +686,52 @@ pub async fn worker_download_attachment(
             }
         }
     };
+    presign_group_attachment(pool, group_id, &group_name, key).await
+}
+
+/// Presign an attachment of the group that owns `suite_uuid`.
+///
+/// The hook half of [`worker_download_attachment`]: a hook's inputs are named
+/// exactly like a task's, but a hook has no task uuid to resolve the group
+/// through — it belongs to a suite. Identity-free like its sibling; the route is
+/// what gates access.
+pub async fn suite_download_attachment(
+    pool: &InfraPool,
+    suite_uuid: Uuid,
+    key: String,
+) -> Result<RemoteResourceDownloadResp, crate::error::Error> {
+    let builder = pool.db.get_database_backend();
+    let stmt = Query::select()
+        .column((Group::Entity, Group::Column::Id))
+        .column((Group::Entity, Group::Column::GroupName))
+        .from(Group::Entity)
+        .join(
+            sea_orm::JoinType::Join,
+            TaskSuite::Entity,
+            Expr::col((TaskSuite::Entity, TaskSuite::Column::GroupId))
+                .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        .and_where(Expr::col((TaskSuite::Entity, TaskSuite::Column::Uuid)).eq(suite_uuid))
+        .limit(1)
+        .to_owned();
+    let GroupInfo {
+        id: group_id,
+        group_name,
+    } = GroupInfo::find_by_statement(builder.build(&stmt))
+        .one(&pool.db)
+        .await?
+        .ok_or(crate::error::ApiError::NotFound(format!(
+            "Task suite with uuid {suite_uuid}"
+        )))?;
+    presign_group_attachment(pool, group_id, &group_name, key).await
+}
+
+async fn presign_group_attachment(
+    pool: &InfraPool,
+    group_id: i64,
+    group_name: &str,
+    key: String,
+) -> Result<RemoteResourceDownloadResp, crate::error::Error> {
     let attachment = Attachment::Entity::find()
         .filter(Attachment::Column::GroupId.eq(group_id))
         .filter(Attachment::Column::Key.eq(key.clone()))
@@ -800,20 +923,14 @@ async fn delete_attachment(
                 )
                 .await
                 .inspect_err(|e| tracing::debug!("delete object error: {}", e))?;
-                let group = Group::Entity::find_by_id(attachment.group_id)
-                    .one(txn)
-                    .await?
-                    .ok_or(ApiError::InvalidRequest(
-                        "Group for the attachment not found".to_string(),
-                    ))?;
-                let new_storage_used = group.storage_used.saturating_sub(attachment.size);
-                let group = Group::ActiveModel {
-                    id: Set(group.id),
-                    storage_used: Set(new_storage_used),
-                    updated_at: Set(TimeDateTimeWithTimeZone::now_utc()),
-                    ..Default::default()
-                };
-                group.update(txn).await?;
+                charge_group_storage(
+                    txn,
+                    attachment.group_id,
+                    -attachment.size,
+                    TimeDateTimeWithTimeZone::now_utc(),
+                    "Group for the attachment not found",
+                )
+                .await?;
                 attachment.delete(txn).await?;
                 Ok(())
             })
@@ -880,12 +997,19 @@ pub async fn user_upload_attachment(
         .into());
     }
     let content_length = content_length as i64;
-    let s3_client = pool.s3.clone();
     let now = TimeDateTimeWithTimeZone::now_utc();
-    let attachments_bucket = pool.attachments_bucket.clone();
-    let resp = pool
+    // Signed before the transaction opens — see `group_upload_artifact`.
+    let url = get_presigned_upload_link(
+        &pool.s3,
+        &pool.attachments_bucket,
+        s3_object_key,
+        content_length,
+    )
+    .await
+    .map_err(ApiError::from)?;
+    let exist = pool
         .db
-        .transaction::<_, (bool, String), crate::error::Error>(|txn| {
+        .transaction::<_, bool, crate::error::Error>(|txn| {
             Box::pin(async move {
                 let group = Group::Entity::find()
                     .filter(Group::Column::GroupName.eq(group_name.clone()))
@@ -907,25 +1031,23 @@ pub async fn user_upload_attachment(
                 let attachment = Attachment::Entity::find()
                     .filter(Attachment::Column::GroupId.eq(group.id))
                     .filter(Attachment::Column::Key.eq(key.clone()))
+                    // Locked because the quota delta needs both the old size and
+                    // the new one, and no single statement can return both.
+                    .lock_exclusive()
                     .one(txn)
                     .await?;
-                let url: String;
-                let exist = match attachment {
+                // Same shape as `reserve_artifact_upload`.
+                match attachment {
                     Some(attachment) => {
                         let recorded_content_length = content_length.max(attachment.size);
-                        let new_storage_used =
-                            group.storage_used + (recorded_content_length - attachment.size);
-                        if new_storage_used > group.storage_quota {
-                            return Err(ApiError::QuotaExceeded.into());
-                        }
-                        url = get_presigned_upload_link(
-                            &s3_client,
-                            &attachments_bucket,
-                            s3_object_key,
-                            content_length,
+                        charge_group_storage(
+                            txn,
+                            group.id,
+                            recorded_content_length - attachment.size,
+                            now,
+                            "Group for the attachment not found",
                         )
-                        .await
-                        .map_err(ApiError::from)?;
+                        .await?;
                         let attachment = Attachment::ActiveModel {
                             id: Set(attachment.id),
                             size: Set(recorded_content_length),
@@ -933,28 +1055,17 @@ pub async fn user_upload_attachment(
                             ..Default::default()
                         };
                         attachment.update(txn).await?;
-                        let group = Group::ActiveModel {
-                            id: Set(group.id),
-                            storage_used: Set(new_storage_used),
-                            updated_at: Set(now),
-                            ..Default::default()
-                        };
-                        group.update(txn).await?;
-                        true
+                        Ok(true)
                     }
                     None => {
-                        let new_storage_used = group.storage_used + content_length;
-                        if new_storage_used > group.storage_quota {
-                            return Err(ApiError::QuotaExceeded.into());
-                        }
-                        url = get_presigned_upload_link(
-                            &s3_client,
-                            &attachments_bucket,
-                            s3_object_key,
+                        charge_group_storage(
+                            txn,
+                            group.id,
                             content_length,
+                            now,
+                            "Group for the attachment not found",
                         )
-                        .await
-                        .map_err(ApiError::from)?;
+                        .await?;
                         let attachment = Attachment::ActiveModel {
                             group_id: Set(group.id),
                             key: Set(key.clone()),
@@ -965,21 +1076,13 @@ pub async fn user_upload_attachment(
                             ..Default::default()
                         };
                         attachment.insert(txn).await?;
-                        let group = Group::ActiveModel {
-                            id: Set(group.id),
-                            storage_used: Set(new_storage_used),
-                            updated_at: Set(now),
-                            ..Default::default()
-                        };
-                        group.update(txn).await?;
-                        false
+                        Ok(false)
                     }
-                };
-                Ok((exist, url))
+                }
             })
         })
         .await?;
-    Ok(resp)
+    Ok((exist, url))
 }
 
 // show_pb is used to show progress bar
@@ -1353,6 +1456,7 @@ pub async fn batch_delete_artifacts_by_filter(
     let query = TasksQueryReq {
         creator_usernames: req.creator_usernames,
         group_name: req.group_name,
+        suite_uuid: req.suite_uuid,
         tags: req.tags,
         labels: req.labels,
         states: req.states,

@@ -1754,10 +1754,6 @@ paths:
       responses:
         "200":
           description: Suite cancelled successfully
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/CancelSuiteResp"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1795,11 +1791,17 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
-  /suites/{uuid}/agents/include:
+  /suites/{uuid}/agents/override:
     post:
-      summary: Include an agent in a suite
-      description: Manually pin an agent to the suite even if it does not tag-match. Upserts any existing opposite override.
-      operationId: includeSuiteAgent
+      summary: Set agent overrides on a suite
+      description: >-
+        Batch-apply manual agent overrides for one suite. An agent may be pinned
+        (`include`), blocked (`exclude`), or returned to the tag-match default
+        (`clear`). The effective agent set for a suite is
+        `(tag-matched ∪ included) − excluded`, restricted to agents the suite's
+        group has write access to; only the manual half is persisted. Per-agent
+        failures are reported in the response rather than aborting the batch.
+      operationId: overrideSuiteAgents
       tags:
         - Suites
       security:
@@ -1816,14 +1818,519 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SuiteAgentReq"
+              $ref: "#/components/schemas/SuiteAgentOverrideReq"
       responses:
         "200":
-          description: Override applied
+          description: Batch applied; the body lists any entries that failed
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuiteAgentResp"
+                $ref: "#/components/schemas/SuiteAgentOverrideResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /suites/{uuid}/jobs/query:
+    post:
+      summary: Query a suite's jobs
+      description: >-
+        A job is one agent's attempt at running the suite. Read-only: jobs are
+        driven entirely by agents, and a user-initiated stop goes through the
+        suite's close/cancel instead. Requires the Read role in the suite's group.
+      operationId: querySuiteJobs
+      tags:
+        - Suites
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SuiteJobsQueryReq"
+      responses:
+        "200":
+          description: The suite's jobs, newest first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuiteJobsQueryResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /suites/{uuid}/jobs/{job_id}:
+    get:
+      summary: Get one job of a suite
+      description: >-
+        One job plus its hook executions. A hook's artifacts live in the shared
+        artifact store keyed by the hook's own uuid, so they are downloaded
+        through the ordinary artifact endpoints.
+      operationId: getSuiteJob
+      tags:
+        - Suites
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: job_id
+          in: path
+          required: true
+          description: The suite-scoped job number, ascending from 1
+          schema:
+            type: integer
+            format: int32
+      responses:
+        "200":
+          description: Job details with embedded hook executions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuiteJobQueryResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      summary: Stop one of a suite's jobs
+      description: >-
+        Stop the job an agent is running for this suite. The agent itself stays
+        up and goes straight back to choosing a suite, so this preempts it onto
+        whatever ranks highest now — possibly this same suite, which re-provisions
+        it. To keep an agent off a suite, exclude it via the agent-override
+        endpoint instead. Requires the Write role in the suite's group. This is
+        the same operation as `POST /agents/{uuid}/job/stop`, addressed by job
+        number and authorized through the suite rather than the agent.
+      operationId: stopSuiteJob
+      tags:
+        - Suites
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: job_id
+          in: path
+          required: true
+          description: The suite-scoped job number, ascending from 1
+          schema:
+            type: integer
+            format: int32
+        - name: op
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - graceful
+              - force
+          description: |
+            Stop mode:
+            - graceful (default): the agent stops claiming tasks, finishes and
+              commits the ones it is running, then cleans up; the job ends
+              Completed and anything claimed but unstarted returns to Ready
+            - force: the job is marked Killed at once, its uncommitted tasks are
+              reclaimed, and the cleanup hook does not run
+      responses:
+        "200":
+          description: Stop requested (or nothing was running to stop)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StopAgentJobResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /agents:
+    post:
+      summary: Register an agent
+      description: >-
+        Register the agent for a machine and mint its token. Registration is an
+        upsert keyed by `machine_code`: a machine has exactly one agent record
+        for its whole life, so a restarting agent re-adopts that record (with
+        refreshed tags, labels, groups, and metadata) rather than creating a
+        second one. The caller needs the Write or Admin role in every group
+        listed, and the Admin role in `admin_group` — the single group that can
+        shut the agent down, defaulting to the caller's personal group. Group
+        access is rewritten on every registration, not merged: groups this
+        request omits lose the access a previous registration gave them.
+      operationId: registerAgent
+      tags:
+        - Agents
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterAgentReq"
+      responses:
+        "200":
+          description: Agent registered (or re-adopted)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterAgentResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      summary: Report that the agent is exiting
+      description: >-
+        Sent by the agent itself on the way out, so the fleet stops counting a
+        process that is gone instead of waiting out its heartbeat. **The agent
+        record is never deleted** — this marks it Offline, the same teardown a
+        missed heartbeat performs. An agent normally drains and completes its
+        job before calling this, but a job still open is closed out as Lost and
+        its uncommitted tasks reclaimed. Idempotent.
+      operationId: agentExit
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      responses:
+        "200":
+          description: Agent marked Offline
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /agents/query:
+    post:
+      summary: Query agents
+      description: >-
+        List agents with optional filtering, scoped to a single group. The group
+        defaults to the caller's personal group when omitted, and the caller must
+        have at least the Read role in it.
+      operationId: queryAgents
+      tags:
+        - Agents
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentsQueryReq"
+      responses:
+        "200":
+          description: List of agents
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentsQueryResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /agents/{uuid}:
+    delete:
+      summary: Shut an agent down
+      description: >-
+        Stop an agent. **The agent record is never deleted** — an agent is a
+        durable identity and every reference to it is restricted, so this marks
+        it Offline instead. Requires the caller to have the Admin role in a group
+        that is Admin over the agent; an agent that fails that check answers 404
+        exactly as an unknown uuid does.
+      operationId: shutdownAgent
+      tags:
+        - Agents
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: op
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - graceful
+              - force
+          description: |
+            Shutdown mode:
+            - graceful (default): an idle agent stops now; a busy one winds its
+              job down first — the tasks it is running finish and commit, then
+              cleanup runs. It does not drain the rest of the suite; anything it
+              claimed but had not started returns to Ready for other agents
+            - force: the agent's in-flight jobs are killed without cleanup and
+              its uncommitted tasks are reclaimed for other agents
+      responses:
+        "200":
+          description: Shutdown requested
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /agents/{uuid}/job/stop:
+    post:
+      summary: Stop the job an agent is running
+      description: >-
+        End the agent's current job without stopping the agent: it winds the job
+        down and immediately chooses a suite again. That re-choice is the point —
+        priority is otherwise only applied when an agent goes looking for work,
+        so this is how a user preempts one onto a suite that has since outranked
+        what it is running. The agent may well re-accept the same suite, which
+        re-provisions it from scratch. Requires the caller to have the Admin role
+        in a group that is Admin over the agent, exactly as shutdown does; an
+        agent that fails that check answers 404 as an unknown uuid does. An agent
+        with nothing in flight answers 200 with `stopped: false`.
+      operationId: stopAgentJob
+      tags:
+        - Agents
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: op
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - graceful
+              - force
+          description: |
+            Stop mode:
+            - graceful (default): the agent stops claiming tasks, finishes and
+              commits the ones it is running, then cleans up; the job ends
+              Completed and anything claimed but unstarted returns to Ready
+            - force: the job is marked Killed at once, its uncommitted tasks are
+              reclaimed, and the cleanup hook does not run
+      responses:
+        "200":
+          description: Stop requested (or nothing was running to stop)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StopAgentJobResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /agents/heartbeat:
+    post:
+      summary: Agent heartbeat
+      description: >-
+        Report liveness and receive every notification the agent has not
+        acknowledged. `last_notification_id` acknowledges through that id, so
+        anything beyond it is redelivered until the agent confirms it. An agent
+        that misses its heartbeat is marked Offline, its in-flight jobs become
+        Lost, and its uncommitted tasks are reclaimed.
+      operationId: agentHeartbeat
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentHeartbeatReq"
+      responses:
+        "200":
+          description: Pending notifications
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentHeartbeatResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /agents/suite:
+    post:
+      summary: Claim a suite to run
+      description: >-
+        Select a suite and claim it in one transaction: the agent moves Idle →
+        Provisioning, a job record is opened whose opaque handle the agent echoes
+        on every later job-scoped call, and the suite's spec comes back with it.
+        Selecting and claiming are not separable, so no other agent can take the
+        suite in between. `suite_uuid` is a preference — a hint that no longer
+        points at runnable work falls back to the best available suite rather
+        than answering "nothing". A refusal the coordinator decides (nothing
+        available, agent already busy) is reported as `accepted: false` with a
+        reason rather than an error status.
+      operationId: agentAcceptSuite
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptSuiteReq"
+      responses:
+        "200":
+          description: The claimed suite and its job, or a declined answer with a reason
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptSuiteResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /agents/job/start:
+    post:
+      summary: Report provisioning complete
+      description: Job Provisioning → Executing; the agent becomes Executing.
+      operationId: agentStartJob
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartJobReq"
+      responses:
+        "200":
+          description: Transition applied
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /agents/job/cleanup:
+    post:
+      summary: Report entering cleanup
+      description: Job Executing → Cleanup; the agent becomes Cleaning.
+      operationId: agentEnterCleanup
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnterCleanupReq"
+      responses:
+        "200":
+          description: Transition applied
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /agents/job/complete:
+    post:
+      summary: Report job completion
+      description: >-
+        Write the job's terminal state and release the agent back to Idle. The
+        agent reports only what it did — Completed, or Failed with a reason;
+        Lost and Killed are the coordinator's to write. A job that is already
+        terminal answers 409, which tells the agent it was torn down under it.
+      operationId: agentCompleteJob
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompleteJobReq"
+      responses:
+        "200":
+          description: Job closed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompleteJobResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /agents/job/hook:
+    post:
+      summary: Report a job hook
+      description: >-
+        Record a provision/cleanup/background hook's outcome, or presign an
+        upload for its artifacts. Append-only: accepted even on a terminal job,
+        because a cleanup hook may legitimately finish after the coordinator
+        already ended the job. `Result` must precede `Upload` — it is what mints
+        the hook uuid the artifacts are keyed by.
+      operationId: agentReportHook
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HookReportReq"
+      responses:
+        "200":
+          description: Hook recorded; `url` is present for the Upload operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HookReportResp"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1833,35 +2340,68 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
-  /suites/{uuid}/agents/exclude:
+  /agents/tasks/fetch:
     post:
-      summary: Exclude an agent from a suite
-      description: Manually block an agent from the suite even if it tag-matches. Upserts any existing opposite override.
-      operationId: excludeSuiteAgent
+      summary: Claim tasks from a suite
+      description: >-
+        Atomically claim up to `max_count` of the suite's ready tasks, highest
+        priority first, moving them to Running under this agent. Concurrent
+        agents never claim the same task. An empty list means nothing is ready
+        right now, not that the suite is finished.
+      operationId: agentFetchTasks
       tags:
-        - Suites
+        - Agents
       security:
-        - bearerAuth: []
-      parameters:
-        - name: uuid
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
+        - agentAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SuiteAgentReq"
+              $ref: "#/components/schemas/FetchTasksReq"
       responses:
         "200":
-          description: Override applied
+          description: The claimed tasks
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuiteAgentResp"
+                $ref: "#/components/schemas/FetchTasksResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /agents/tasks/report:
+    post:
+      summary: Report a task result
+      description: >-
+        The worker task-report operations with the suite job handle attached:
+        `Finish`, `Cancel`, `Upload` (returns a presigned artifact URL),
+        `Commit` (archives the task and ticks the suite's counter), and `Submit`
+        (spawns a downstream child in the parent's group, in whichever suite the
+        request names — the parent's own, a sibling, or none). A terminal job
+        answers 409 and a task that no longer exists answers 404; both tell the
+        agent to stop reporting on it.
+      operationId: agentReportTask
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportAgentTaskReq"
+      responses:
+        "200":
+          description: Reported; `url` is present for the Upload operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportTaskResp"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1870,16 +2410,18 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
 
-  /suites/{uuid}/agents/reset:
-    post:
-      summary: Reset an agent to the tag-match default
-      description: Clear a manual include/exclude override for an agent, reverting it to the tag-match default. Idempotent.
-      operationId: resetSuiteAgent
+  /agents/tasks/{uuid}:
+    get:
+      summary: Query a task as an agent
+      description: A task's state and result, for resolving watch dependencies.
+      operationId: agentQueryTask
       tags:
-        - Suites
+        - Agents
       security:
-        - bearerAuth: []
+        - agentAuth: []
       parameters:
         - name: uuid
           in: path
@@ -1887,25 +2429,141 @@ paths:
           schema:
             type: string
             format: uuid
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/SuiteAgentReq"
       responses:
         "200":
-          description: Override cleared (or nothing to reset)
+          description: Task details
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ResetSuiteAgentResp"
+                $ref: "#/components/schemas/TaskQueryResp"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /agents/tasks/{uuid}/artifacts/{content_type}:
+    get:
+      summary: Download a task artifact as an agent
+      description: Presigned download for a task input artifact.
+      operationId: agentDownloadTaskArtifact
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: content_type
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/ArtifactContentType"
+      responses:
+        "200":
+          description: Presigned download URL and size
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemoteResourceDownloadResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /agents/tasks/{uuid}/attachments/{key}:
+    get:
+      summary: Download an attachment as an agent
+      description: Presigned download for a group attachment a task needs.
+      operationId: agentDownloadAttachment
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Presigned download URL and size
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemoteResourceDownloadResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /agents/suites/{uuid}/attachments/{key}:
+    get:
+      summary: Download a suite attachment as an agent
+      description: >-
+        Presigned download for a group attachment a **hook** needs. The hook half
+        of `/agents/tasks/{uuid}/attachments/{key}`: a hook's inputs are named the
+        same way, but it belongs to a suite rather than to any one task, so the
+        owning group is resolved through the suite.
+      operationId: agentDownloadSuiteAttachment
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          description: Suite UUID
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Presigned download URL and size
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemoteResourceDownloadResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /ws/agents:
+    get:
+      summary: Agent notification socket
+      description: >-
+        WebSocket upgrade carrying coordinator → agent notifications as JSON
+        `WsNotificationEvent` frames; the agent replies with `AgentWsMessage`
+        frames to acknowledge them. Purely an optimization — every notification
+        is also buffered per agent and returned by the next heartbeat — so an
+        agent that never connects still makes progress.
+      operationId: agentWebSocket
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      responses:
+        "101":
+          description: Switching protocols
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /admin/users:
     post:
@@ -2234,6 +2892,11 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: JWT token obtained when registering worker
+    agentAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained when registering an agent
 
   responses:
     BadRequest:
@@ -2321,10 +2984,10 @@ components:
           minItems: 16
           maxItems: 16
           description: MD5 hash of password as byte array
-        retain:
+        refresh:
           type: boolean
-          default: true
-          description: Whether to retain existing login state. Defaults to true. Set to false to refresh the login state and invalidate previously issued tokens.
+          default: false
+          description: Whether to refresh the login state, invalidating previously issued tokens. Defaults to false, which keeps the existing login state.
 
     UserLoginResp:
       type: object
@@ -3214,7 +3877,9 @@ components:
           description: >-
             Optional suite to assign the task to. When set, the suite is
             authoritative: the task is placed in the suite's owning group and
-            group_name must match that group.
+            group_name must match that group. For a child spawned by a running
+            task (worker or agent `Submit`), the suite must be owned by the
+            parent task's group; omit it to submit a suite-less task instead.
           example: 550e8400-e29b-41d4-a716-446655440000
         tags:
           type: array
@@ -3358,6 +4023,16 @@ components:
           nullable: true
           description: Filter by group name
           example: research-team
+        suite_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Filter by the task suite. A suite names its own group, so it fills in
+            group_name when that is omitted and must agree with it otherwise. A
+            suite that does not exist, is in a group the caller is not in, or
+            disagrees with group_name is a 404, not an empty result.
+          example: 789e0123-e89b-12d3-a456-426614174222
         tags:
           type: array
           items:
@@ -3439,6 +4114,11 @@ components:
         group_name:
           type: string
           example: research-team
+        suite_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: The task suite that owns this task, if any
         task_id:
           type: integer
           format: int64
@@ -3519,6 +4199,11 @@ components:
           type: string
         group_name:
           type: string
+        suite_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: The task suite that owns this task, if any
         task_id:
           type: integer
           format: int64
@@ -3753,6 +4438,16 @@ components:
           type: string
           nullable: true
           description: Filter by group name
+        suite_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Filter by the task suite. A suite names its own group, so it fills in
+            group_name when that is omitted and must agree with it otherwise. A
+            suite that does not exist, is in a group the caller is not in, or
+            disagrees with group_name is a 404, not an empty result.
+          example: 789e0123-e89b-12d3-a456-426614174222
         tags:
           type: array
           items:
@@ -3943,6 +4638,16 @@ components:
           type: string
           nullable: true
           description: Filter by group name
+        suite_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Filter by the task suite. A suite names its own group, so it fills in
+            group_name when that is omitted and must agree with it otherwise. A
+            suite that does not exist, is in a group the caller is not in, or
+            disagrees with group_name is a 404, not an empty result.
+          example: 789e0123-e89b-12d3-a456-426614174222
         tags:
           type: array
           items:
@@ -4121,6 +4826,16 @@ components:
           type: string
           nullable: true
           description: Filter by group name
+        suite_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Filter by the task suite. A suite names its own group, so it fills in
+            group_name when that is omitted and must agree with it otherwise. A
+            suite that does not exist, is in a group the caller is not in, or
+            disagrees with group_name is a 404, not an empty result.
+          example: 789e0123-e89b-12d3-a456-426614174222
         tags:
           type: array
           items:
@@ -4323,16 +5038,6 @@ components:
         - Closed: idle marker; still accepts/runs tasks, a new task reopens it
         - Complete: no incomplete tasks remain; a new task reopens it
         - Cancelled: terminal; cannot accept tasks
-
-    SuiteAgentSelectionType:
-      type: string
-      enum:
-        - UserIncluded
-        - UserExcluded
-      description: |
-        Manual agent override on a suite:
-        - UserIncluded: pin the agent to the suite even if it does not tag-match
-        - UserExcluded: block the agent even if it tag-matches
 
     CpuBindingStrategy:
       type: string
@@ -4671,61 +5376,784 @@ components:
       type: object
       required:
         - info
-        - assigned_agents
+        - eligible_agents
+        - active_jobs
       properties:
         info:
           $ref: "#/components/schemas/ParsedTaskSuiteInfo"
-        assigned_agents:
+        eligible_agents:
           type: array
           items:
             type: string
             format: uuid
-          description: UUIDs of the manually-included agents (tag-matched agents are computed in-memory and not listed here)
+          description: >-
+            UUIDs of every agent that may run this suite:
+            `(tag-matched ∪ included) − excluded`, restricted to agents the
+            suite's group has write access to
+        active_jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/SuiteJobInfo"
+          description: >-
+            The suite's non-terminal jobs (`Provisioning`, `Executing`,
+            `Cleanup`), oldest first — the agents actually running it right now,
+            as opposed to the ones merely eligible. Empty when nothing holds the
+            suite.
 
-    CancelSuiteResp:
+    SuiteAgentOverrideAction:
+      type: string
+      enum:
+        - include
+        - exclude
+        - clear
+      description: |
+        What to do with one agent on a suite:
+        - include: pin it even if it does not tag-match
+        - exclude: block it even if it tag-matches
+        - clear: drop any manual override, back to the tag-match default
+
+    SuiteAgentOverrideReq:
       type: object
       required:
-        - cancelled_task_count
+        - overrides
       properties:
-        cancelled_task_count:
+        overrides:
+          type: object
+          description: Agent uuid → action
+          additionalProperties:
+            $ref: "#/components/schemas/SuiteAgentOverrideAction"
+
+    SuiteAgentOverrideResp:
+      type: object
+      required:
+        - errors
+      properties:
+        errors:
+          type: object
+          description: >-
+            Entries that could not be applied, keyed by the same agent uuid as
+            the request. An empty object means every entry succeeded.
+          additionalProperties:
+            type: object
+            properties:
+              msg:
+                type: string
+
+    SuiteJobState:
+      type: string
+      enum:
+        - Provisioning
+        - Executing
+        - Cleanup
+        - Completed
+        - Failed
+        - Lost
+        - Killed
+      description: |
+        One agent's attempt at running a suite:
+        - Provisioning → Executing → Cleanup are the active phases
+        - Completed: every hook succeeded (whether or not the suite drained)
+        - Failed: a hook failed
+        - Lost: the agent's heartbeat lapsed mid-job
+        - Killed: force-stopped, with no cleanup
+
+    HookType:
+      type: string
+      enum:
+        - Provision
+        - Cleanup
+        - Background
+
+    HookExecState:
+      type: string
+      enum:
+        - Completed
+        - Failed
+        - Cancelled
+      description: >-
+        A hook is recorded only when it finishes, so there is no running state.
+
+    SuiteJobsQueryReq:
+      type: object
+      properties:
+        states:
+          type: array
+          items:
+            $ref: "#/components/schemas/SuiteJobState"
+          nullable: true
+          description: Filter by job states
+        agent_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Only jobs run by this agent. An agent that never ran this suite
+            yields an empty listing rather than a 404.
+        limit:
           type: integer
           format: uint64
-          description: Number of tasks that were cancelled
+          nullable: true
+          description: Maximum number of results
+        offset:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Offset for pagination
+        count:
+          type: boolean
+          default: false
+          description: When true, return only the total match count (jobs is empty)
 
-    SuiteAgentReq:
+    SuiteJobInfo:
+      type: object
+      required:
+        - job_id
+        - state
+        - created_at
+        - updated_at
+      properties:
+        job_id:
+          type: integer
+          format: int32
+          description: Suite-scoped job number, ascending from 1
+        state:
+          $ref: "#/components/schemas/SuiteJobState"
+        agent_uuid:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    SuiteJobsQueryResp:
+      type: object
+      required:
+        - count
+        - jobs
+      properties:
+        count:
+          type: integer
+          format: uint64
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/SuiteJobInfo"
+
+    HookTaskInfo:
+      type: object
+      required:
+        - uuid
+        - hook_type
+        - state
+      properties:
+        uuid:
+          type: string
+          format: uuid
+          description: Also the key this hook's artifacts are stored under
+        hook_type:
+          $ref: "#/components/schemas/HookType"
+        state:
+          $ref: "#/components/schemas/HookExecState"
+        result:
+          $ref: "#/components/schemas/TaskResultSpec"
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+
+    SuiteJobQueryResp:
+      type: object
+      required:
+        - info
+        - hooks
+      properties:
+        info:
+          $ref: "#/components/schemas/SuiteJobInfo"
+        hooks:
+          type: array
+          items:
+            $ref: "#/components/schemas/HookTaskInfo"
+
+    StopAgentJobResp:
+      type: object
+      required:
+        - stopped
+      properties:
+        stopped:
+          type: boolean
+          description: >-
+            False when there was no in-flight job to stop — an ordinary answer,
+            not an error. The other fields are then absent.
+        suite_uuid:
+          type: string
+          format: uuid
+          description: The suite whose job was stopped
+        job_id:
+          type: integer
+          format: int32
+          description: The suite-scoped job number of the stopped job
+
+    AgentState:
+      type: string
+      enum:
+        - Idle
+        - Provisioning
+        - Executing
+        - Cleaning
+        - Offline
+
+    AgentMetadata:
+      type: object
+      required:
+        - version
+        - long_version
+      properties:
+        version:
+          type: string
+        long_version:
+          type: string
+
+    RegisterAgentReq:
+      type: object
+      required:
+        - machine_code
+      properties:
+        tags:
+          type: array
+          items:
+            type: string
+          description: >-
+            Tags a suite is matched against. An agent is eligible for a suite
+            when it carries every tag the suite asks for.
+        labels:
+          type: array
+          items:
+            type: string
+          description: Free-form labels for querying; not used for matching
+        admin_group:
+          type: string
+          description: >-
+            The group granted Admin over the agent — the role that may shut it
+            down. The caller must be an Admin of it. Defaults to the caller's
+            personal group.
+        groups:
+          type: array
+          items:
+            type: string
+          description: Groups that gain Write access to the agent
+        lifetime:
+          type: string
+          description: >-
+            Token lifetime as a human duration. When omitted the token never
+            expires.
+          example: 30d
+        machine_code:
+          type: string
+          description: >-
+            Stable identifier for the host. Registration is keyed on it, so a
+            restarting agent must present the same value to re-adopt its record.
+        metadata:
+          $ref: "#/components/schemas/AgentMetadata"
+
+    RegisterAgentResp:
       type: object
       required:
         - agent_uuid
+        - token
+        - notification_counter
+        - reused
       properties:
         agent_uuid:
           type: string
           format: uuid
-          description: The agent to include, exclude, or remove the override for
+        token:
+          type: string
+          description: The agent's JWT, used for every agent-authenticated call
+        notification_counter:
+          type: integer
+          format: uint64
+          description: Start of the agent's notification sequence
+        reused:
+          type: boolean
+          description: True if an existing agent record for this machine was re-adopted
 
-    SuiteAgentResp:
+    AgentInfo:
       type: object
       required:
-        - suite_uuid
-        - agent_uuid
-        - selection
+        - uuid
+        - creator_username
+        - tags
+        - labels
+        - state
+        - last_heartbeat
+        - created_at
+        - updated_at
+      properties:
+        uuid:
+          type: string
+          format: uuid
+        creator_username:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        labels:
+          type: array
+          items:
+            type: string
+        state:
+          $ref: "#/components/schemas/AgentState"
+        last_heartbeat:
+          type: string
+          format: date-time
+        assigned_suite_uuid:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        machine_code:
+          type: string
+        metadata:
+          type: object
+
+    AgentsQueryReq:
+      type: object
+      required:
+        - count
+      properties:
+        group_name:
+          type: string
+          description: Defaults to the caller's personal group
+        tags:
+          type: array
+          items:
+            type: string
+        labels:
+          type: array
+          items:
+            type: string
+        states:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentState"
+        creator_username:
+          type: string
+        limit:
+          type: integer
+          format: uint64
+        offset:
+          type: integer
+          format: uint64
+        count:
+          type: boolean
+          description: Return only the number of matching agents
+
+    AgentsQueryResp:
+      type: object
+      required:
+        - count
+        - agents
+        - group_name
+      properties:
+        count:
+          type: integer
+          format: uint64
+        agents:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentInfo"
+        group_name:
+          type: string
+
+    AgentMetrics:
+      type: object
+      required:
+        - active_workers
+        - tasks_completed
+        - tasks_failed
+      properties:
+        active_workers:
+          type: integer
+          format: uint32
+        tasks_completed:
+          type: integer
+          format: uint64
+        tasks_failed:
+          type: integer
+          format: uint64
+
+    AgentHeartbeatReq:
+      type: object
+      required:
+        - state
+      properties:
+        state:
+          $ref: "#/components/schemas/AgentState"
+        assigned_suite_uuid:
+          type: string
+          format: uuid
+        last_notification_id:
+          type: integer
+          format: uint64
+          description: >-
+            The highest notification id the agent has processed. Acknowledges
+            through this id; anything beyond it is returned again.
+        metrics:
+          $ref: "#/components/schemas/AgentMetrics"
+
+    AgentHeartbeatResp:
+      type: object
+      required:
+        - notifications
+      properties:
+        notifications:
+          type: array
+          items:
+            $ref: "#/components/schemas/WsNotificationEvent"
+
+    TaskSuiteSpec:
+      type: object
+      required:
+        - uuid
+        - group_name
+        - tags
+        - labels
+        - priority
+        - worker_schedule
+        - state
+        - total_tasks
+        - incomplete_tasks
+      properties:
+        uuid:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        group_name:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        labels:
+          type: array
+          items:
+            type: string
+        priority:
+          type: integer
+          format: int32
+        worker_schedule:
+          $ref: "#/components/schemas/WorkerSchedulePlan"
+        exec_hooks:
+          $ref: "#/components/schemas/ExecHooks"
+        state:
+          $ref: "#/components/schemas/TaskSuiteState"
+        total_tasks:
+          type: integer
+          format: int32
+        incomplete_tasks:
+          type: integer
+          format: int32
+
+    AcceptSuiteReq:
+      type: object
       properties:
         suite_uuid:
           type: string
           format: uuid
-        agent_uuid:
-          type: string
-          format: uuid
-        selection:
-          $ref: "#/components/schemas/SuiteAgentSelectionType"
+          description: >-
+            The suite the agent was notified about, if any. A preference, not a
+            demand: one that is gone, drained, cancelled or no longer this
+            agent's falls back to the best available suite.
 
-    ResetSuiteAgentResp:
+    AcceptSuiteResp:
       type: object
       required:
-        - reset
+        - accepted
       properties:
-        reset:
+        accepted:
           type: boolean
-          description: Whether a manual override existed and was cleared (false = nothing to reset)
+        suite:
+          allOf:
+            - $ref: "#/components/schemas/TaskSuiteSpec"
+          description: What to run. Present exactly when `accepted` is true.
+        job:
+          type: integer
+          format: int64
+          description: Opaque job handle, echoed on every later job-scoped call
+        job_id:
+          type: integer
+          format: int32
+          description: Suite-scoped job number, for display
+        reason:
+          type: string
+          description: Why nothing was claimed, when `accepted` is false
+
+    StartJobReq:
+      type: object
+      required:
+        - job
+      properties:
+        job:
+          type: integer
+          format: int64
+
+    EnterCleanupReq:
+      type: object
+      required:
+        - job
+      properties:
+        job:
+          type: integer
+          format: int64
+
+    JobFailureKind:
+      type: string
+      enum:
+        - ProvisionFailed
+        - BackgroundExited
+        - ExecutionError
+        - CleanupFailed
+
+    JobFailureReason:
+      type: object
+      required:
+        - kind
+        - message
+      properties:
+        kind:
+          $ref: "#/components/schemas/JobFailureKind"
+        message:
+          type: string
+
+    SuiteJobOutcome:
+      oneOf:
+        - type: string
+          enum:
+            - Completed
+        - type: object
+          required:
+            - Failed
+          properties:
+            Failed:
+              type: object
+              required:
+                - reason
+              properties:
+                reason:
+                  $ref: "#/components/schemas/JobFailureReason"
+      description: >-
+        What the agent did. Lost and Killed are coordinator decisions and are
+        never agent outcomes.
+
+    CompleteJobReq:
+      type: object
+      required:
+        - job
+        - outcome
+      properties:
+        job:
+          type: integer
+          format: int64
+        outcome:
+          $ref: "#/components/schemas/SuiteJobOutcome"
+
+    CompleteJobResp:
+      type: object
+      required:
+        - next_suite_available
+      properties:
+        next_suite_available:
+          type: boolean
+
+    HookReportOp:
+      oneOf:
+        - type: object
+          required:
+            - Result
+          properties:
+            Result:
+              $ref: "#/components/schemas/TaskResultSpec"
+        - type: object
+          required:
+            - Upload
+          properties:
+            Upload:
+              type: object
+              required:
+                - content_type
+                - content_length
+              properties:
+                content_type:
+                  $ref: "#/components/schemas/ArtifactContentType"
+                content_length:
+                  type: integer
+                  format: uint64
+
+    HookReportReq:
+      type: object
+      required:
+        - job
+        - hook_type
+        - op
+      properties:
+        job:
+          type: integer
+          format: int64
+        hook_type:
+          $ref: "#/components/schemas/HookType"
+        op:
+          $ref: "#/components/schemas/HookReportOp"
+
+    HookReportResp:
+      type: object
+      required:
+        - hook_uuid
+      properties:
+        hook_uuid:
+          type: string
+          format: uuid
+          description: The key this hook's artifacts are stored under
+        url:
+          type: string
+          description: Presigned upload URL, for the Upload operation
+
+    FetchTasksReq:
+      type: object
+      required:
+        - suite_uuid
+      properties:
+        suite_uuid:
+          type: string
+          format: uuid
+        max_count:
+          type: integer
+          format: uint32
+          default: 1
+
+    FetchTasksResp:
+      type: object
+      required:
+        - tasks
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkerTaskResp"
+        hold_job_open:
+          type: boolean
+          default: false
+          description: >-
+            Whether the agent should keep waiting on this job rather than wind it
+            down — true while the suite is `Open`, which covers "drained, but not
+            idle long enough to be sure". An empty `tasks` with this set means
+            "come back and ask again", not "there is no more work", so a task
+            submitted moments later runs in the same job against the environment
+            its provision hook already built. It goes false once the
+            coordinator's idle sweep has settled the suite.
+
+    ReportAgentTaskReq:
+      type: object
+      required:
+        - job
+        - id
+        - op
+      properties:
+        job:
+          type: integer
+          format: int64
+          description: The job this task belongs to
+        id:
+          type: integer
+          format: int64
+          description: Internal task id, from the fetched task
+        op:
+          $ref: "#/components/schemas/ReportTaskOp"
+
+    AgentNotification:
+      type: object
+      required:
+        - type
+      discriminator:
+        propertyName: type
+      properties:
+        type:
+          type: string
+          enum:
+            - suite_available
+            - preempt_suite
+            - suite_cancelled
+            - tasks_cancelled
+            - shutdown
+            - ping
+            - counter_sync
+      description: |
+        A coordinator → agent hint prompting an HTTP action:
+        - suite_available: a suite is ready for this agent to claim
+        - preempt_suite: stop the current suite for a higher-priority one.
+          **Not emitted yet** — a running agent is never interrupted; the variant
+          exists so preemption can be enabled without a protocol change
+        - suite_cancelled: the suite being run was cancelled
+        - tasks_cancelled: specific tasks were cancelled
+        - shutdown: stop, gracefully or immediately
+        - ping: keepalive
+        - counter_sync: reset the notification sequence (coordinator restart)
+
+    WsNotificationEvent:
+      type: object
+      required:
+        - id
+        - event
+      properties:
+        id:
+          type: integer
+          format: uint64
+          description: Per-agent, monotonically increasing sequence id
+        event:
+          $ref: "#/components/schemas/AgentNotification"
+
+    AgentWsMessage:
+      type: object
+      required:
+        - type
+      discriminator:
+        propertyName: type
+      properties:
+        type:
+          type: string
+          enum:
+            - ack
+            - pong
+      description: |
+        An agent → coordinator frame:
+        - ack: the agent processed a notification, identified by
+          `notification_id`; it then leaves the replay buffer
+        - pong: reply to a ping, carrying `client_time`
+
+    RemoteResourceDownloadResp:
+      type: object
+      required:
+        - url
+        - size
+      properties:
+        url:
+          type: string
+          description: Presigned download URL
+        size:
+          type: integer
+          format: int64
 
 security:
   - bearerAuth: []
@@ -4742,7 +6170,9 @@ tags:
   - name: Tasks
     description: Task submission and monitoring
   - name: Suites
-    description: Task suite lifecycle and manual agent assignment
+    description: Task suite lifecycle, agent assignment, and job inspection
+  - name: Agents
+    description: Agent fleet management and the suite execution loop
   - name: Admin
     description: Administrative operations
   - name: Health

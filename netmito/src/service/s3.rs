@@ -250,6 +250,7 @@ pub async fn batch_download_artifacts_by_filter(
     let query = TasksQueryReq {
         creator_usernames: req.creator_usernames,
         group_name: req.group_name,
+        suite_uuid: req.suite_uuid,
         tags: req.tags,
         labels: req.labels,
         states: req.states,
@@ -1455,6 +1456,7 @@ pub async fn batch_delete_artifacts_by_filter(
     let query = TasksQueryReq {
         creator_usernames: req.creator_usernames,
         group_name: req.group_name,
+        suite_uuid: req.suite_uuid,
         tags: req.tags,
         labels: req.labels,
         states: req.states,

@@ -4023,6 +4023,16 @@ components:
           nullable: true
           description: Filter by group name
           example: research-team
+        suite_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Filter by the task suite. A suite names its own group, so it fills in
+            group_name when that is omitted and must agree with it otherwise. A
+            suite that does not exist, is in a group the caller is not in, or
+            disagrees with group_name is a 404, not an empty result.
+          example: 789e0123-e89b-12d3-a456-426614174222
         tags:
           type: array
           items:
@@ -4104,6 +4114,11 @@ components:
         group_name:
           type: string
           example: research-team
+        suite_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: The task suite that owns this task, if any
         task_id:
           type: integer
           format: int64
@@ -4184,6 +4199,11 @@ components:
           type: string
         group_name:
           type: string
+        suite_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: The task suite that owns this task, if any
         task_id:
           type: integer
           format: int64
@@ -4418,6 +4438,16 @@ components:
           type: string
           nullable: true
           description: Filter by group name
+        suite_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Filter by the task suite. A suite names its own group, so it fills in
+            group_name when that is omitted and must agree with it otherwise. A
+            suite that does not exist, is in a group the caller is not in, or
+            disagrees with group_name is a 404, not an empty result.
+          example: 789e0123-e89b-12d3-a456-426614174222
         tags:
           type: array
           items:
@@ -4608,6 +4638,16 @@ components:
           type: string
           nullable: true
           description: Filter by group name
+        suite_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Filter by the task suite. A suite names its own group, so it fills in
+            group_name when that is omitted and must agree with it otherwise. A
+            suite that does not exist, is in a group the caller is not in, or
+            disagrees with group_name is a 404, not an empty result.
+          example: 789e0123-e89b-12d3-a456-426614174222
         tags:
           type: array
           items:
@@ -4786,6 +4826,16 @@ components:
           type: string
           nullable: true
           description: Filter by group name
+        suite_uuid:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Filter by the task suite. A suite names its own group, so it fills in
+            group_name when that is omitted and must agree with it otherwise. A
+            suite that does not exist, is in a group the caller is not in, or
+            disagrees with group_name is a 404, not an empty result.
+          example: 789e0123-e89b-12d3-a456-426614174222
         tags:
           type: array
           items:

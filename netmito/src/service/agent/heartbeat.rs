@@ -156,19 +156,3 @@ impl AgentHeartbeatQueue {
         tracing::info!("Agent heartbeat queue stopped");
     }
 }
-
-/// Park an agent `Offline` and drop its suite assignment.
-pub(crate) async fn mark_offline(
-    pool: &InfraPool,
-    agent_id: i64,
-    now: TimeDateTimeWithTimeZone,
-) -> crate::error::Result<()> {
-    Agent::Entity::update_many()
-        .col_expr(Agent::Column::State, Expr::value(AgentState::Offline))
-        .col_expr(Agent::Column::AssignedTaskSuiteId, Expr::value(None::<i64>))
-        .col_expr(Agent::Column::UpdatedAt, Expr::value(now))
-        .filter(Agent::Column::Id.eq(agent_id))
-        .exec(&pool.db)
-        .await?;
-    Ok(())
-}

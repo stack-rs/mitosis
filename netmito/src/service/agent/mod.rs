@@ -327,6 +327,10 @@ pub async fn user_register_agent(
         .agent_heartbeat_queue_tx
         .send(AgentHeartbeatOp::Heartbeat(agent_id));
 
+    // Whatever was queued for the process that held this uuid is void, and the
+    // counter below is what tells this one it has nothing outstanding. Ordered
+    // ahead of the read by the router's channel, so the two agree.
+    AgentWsRouter::reset(&pool.ws_router_tx, agent_uuid);
     let notification_counter = AgentWsRouter::counter(&pool.ws_router_tx, agent_uuid)
         .await
         .unwrap_or_default();
@@ -478,11 +482,10 @@ pub async fn user_query_agents(
 
 /// Shut an agent down.
 ///
-/// - `Graceful`: ask the agent to stop. An idle agent is parked `Offline` now; a
-///   busy one winds its job down — the tasks it is running finish and commit,
-///   cleanup runs, whatever it had claimed but not started is reclaimed — and it
-///   goes `Offline` when its heartbeat stops. It does *not* drain the rest of
-///   the suite first; other agents pick that up.
+/// - `Graceful`: ask the agent to stop, and leave the rest to it. It claims
+///   nothing further, winds down whatever it is running — the tasks in hand
+///   finish and commit, cleanup runs, what it claimed but never started is
+///   reclaimed — and reports itself gone on its way out.
 /// - `Force`: park it `Offline` immediately, kill its in-flight jobs, and
 ///   reclaim its uncommitted tasks so other agents re-run them.
 pub async fn user_shutdown_agent_by_uuid(
@@ -491,8 +494,6 @@ pub async fn user_shutdown_agent_by_uuid(
     op: AgentShutdownOp,
     pool: &InfraPool,
 ) -> Result<()> {
-    let now = TimeDateTimeWithTimeZone::now_utc();
-
     // Fetch and authorize in one lookup
     let agent = Agent::Entity::find()
         .join_rev(sea_orm::JoinType::Join, GroupAgent::Relation::Agents.def())
@@ -512,21 +513,13 @@ pub async fn user_shutdown_agent_by_uuid(
         AgentShutdownOp::Force => {
             retire_agent(pool, agent.id, RetireCause::ForceShutdown).await?;
         }
-        AgentShutdownOp::Graceful => {
-            if agent.assigned_task_suite_id.is_none() {
-                heartbeat::mark_offline(pool, agent.id, now).await?;
-                let _ = pool
-                    .agent_heartbeat_queue_tx
-                    .send(AgentHeartbeatOp::Remove(agent.id));
-            } else {
-                // Busy: let it finish. Its own shutdown handling stops it from taking a
-                // next suite; liveness tracking stays on so a stall still times out.
-                tracing::info!(
-                    agent_uuid = %agent.uuid,
-                    "Graceful shutdown requested while busy — the agent will stop after its current job"
-                );
-            }
-        }
+        // Nothing to do but ask: the agent stops claiming, finishes what it
+        // holds and retires itself through `agent_exit`, idle or not. Liveness
+        // tracking stays on, so one that stalls on the way out still times out.
+        AgentShutdownOp::Graceful => tracing::info!(
+            agent_uuid = %agent.uuid,
+            "Graceful shutdown requested; the agent will stop after its current job"
+        ),
     }
 
     AgentWsRouter::notify(
@@ -561,8 +554,8 @@ impl RetireCause {
         match self {
             // The agent was told to stop; the jobs died with it, not on their own.
             Self::ForceShutdown => SuiteJobState::Killed,
-            // A drained self-exit leaves nothing here to terminate; a job still
-            // open at that point is one whose `complete` never landed.
+            // The selfexit variant should not have any task to be marked lost
+            // only here as fallback
             Self::HeartbeatTimeout | Self::Reregistered | Self::SelfExit => SuiteJobState::Lost,
         }
     }
@@ -673,6 +666,7 @@ async fn retire_agent_post_commit(
     let _ = pool
         .agent_heartbeat_queue_tx
         .send(AgentHeartbeatOp::Remove(agent_id));
+    AgentWsRouter::reset(&pool.ws_router_tx, agent_uuid);
 
     tracing::info!(
         agent_id,

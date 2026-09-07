@@ -1,20 +1,16 @@
 //! Per-agent notification sessions and the router actor that owns them.
 //!
-//! Each agent gets an [`AgentSession`]: a monotonic counter, a replay buffer of
-//! notifications it has not acknowledged, and (while connected) the sender half
-//! of its WebSocket. Notifications are pushed over the socket when one is
-//! attached and always land in the buffer; the buffer is what a heartbeat
-//! catch-up reads and what a reconnect replays.
+//! [`AgentWsRouter`] owns every agent's notification state. The service layer
+//! sends a [`RouterOp`] to the router and the router applies it. Each agent gets
+//! an [`AgentSession`] that contains a sequence counter, a buffer of notifications
+//! it has not acknowledged, and, while connected, the sender half of its WebSocket.
 //!
-//! **Buffer eviction is acknowledgement-driven.** An event leaves the buffer
-//! only once the agent confirms it processed it — over the socket
-//! (`AgentWsMessage::Ack`) or implicitly via the `last_notification_id` on its
-//! next heartbeat. A heartbeat read is a *peek*, so a response lost in flight
-//! is redelivered instead of dropped.
-//!
-//! **Nudges coalesce.** A "come and look" event whose twin is still waiting in
-//! the buffer is dropped rather than queued ([`AgentNotification::coalesces_with`]):
-//! a hundred tasks submitted into one suite are one thing to go and look at.
+//! A notification always lands in the buffer and is pushed over the socket when
+//! one is attached; it leaves the buffer only once the agent confirms it, over
+//! the socket ([`RouterOp::AckBy`]) or via the `last_notification_id` on its
+//! next heartbeat. So a session outlives its socket — a reconnect replays what
+//! is buffered, a heartbeat reads it — and ends only with the agent's process,
+//! at [`RouterOp::ResetBuffer`].
 
 use std::collections::{HashMap, VecDeque};
 
@@ -27,13 +23,6 @@ use uuid::Uuid;
 
 use crate::schema::{AgentNotification, WsNotificationEvent};
 
-/// Hard cap on unacknowledged notifications kept per agent. An agent that never
-/// acknowledges (permanently dead) must not grow the coordinator's memory; past
-/// this point the oldest events are dropped. Notifications are hints — the
-/// agent re-derives the real state from the HTTP endpoints — so a dropped one
-/// costs at most a delay until the next `SuiteAvailable`.
-const MAX_BUFFERED_NOTIFICATIONS: usize = 256;
-
 /// Command for the [`AgentWsRouter`] actor.
 #[derive(Debug)]
 pub enum RouterOp {
@@ -41,8 +30,11 @@ pub enum RouterOp {
     Register { uuid: Uuid, sender: MTx<Message> },
     /// The WebSocket dropped; the session and its buffer survive.
     Unregister { uuid: Uuid },
-    /// Forget the agent entirely (buffer included).
-    RemoveAgent { uuid: Uuid },
+    /// The process that held this uuid is over — retired, or displaced by a
+    /// registration; drop what was queued for it, since a `Shutdown` replayed
+    /// to its successor would kill the wrong one. The counter is kept, so ids
+    /// stay monotonic for this boot.
+    ResetBuffer { uuid: Uuid },
     /// The agent processed everything up to and including `id`.
     AckBy { uuid: Uuid, id: u64 },
     /// Queue a notification (and push it over the socket if connected).
@@ -50,11 +42,11 @@ pub enum RouterOp {
         uuid: Uuid,
         event: AgentNotification,
     },
-    /// Heartbeat catch-up: acknowledge through `after_id`, then return
+    /// Heartbeat catch-up: acknowledge through `ack_by_id`, then return
     /// everything still buffered beyond it **without** dropping it.
     PendingNotifications {
         uuid: Uuid,
-        after_id: u64,
+        ack_by_id: u64,
         tx: oneshot::Sender<Vec<WsNotificationEvent>>,
     },
     /// Read the agent's current sequence counter (`None` if unknown).
@@ -97,14 +89,6 @@ impl AgentSession {
             event,
         };
         self.buffer.push_back(event.clone());
-        while self.buffer.len() > MAX_BUFFERED_NOTIFICATIONS {
-            if let Some(dropped) = self.buffer.pop_front() {
-                tracing::warn!(
-                    notification_id = dropped.id,
-                    "Agent notification buffer full; dropping the oldest unacknowledged event"
-                );
-            }
-        }
         Some(event)
     }
 
@@ -184,9 +168,16 @@ impl AgentWsRouter {
                 }
                 tracing::debug!(agent_uuid = %uuid, "Agent WebSocket unregistered");
             }
-            RouterOp::RemoveAgent { uuid } => {
-                self.sessions.remove(&uuid);
-                tracing::debug!(agent_uuid = %uuid, "Agent removed from WebSocket router");
+            RouterOp::ResetBuffer { uuid } => {
+                if let Some(session) = self.sessions.get_mut(&uuid) {
+                    let dropped = session.buffer.len();
+                    session.buffer.clear();
+                    tracing::debug!(
+                        agent_uuid = %uuid,
+                        dropped,
+                        "Dropped what was queued for a process that is over"
+                    );
+                }
             }
             RouterOp::AckBy { uuid, id } => {
                 if let Some(session) = self.sessions.get_mut(&uuid) {
@@ -202,7 +193,11 @@ impl AgentWsRouter {
                     Self::push_to_socket(&sender, &event, uuid);
                 }
             }
-            RouterOp::PendingNotifications { uuid, after_id, tx } => {
+            RouterOp::PendingNotifications {
+                uuid,
+                ack_by_id: after_id,
+                tx,
+            } => {
                 let pending = match self.sessions.get_mut(&uuid) {
                     Some(session) => {
                         session.ack(after_id);
@@ -249,6 +244,10 @@ impl AgentWsRouter {
         let _ = tx.send(RouterOp::Unregister { uuid });
     }
 
+    pub fn reset(tx: &MTx<RouterOp>, uuid: Uuid) {
+        let _ = tx.send(RouterOp::ResetBuffer { uuid });
+    }
+
     pub fn ack(tx: &MTx<RouterOp>, uuid: Uuid, id: u64) {
         let _ = tx.send(RouterOp::AckBy { uuid, id });
     }
@@ -266,13 +265,13 @@ impl AgentWsRouter {
     pub async fn pending_notifications(
         tx: &MTx<RouterOp>,
         uuid: Uuid,
-        after_id: u64,
+        ack_by_id: u64,
     ) -> Vec<WsNotificationEvent> {
         let (resp_tx, resp_rx) = oneshot::channel();
         if tx
             .send(RouterOp::PendingNotifications {
                 uuid,
-                after_id,
+                ack_by_id,
                 tx: resp_tx,
             })
             .is_err()

@@ -665,6 +665,21 @@ impl AgentClient {
             .send()
             .await
             .map_err(error::map_reqwest_err)?;
+        if resp.status() == StatusCode::UNAUTHORIZED {
+            // The coordinator retired this agent, so the uuid we hold no longer
+            // names a live registration and nothing we send will be accepted
+            // again. Only a fresh registration undoes that, and that is the
+            // supervisor's job, not ours: stop the way a forced shutdown does.
+            //
+            // This could because the agent's heartbeat has timed out, or because
+            // the coordinator has force shutdown this agent.
+            tracing::warn!("The coordinator no longer recognises this agent; exiting");
+            if let Some(token) = &self.job_token {
+                token.cancel();
+            }
+            self.shutdown_token.cancel();
+            return Ok(());
+        }
         let resp: AgentHeartbeatResp = parse_json(resp, "heartbeat").await?;
 
         // Catch-up path: whatever the WebSocket did not deliver arrives here.

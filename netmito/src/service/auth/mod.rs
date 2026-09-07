@@ -18,7 +18,11 @@ use sea_orm::{entity::prelude::*, Set};
 
 use crate::{
     config::InfraPool,
-    entity::{agents as Agent, state::UserState, users as User, workers as Worker},
+    entity::{
+        agents as Agent,
+        state::{AgentState, UserState},
+        users as User, workers as Worker,
+    },
     error::{ApiError, AuthError},
     schema::{UserChangePasswordReq, UserLoginReq},
 };
@@ -441,6 +445,10 @@ async fn agent_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<AuthAgen
         .await
         .map_err(|_| AuthError::WrongCredentials)?
         .ok_or(AuthError::WrongCredentials)?;
+
+    if agent.state == AgentState::Offline {
+        return Err(AuthError::WrongCredentials);
+    }
 
     Ok(AuthAgent { id: agent.id, uuid })
 }

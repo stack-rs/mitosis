@@ -2217,69 +2217,17 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
-  /agents/job/start:
+  /agents/job:
     post:
-      summary: Report provisioning complete
-      description: Job Provisioning → Executing; the agent becomes Executing.
-      operationId: agentStartJob
-      tags:
-        - Agents
-      security:
-        - agentAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/StartJobReq"
-      responses:
-        "200":
-          description: Transition applied
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          $ref: "#/components/responses/Conflict"
-
-  /agents/job/cleanup:
-    post:
-      summary: Report entering cleanup
-      description: Job Executing → Cleanup; the agent becomes Cleaning.
-      operationId: agentEnterCleanup
-      tags:
-        - Agents
-      security:
-        - agentAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/EnterCleanupReq"
-      responses:
-        "200":
-          description: Transition applied
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          $ref: "#/components/responses/Conflict"
-
-  /agents/job/complete:
-    post:
-      summary: Report job completion
+      summary: Report a job phase
       description: >-
-        Write the job's terminal state and release the agent back to Idle. The
-        agent reports only what it did — Completed, or Failed with a reason;
-        Lost and Killed are the coordinator's to write. A job that is already
-        terminal answers 409, which tells the agent it was torn down under it.
-      operationId: agentCompleteJob
+        Walk the agent's job one phase forward. `Start` moves it Provisioning →
+        Executing (agent Executing), `EnterCleanup` moves it Executing → Cleanup
+        (agent Cleaning), and `Complete` writes the terminal state and releases
+        the agent back to Idle. The agent reports only what it did — Lost and
+        Killed are the coordinator's to write. A job that is already terminal
+        answers 400, which tells the agent it was torn down under it.
+      operationId: agentReportJob
       tags:
         - Agents
       security:
@@ -2289,20 +2237,22 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/CompleteJobReq"
+              $ref: "#/components/schemas/JobReportReq"
       responses:
         "200":
-          description: Job closed
+          description: >-
+            Transition applied; `next_suite_available` is present for the
+            Complete operation
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CompleteJobResp"
+                $ref: "#/components/schemas/JobReportResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
-        "409":
-          $ref: "#/components/responses/Conflict"
 
   /agents/job/hook:
     post:
@@ -2344,10 +2294,12 @@ paths:
     post:
       summary: Claim tasks from a suite
       description: >-
-        Atomically claim up to `max_count` of the suite's ready tasks, highest
-        priority first, moving them to Running under this agent. Concurrent
-        agents never claim the same task. An empty list means nothing is ready
-        right now, not that the suite is finished.
+        Atomically claim a batch of the suite's ready tasks, highest priority
+        first, moving them to Running under this agent. The coordinator sizes
+        the batch from the suite's schedule and what this agent already holds —
+        an agent that asks is an agent with room, and it takes what it is given.
+        Concurrent agents never claim the same task. An empty list means nothing
+        is ready right now, not that the suite is finished.
       operationId: agentFetchTasks
       tags:
         - Agents
@@ -5901,24 +5853,6 @@ components:
           type: string
           description: Why nothing was claimed, when `accepted` is false
 
-    StartJobReq:
-      type: object
-      required:
-        - job
-      properties:
-        job:
-          type: integer
-          format: int64
-
-    EnterCleanupReq:
-      type: object
-      required:
-        - job
-      properties:
-        job:
-          type: integer
-          format: int64
-
     JobFailureKind:
       type: string
       enum:
@@ -5958,25 +5892,47 @@ components:
         What the agent did. Lost and Killed are coordinator decisions and are
         never agent outcomes.
 
-    CompleteJobReq:
+    JobReportOp:
+      oneOf:
+        - type: string
+          enum:
+            - Start
+            - EnterCleanup
+        - type: object
+          required:
+            - Complete
+          properties:
+            Complete:
+              type: object
+              required:
+                - outcome
+              properties:
+                outcome:
+                  $ref: "#/components/schemas/SuiteJobOutcome"
+      description: >-
+        The phase the agent has just entered. The coordinator derives the job's
+        state from the op, which is what keeps Lost and Killed unsayable here.
+
+    JobReportReq:
       type: object
       required:
         - job
-        - outcome
+        - op
       properties:
         job:
           type: integer
           format: int64
-        outcome:
-          $ref: "#/components/schemas/SuiteJobOutcome"
+        op:
+          $ref: "#/components/schemas/JobReportOp"
 
-    CompleteJobResp:
+    JobReportResp:
       type: object
-      required:
-        - next_suite_available
       properties:
         next_suite_available:
           type: boolean
+          description: >-
+            Whether another suite is available for this agent immediately.
+            Present for the Complete operation only.
 
     HookReportOp:
       oneOf:
@@ -6038,10 +5994,10 @@ components:
         suite_uuid:
           type: string
           format: uuid
-        max_count:
-          type: integer
-          format: uint32
-          default: 1
+      description: >-
+        The batch size is not the agent's to ask for: the coordinator knows the
+        suite's schedule and what this agent already holds, and sizes the batch
+        itself.
 
     FetchTasksResp:
       type: object

@@ -13,10 +13,10 @@ use crate::{
     error::ApiError,
     schema::{
         AcceptSuiteReq, AcceptSuiteResp, AgentHeartbeatReq, AgentHeartbeatResp, AgentShutdownReq,
-        AgentsQueryReq, AgentsQueryResp, CompleteJobReq, CompleteJobResp, EnterCleanupReq,
-        FetchTasksReq, FetchTasksResp, HookReportReq, HookReportResp, RegisterAgentReq,
+        AgentsQueryReq, AgentsQueryResp, FetchTasksReq, FetchTasksResp, HookReportReq,
+        HookReportResp, JobReportOp, JobReportReq, JobReportResp, RegisterAgentReq,
         RegisterAgentResp, RemoteResourceDownloadResp, ReportAgentTaskReq, ReportTaskResp,
-        StartJobReq, StopAgentJobReq, StopAgentJobResp, TaskQueryResp,
+        StopAgentJobReq, StopAgentJobResp, TaskQueryResp,
     },
     service::{
         self,
@@ -40,9 +40,7 @@ pub fn agents_router(st: InfraPool) -> Router<InfraPool> {
         .route("/", delete(agent_exit))
         .route("/heartbeat", post(heartbeat))
         .route("/suite", post(accept_suite))
-        .route("/job/start", post(start_job))
-        .route("/job/cleanup", post(enter_cleanup))
-        .route("/job/complete", post(complete_job))
+        .route("/job", post(report_job))
         .route("/job/hook", post(report_hook))
         .route("/tasks/fetch", post(fetch_tasks))
         .route("/tasks/report", post(report_task))
@@ -176,40 +174,36 @@ async fn accept_suite(
     Ok(Json(resp))
 }
 
-/// `POST /agents/job/start` — provisioning done, execution starting.
-async fn start_job(
+/// `POST /agents/job` — walk the job one phase forward: `Start` (provisioning
+/// done, executing), `EnterCleanup` (tasks drained), or `Complete` (terminal,
+/// agent back to idle). Only `Complete` answers with a body.
+async fn report_job(
     Extension(a): Extension<AuthAgent>,
     State(pool): State<InfraPool>,
-    Json(req): Json<StartJobReq>,
-) -> Result<(), ApiError> {
-    service::agent::agent_start_job(a.id, &pool, req.job)
-        .await
-        .map_err(map_service_error)?;
-    Ok(())
-}
-
-/// `POST /agents/job/cleanup` — tasks drained, cleanup starting.
-async fn enter_cleanup(
-    Extension(a): Extension<AuthAgent>,
-    State(pool): State<InfraPool>,
-    Json(req): Json<EnterCleanupReq>,
-) -> Result<(), ApiError> {
-    service::agent::agent_enter_cleanup(a.id, &pool, req.job)
-        .await
-        .map_err(map_service_error)?;
-    Ok(())
-}
-
-/// `POST /agents/job/complete` — job terminal, agent back to idle.
-async fn complete_job(
-    Extension(a): Extension<AuthAgent>,
-    State(pool): State<InfraPool>,
-    Json(req): Json<CompleteJobReq>,
-) -> Result<Json<CompleteJobResp>, ApiError> {
-    let resp = service::agent::agent_complete_job(a.id, a.uuid, &pool, req)
-        .await
-        .map_err(map_service_error)?;
-    Ok(Json(resp))
+    Json(req): Json<JobReportReq>,
+) -> Result<Json<JobReportResp>, ApiError> {
+    let next_suite_available = match req.op {
+        JobReportOp::Start => {
+            service::agent::agent_start_job(a.id, &pool, req.job)
+                .await
+                .map_err(map_service_error)?;
+            None
+        }
+        JobReportOp::EnterCleanup => {
+            service::agent::agent_enter_cleanup(a.id, &pool, req.job)
+                .await
+                .map_err(map_service_error)?;
+            None
+        }
+        JobReportOp::Complete { outcome } => Some(
+            service::agent::agent_complete_job(a.id, a.uuid, &pool, req.job, outcome)
+                .await
+                .map_err(map_service_error)?,
+        ),
+    };
+    Ok(Json(JobReportResp {
+        next_suite_available,
+    }))
 }
 
 /// `POST /agents/job/hook` — record a hook result or presign its artifacts.

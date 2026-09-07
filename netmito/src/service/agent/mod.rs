@@ -70,9 +70,9 @@ use crate::entity::{
 use crate::error::{ApiError, AuthError, Error, Result};
 use crate::schema::{
     AcceptSuiteReq, AcceptSuiteResp, AgentHeartbeatReq, AgentHeartbeatResp, AgentInfo,
-    AgentNotification, AgentShutdownOp, AgentsQueryReq, AgentsQueryResp, CompleteJobReq,
-    CompleteJobResp, CountQuery, ExecHooks, RegisterAgentReq, RegisterAgentResp, StopAgentJobResp,
-    StopJobOp, SuiteJobOutcome, TaskSuiteSpec, WorkerSchedulePlan,
+    AgentNotification, AgentShutdownOp, AgentsQueryReq, AgentsQueryResp, CountQuery, ExecHooks,
+    RegisterAgentReq, RegisterAgentResp, StopAgentJobResp, StopJobOp, SuiteJobOutcome,
+    TaskSuiteSpec, WorkerSchedulePlan,
 };
 use crate::service::auth::token::generate_worker_token;
 use crate::ws::AgentWsRouter;
@@ -1327,7 +1327,8 @@ async fn advance_job(
     Ok(())
 }
 
-/// Finish the job and release the agent back to `Idle`.
+/// Finish the job and release the agent back to `Idle`. Answers whether another
+/// suite is available for this agent right away.
 ///
 /// The agent reports only what it did — `Completed` or `Failed` with a reason.
 /// `Lost` and `Killed` are the coordinator's to write. A job that is already
@@ -1348,10 +1349,10 @@ pub async fn agent_complete_job(
     agent_id: i64,
     agent_uuid: Uuid,
     pool: &InfraPool,
-    req: CompleteJobReq,
-) -> Result<CompleteJobResp> {
+    job_handle: i64,
+    outcome: SuiteJobOutcome,
+) -> Result<bool> {
     let now = TimeDateTimeWithTimeZone::now_utc();
-    let job_handle = req.job;
 
     let queues = pool.suite_queues.clone();
     let (job_id, terminal, released, reclaimed, suite_id) = pool
@@ -1360,7 +1361,7 @@ pub async fn agent_complete_job(
             move |txn| {
                 let queues = queues;
                 Box::pin(async move {
-                    let terminal = match &req.outcome {
+                    let terminal = match &outcome {
                         SuiteJobOutcome::Completed => SuiteJobState::Completed,
                         SuiteJobOutcome::Failed { .. } => SuiteJobState::Failed,
                     };
@@ -1383,7 +1384,7 @@ pub async fn agent_complete_job(
                         .await);
                     };
 
-                    if let SuiteJobOutcome::Failed { reason } = &req.outcome {
+                    if let SuiteJobOutcome::Failed { reason } = &outcome {
                         tracing::warn!(
                             job = job_handle,
                             job_id = job_row.job_id,
@@ -1455,11 +1456,7 @@ pub async fn agent_complete_job(
     }
 
     let blocked = pool.suite_queues.blocked_for(agent_id);
-    let next_suite_available =
-        matching::agent_has_available_suite(&pool.db, agent_id, &blocked).await?;
-    Ok(CompleteJobResp {
-        next_suite_available,
-    })
+    matching::agent_has_available_suite(&pool.db, agent_id, &blocked).await
 }
 
 /// Push a notification to every agent id in `agent_ids` (resolving uuids first).

@@ -267,27 +267,25 @@ pub struct AcceptSuiteResp {
     pub reason: Option<String>,
 }
 
-/// Request to report that provisioning finished and execution is starting
+/// Request to report a job phase transition (`POST /agents/job`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StartJobReq {
+pub struct JobReportReq {
     /// Opaque job handle from `AcceptSuiteResp`
     pub job: i64,
+    /// The phase the agent has just entered.
+    pub op: JobReportOp,
 }
 
-/// Request to report the agent entering the cleanup phase
+/// What the agent did. The coordinator-only state like 'Lost'
+/// is not in here
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnterCleanupReq {
-    /// Opaque job handle from `AcceptSuiteResp`
-    pub job: i64,
-}
-
-/// Request to report job completion
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompleteJobReq {
-    /// Opaque job handle from `AcceptSuiteResp`
-    pub job: i64,
-    /// What the agent did: finished cleanly, or failed with a reason.
-    pub outcome: SuiteJobOutcome,
+pub enum JobReportOp {
+    /// Provisioning finished, execution starting.
+    Start,
+    /// Tasks drained, cleanup starting.
+    EnterCleanup,
+    /// The job is over; `outcome` says how.
+    Complete { outcome: SuiteJobOutcome },
 }
 
 /// The agent's report of how its job ended. By design the agent reports only
@@ -324,11 +322,14 @@ pub struct JobFailureReason {
     pub message: String,
 }
 
-/// Response after completing a job
+/// Response to a job report. Only `Complete` has anything to say back; the
+/// other ops answer with an empty object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompleteJobResp {
-    /// Whether another suite is available for this agent immediately
-    pub next_suite_available: bool,
+pub struct JobReportResp {
+    /// Whether another suite is available for this agent immediately. Present
+    /// for `Complete` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_suite_available: Option<bool>,
 }
 
 /// Request to report a suite hook execution (`POST /agents/job/hook`).

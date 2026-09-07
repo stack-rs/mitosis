@@ -924,7 +924,13 @@ impl SuiteRunner {
         }
 
         if let Err(e) = self
-            .post_empty("agents/job/start", &StartJobReq { job })
+            .post_empty(
+                "agents/job",
+                &JobReportReq {
+                    job,
+                    op: JobReportOp::Start,
+                },
+            )
             .await
         {
             tracing::error!("Failed to start suite {suite_uuid}: {e}");
@@ -964,7 +970,13 @@ impl SuiteRunner {
         }
 
         if let Err(e) = self
-            .post_empty("agents/job/cleanup", &EnterCleanupReq { job })
+            .post_empty(
+                "agents/job",
+                &JobReportReq {
+                    job,
+                    op: JobReportOp::EnterCleanup,
+                },
+            )
             .await
         {
             tracing::error!("Failed to enter cleanup for suite {suite_uuid}: {e}");
@@ -1365,14 +1377,17 @@ impl SuiteRunner {
     async fn report_complete(&self, job: i64, outcome: SuiteJobOutcome) -> Result<bool> {
         let resp = self
             .http_client
-            .post(self.api_url("agents/job/complete").as_str())
+            .post(self.api_url("agents/job").as_str())
             .bearer_auth(&self.token)
-            .json(&CompleteJobReq { job, outcome })
+            .json(&JobReportReq {
+                job,
+                op: JobReportOp::Complete { outcome },
+            })
             .send()
             .await
             .map_err(error::map_reqwest_err)?;
-        let resp: CompleteJobResp = parse_json(resp, "complete job").await?;
-        Ok(resp.next_suite_available)
+        let resp: JobReportResp = parse_json(resp, "complete job").await?;
+        Ok(resp.next_suite_available.unwrap_or(false))
     }
 
     /// POST a request whose success carries no body.

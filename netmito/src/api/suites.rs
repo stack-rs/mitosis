@@ -11,10 +11,10 @@ use crate::{
     config::InfraPool,
     error::ApiError,
     schema::{
-        CancelTaskSuiteParam, CreateTaskSuiteReq, CreateTaskSuiteResp, StopAgentJobReq,
-        StopAgentJobResp, SuiteAgentOverrideReq, SuiteAgentOverrideResp, SuiteJobQueryResp,
-        SuiteJobsQueryReq, SuiteJobsQueryResp, TaskSuiteQueryResp, TaskSuitesQueryReq,
-        TaskSuitesQueryResp,
+        CancelTaskSuiteParam, ChangeTaskSuiteReq, CreateTaskSuiteReq, CreateTaskSuiteResp,
+        StopAgentJobReq, StopAgentJobResp, SuiteAgentOverrideReq, SuiteAgentOverrideResp,
+        SuiteJobQueryResp, SuiteJobsQueryReq, SuiteJobsQueryResp, TaskSuiteQueryResp,
+        TaskSuitesQueryReq, TaskSuitesQueryResp,
     },
     service::{
         self,
@@ -26,7 +26,12 @@ pub fn suites_router(st: InfraPool) -> Router<InfraPool> {
     Router::new()
         .route("/", post(create_suite))
         .route("/query", post(query_suites))
-        .route("/{uuid}", get(get_suite_details).delete(cancel_suite))
+        .route(
+            "/{uuid}",
+            get(get_suite_details)
+                .put(change_suite)
+                .delete(cancel_suite),
+        )
         .route("/{uuid}/close", post(close_suite))
         .route("/{uuid}/agents/override", post(override_agents_for_suite))
         .route("/{uuid}/jobs/query", post(query_suite_jobs))
@@ -72,6 +77,18 @@ pub async fn get_suite_details(
         .await
         .map_err(map_service_error)?;
     Ok(Json(details))
+}
+
+pub async fn change_suite(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<ChangeTaskSuiteReq>,
+) -> Result<(), ApiError> {
+    service::suite::user_change_task_suite(u.id, &pool, uuid, req)
+        .await
+        .map_err(map_service_error)?;
+    Ok(())
 }
 
 pub async fn close_suite(

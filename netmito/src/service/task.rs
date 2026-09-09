@@ -31,7 +31,7 @@ use super::worker::{remove_task, TaskDispatcherOp};
 
 // XXX: Not sure if we can relax the constrains on local path checking.
 // We currently only check if the path is absolute or contains `..` and not check for `.`.
-fn check_exec_spec(spec: &ExecSpec) -> crate::error::Result<()> {
+pub(crate) fn check_exec_spec(spec: &ExecSpec) -> crate::error::Result<()> {
     if spec.resources.iter().any(|r| {
         r.local_path.is_absolute()
             || r.local_path

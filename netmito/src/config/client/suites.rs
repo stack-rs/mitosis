@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -5,8 +7,8 @@ use uuid::Uuid;
 use crate::{
     entity::state::{SuiteJobState, TaskSuiteState},
     schema::{
-        CreateTaskSuiteReq, ExecHooks, ExecSpec, SuiteJobsQueryReq, TaskSuitesQueryReq,
-        WorkerSchedulePlan,
+        ChangeTaskSuiteReq, CreateTaskSuiteReq, ExecHooks, ExecHooksUpdate, ExecSpec,
+        SuiteJobsQueryReq, TaskSuitesQueryReq, UpdateOp, WorkerSchedulePlan,
     },
 };
 
@@ -23,6 +25,8 @@ pub enum SuitesCommands {
     /// Create a new task suite
     // Boxed: the three optional hook specs make this variant far larger than the rest.
     Create(Box<CreateSuiteArgs>),
+    /// Change a suite's properties. Takes effect on the jobs started after it
+    Change(Box<ChangeSuiteArgs>),
     /// Query task suites subject to a filter
     Query(QuerySuitesArgs),
     /// Get the details of a task suite
@@ -103,6 +107,120 @@ impl From<CreateSuiteArgs> for CreateTaskSuiteReq {
                 prefetch: !args.no_prefetch,
             },
             exec_hooks,
+        }
+    }
+}
+
+/// Every field is left alone unless named. Each nullable one has a `--clear-*`
+/// partner that conflicts with its value flag, so setting and clearing at once
+/// is a parse error rather than a rejected request.
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct ChangeSuiteArgs {
+    /// The UUID of the suite
+    pub uuid: Uuid,
+    /// New human-readable name for the suite
+    #[arg(short, long, conflicts_with = "clear_name")]
+    pub name: Option<String>,
+    /// Remove the suite's name
+    #[arg(long)]
+    pub clear_name: bool,
+    /// New description for the suite
+    #[arg(short, long, conflicts_with = "clear_description")]
+    pub description: Option<String>,
+    /// Remove the suite's description
+    #[arg(long)]
+    pub clear_description: bool,
+    /// Replacement tags for agent matching (e.g. gpu,linux)
+    #[arg(short, long, num_args = 1.., value_delimiter = ',', conflicts_with = "clear_tags")]
+    pub tags: Option<Vec<String>>,
+    /// Drop every tag. An untagged suite matches every agent its group can write to
+    #[arg(long)]
+    pub clear_tags: bool,
+    /// Replacement labels for querying/filtering
+    #[arg(short, long, num_args = 1.., value_delimiter = ',', conflicts_with = "clear_labels")]
+    pub labels: Option<Vec<String>>,
+    /// Drop every label
+    #[arg(long)]
+    pub clear_labels: bool,
+    /// Suite scheduling priority (higher = more important)
+    #[arg(short, long)]
+    pub priority: Option<i32>,
+    /// Number of workers each agent spawns for this suite. Must specify prefetch
+    /// setting alongside
+    #[arg(short, long, requires = "prefetch")]
+    pub workers: Option<u32>,
+    /// Whether the agent keeps the next task ready instead of claiming one only
+    /// when a worker frees up. Must specify worker count settings alongside
+    #[arg(long, requires = "workers")]
+    pub prefetch: Option<bool>,
+    /// Replacement provision hook, as a JSON exec spec
+    #[arg(long, value_parser = parse_exec_spec, conflicts_with = "clear_provision")]
+    pub provision: Option<ExecSpec>,
+    /// Remove the provision hook
+    #[arg(long)]
+    pub clear_provision: bool,
+    /// Replacement cleanup hook, same JSON shape
+    #[arg(long, value_parser = parse_exec_spec, conflicts_with = "clear_cleanup")]
+    pub cleanup: Option<ExecSpec>,
+    /// Remove the cleanup hook
+    #[arg(long)]
+    pub clear_cleanup: bool,
+    /// Replacement background hook, same JSON shape
+    #[arg(long, value_parser = parse_exec_spec, conflicts_with = "clear_background")]
+    pub background: Option<ExecSpec>,
+    /// Remove the background hook
+    #[arg(long)]
+    pub clear_background: bool,
+}
+
+/// A value flag and its `--clear-*` partner, as the one op they describe.
+/// clap rules out the both-given case, so a value wins if one ever arrives.
+fn update_op<T>(value: Option<T>, clear: bool) -> Option<UpdateOp<T>> {
+    match (value, clear) {
+        (Some(value), _) => Some(UpdateOp::SetTo(value)),
+        (None, true) => Some(UpdateOp::SetNull),
+        (None, false) => None,
+    }
+}
+
+impl From<ChangeSuiteArgs> for ChangeTaskSuiteReq {
+    fn from(args: ChangeSuiteArgs) -> Self {
+        // An array column has no null, so its cleared state is the empty set —
+        // the flag pair is uniform at the CLI even where the request is not.
+        let tags = match (args.tags, args.clear_tags) {
+            (Some(tags), _) => Some(tags.into_iter().collect()),
+            (None, true) => Some(HashSet::new()),
+            (None, false) => None,
+        };
+        let labels = match (args.labels, args.clear_labels) {
+            (Some(labels), _) => Some(labels.into_iter().collect()),
+            (None, true) => Some(HashSet::new()),
+            (None, false) => None,
+        };
+        // The plan is replaced wholesale, so it is stated in full or not at all:
+        // clap requires the two flags together, and neither half may default over
+        // what the suite already had.
+        let worker_schedule = match (args.workers, args.prefetch) {
+            (Some(worker_count), Some(prefetch)) => Some(WorkerSchedulePlan::FixedWorkers {
+                worker_count,
+                cpu_binding: None,
+                prefetch,
+            }),
+            _ => None,
+        };
+        let hooks = ExecHooksUpdate {
+            provision: update_op(args.provision, args.clear_provision),
+            cleanup: update_op(args.cleanup, args.clear_cleanup),
+            background: update_op(args.background, args.clear_background),
+        };
+        Self {
+            name: update_op(args.name, args.clear_name),
+            description: update_op(args.description, args.clear_description),
+            tags,
+            labels,
+            priority: args.priority,
+            worker_schedule,
+            exec_hooks: (!hooks.is_empty()).then_some(hooks),
         }
     }
 }

@@ -820,6 +820,12 @@ impl MitoClient {
         self.http_client.create_task_suite(args.into()).await
     }
 
+    pub async fn suites_change(&mut self, args: ChangeSuiteArgs) -> crate::error::Result<()> {
+        self.http_client
+            .change_task_suite(args.uuid, args.into())
+            .await
+    }
+
     pub async fn suites_query(
         &mut self,
         args: QuerySuitesArgs,
@@ -2123,6 +2129,14 @@ impl MitoClient {
                 SuitesCommands::Create(args) => match self.suites_create(*args).await {
                     Ok(resp) => {
                         tracing::info!("Suite created with uuid {}", resp.uuid);
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                SuitesCommands::Change(args) => match self.suites_change(*args).await {
+                    Ok(_) => {
+                        tracing::info!("Suite changed successfully");
                     }
                     Err(e) => {
                         tracing::error!("{}", e);

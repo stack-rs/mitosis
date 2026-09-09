@@ -1680,6 +1680,32 @@ impl MitoHttpClient {
         }
     }
 
+    pub async fn change_task_suite(
+        &mut self,
+        uuid: Uuid,
+        req: ChangeTaskSuiteReq,
+    ) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
+        self.url.set_path(&format!("suites/{uuid}"));
+        let resp = self
+            .http_client
+            .put(self.url.as_str())
+            .bearer_auth(credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn close_task_suite(&mut self, uuid: Uuid) -> crate::error::Result<()> {
         let credential = self
             .credential_guard

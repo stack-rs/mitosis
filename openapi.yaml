@@ -1724,6 +1724,48 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+    put:
+      summary: Change task suite
+      description: >-
+        Change a suite's properties. Every field is optional and an omitted one is
+        left unchanged; an empty request is rejected. Nullable fields (name,
+        description and each hook) take an update op rather than a bare value, so
+        clearing one is expressible. A Cancelled suite is frozen and rejects every
+        change, including a rename. The change applies to the jobs started after
+        it: an agent mid-job keeps the worker count and hooks it started with, and
+        one that no longer tag-matches still finishes the job it holds. The caller
+        must have the Write or Admin role in the suite's group; a non-member and an
+        unknown uuid are indistinguishable and both return 404.
+      operationId: changeTaskSuite
+      tags:
+        - Suites
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeTaskSuiteReq"
+      responses:
+        "200":
+          description: Suite changed successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
     delete:
       summary: Cancel task suite
       description: Cancel a task suite (terminal). Archives all non-terminal tasks of the suite as Cancelled.
@@ -5102,6 +5144,92 @@ components:
           $ref: "#/components/schemas/WorkerSchedulePlan"
         exec_hooks:
           $ref: "#/components/schemas/ExecHooks"
+
+    UpdateOpString:
+      type: object
+      description: >-
+        A change to a nullable string field. `set_to` writes the value, `set_null`
+        clears it; omitting the field from the request leaves it unchanged.
+      required:
+        - op
+      properties:
+        op:
+          type: string
+          enum:
+            - set_to
+            - set_null
+        value:
+          type: string
+          description: Required when op is set_to, absent otherwise
+      example:
+        op: set_to
+        value: nightly-eval
+
+    UpdateOpExecSpec:
+      type: object
+      description: >-
+        A change to one lifecycle hook. `set_to` installs the spec, `set_null`
+        removes the hook; omitting the field leaves that hook as it was.
+      required:
+        - op
+      properties:
+        op:
+          type: string
+          enum:
+            - set_to
+            - set_null
+        value:
+          type: object
+          description: Execution spec, required when op is set_to
+
+    ExecHooksUpdate:
+      type: object
+      description: >-
+        Per-hook changes. Each hook is set, cleared, or — omitted — left alone;
+        clearing all three stores no hooks at all.
+      properties:
+        provision:
+          $ref: "#/components/schemas/UpdateOpExecSpec"
+        cleanup:
+          $ref: "#/components/schemas/UpdateOpExecSpec"
+        background:
+          $ref: "#/components/schemas/UpdateOpExecSpec"
+
+    ChangeTaskSuiteReq:
+      type: object
+      description: At least one field must be present, or the request is rejected as empty
+      properties:
+        name:
+          $ref: "#/components/schemas/UpdateOpString"
+        description:
+          $ref: "#/components/schemas/UpdateOpString"
+        tags:
+          type: array
+          items:
+            type: string
+          description: >-
+            Replacement tags for agent matching. An empty array matches every
+            agent the suite's group can write to, since matching is containment
+          example:
+            - linux
+            - cuda:11
+        labels:
+          type: array
+          items:
+            type: string
+          description: Replacement labels for querying/filtering
+        priority:
+          type: integer
+          format: int32
+          description: Suite scheduling priority (higher = more important)
+        worker_schedule:
+          allOf:
+            - $ref: "#/components/schemas/WorkerSchedulePlan"
+          description: >-
+            Replaces the plan wholesale; a patch could not express switching to
+            another scheduling policy
+        exec_hooks:
+          $ref: "#/components/schemas/ExecHooksUpdate"
 
     CreateTaskSuiteResp:
       type: object

@@ -18,13 +18,13 @@ use crate::entity::{
 };
 use crate::error::{ApiError, Error, ResolveError, Result};
 use crate::schema::{
-    AgentNotification, CancelTaskSuiteOp, CountQuery, CreateTaskSuiteReq, CreateTaskSuiteResp,
-    ExecHooks, HookTaskInfo, ParsedTaskSuiteInfo, StopAgentJobResp, StopJobOp,
+    AgentNotification, CancelTaskSuiteOp, ChangeTaskSuiteReq, CountQuery, CreateTaskSuiteReq,
+    CreateTaskSuiteResp, ExecHooks, HookTaskInfo, ParsedTaskSuiteInfo, StopAgentJobResp, StopJobOp,
     SuiteAgentOverrideReq, SuiteAgentOverrideResp, SuiteJobInfo, SuiteJobQueryResp,
     SuiteJobsQueryReq, SuiteJobsQueryResp, TaskResultMessage, TaskResultSpec, TaskSuiteInfo,
-    TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp, WorkerSchedulePlan,
+    TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp, UpdateOp, WorkerSchedulePlan,
 };
-use crate::service::task::{parse_operators_with_number, OperatorWithNumber};
+use crate::service::task::{check_exec_spec, parse_operators_with_number, OperatorWithNumber};
 
 #[derive(FromQueryResult)]
 struct GroupIdResult {
@@ -184,6 +184,36 @@ pub(crate) async fn decrement_incomplete_tasks<C: ConnectionTrait>(
     Ok(())
 }
 
+/// The largest worker count a plan may ask an agent for.
+const MAX_WORKER_COUNT: u32 = 256;
+
+/// Reject a plan no agent should be handed. Shared with the change path so an
+/// edit cannot reach a state creation refuses.
+// TODO: this should finally be adjusted to some more flexible definitions
+fn validate_worker_schedule(plan: &WorkerSchedulePlan) -> Result<()> {
+    match plan {
+        WorkerSchedulePlan::FixedWorkers { worker_count, .. } => {
+            if *worker_count == 0 || *worker_count > MAX_WORKER_COUNT {
+                return Err(Error::ApiError(ApiError::InvalidRequest(format!(
+                    "worker_count must be between 1 and {MAX_WORKER_COUNT}, got {worker_count}"
+                ))));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Hooks run through the same executor as tasks, so their specs face the same check.
+fn validate_exec_hooks(hooks: &ExecHooks) -> Result<()> {
+    for spec in [&hooks.provision, &hooks.cleanup, &hooks.background]
+        .into_iter()
+        .flatten()
+    {
+        check_exec_spec(spec)?;
+    }
+    Ok(())
+}
+
 pub async fn user_create_task_suite(
     user_id: i64,
     pool: &InfraPool,
@@ -198,16 +228,9 @@ pub async fn user_create_task_suite(
         exec_hooks,
     }: CreateTaskSuiteReq,
 ) -> crate::error::Result<CreateTaskSuiteResp> {
-    // Validate the worker schedule based on the policy variant.
-    match &worker_schedule {
-        // TODO: this should finally be adjusted to some more flexible definitions
-        WorkerSchedulePlan::FixedWorkers {
-            worker_count: _worker_count,
-            prefetch: _prefetch,
-            ..
-        } => {
-            // TODO: validate the request
-        }
+    validate_worker_schedule(&worker_schedule)?;
+    if let Some(hooks) = &exec_hooks {
+        validate_exec_hooks(hooks)?;
     }
 
     if group_name.is_empty() {
@@ -367,6 +390,163 @@ pub(crate) async fn check_task_suites_query(
 }
 
 /// Query suites subject to a filter. Only returns suites in a group the caller can read.
+/// Change a suite's properties. Requires Write in the suite's group.
+///
+/// A `Cancelled` suite is frozen — effectively archived, so even a rename is
+/// rejected. Every other state is editable.
+///
+/// The change reaches the *next* job. Slot counts and hooks are snapshotted when
+/// a job starts, and an agent that stops tag-matching continue to run the job.
+pub async fn user_change_task_suite(
+    user_id: i64,
+    pool: &InfraPool,
+    suite_uuid: Uuid,
+    req: ChangeTaskSuiteReq,
+) -> Result<()> {
+    if req.is_empty() {
+        return Err(Error::ApiError(ApiError::InvalidRequest(
+            "No change specified".to_string(),
+        )));
+    }
+    if let Some(plan) = &req.worker_schedule {
+        validate_worker_schedule(plan)?;
+    }
+    // Only the incoming specs need checking: the hooks left alone were checked
+    // when they were written.
+    if let Some(update) = &req.exec_hooks {
+        for op in [&update.provision, &update.cleanup, &update.background]
+            .into_iter()
+            .flatten()
+        {
+            if let UpdateOp::SetTo(spec) = op {
+                check_exec_spec(spec)?;
+            }
+        }
+    }
+    let needs_notify = req.affects_scheduling();
+    let now = TimeDateTimeWithTimeZone::now_utc();
+
+    let suite_id = pool
+        .db
+        .transaction::<_, i64, Error>(|txn| {
+            Box::pin(async move {
+                let suite =
+                    match authorize_suite(txn, user_id, suite_uuid, UserGroupRole::Write).await {
+                        Ok(suite) => suite,
+                        Err(ResolveError::Item(e)) => {
+                            return Err(Error::ApiError(ApiError::NotFound(e.msg)))
+                        }
+                        Err(ResolveError::Fatal(e)) => return Err(e),
+                    };
+                let suite_id = suite.id;
+
+                // `authorize_suite` takes no lock, so this only names the state
+                // in the error; the `WHERE` below is what rejects a suite
+                // cancelled in the meantime.
+                if suite.state == TaskSuiteState::Cancelled {
+                    return Err(Error::ApiError(ApiError::InvalidRequest(format!(
+                        "Cannot change a {} suite",
+                        suite.state
+                    ))));
+                }
+
+                let mut change = TaskSuites::ActiveModel {
+                    updated_at: Set(now),
+                    ..Default::default()
+                };
+                if let Some(op) = req.name {
+                    change.name = Set(op.into_value());
+                }
+                if let Some(op) = req.description {
+                    change.description = Set(op.into_value());
+                }
+                if let Some(tags) = req.tags {
+                    change.tags = Set(Vec::from_iter(tags));
+                }
+                if let Some(labels) = req.labels {
+                    change.labels = Set(Vec::from_iter(labels));
+                }
+                if let Some(priority) = req.priority {
+                    change.priority = Set(priority);
+                }
+                if let Some(plan) = req.worker_schedule {
+                    change.worker_schedule = Set(serde_json::to_value(plan)?);
+                }
+                // The hooks are a patch onto what the suite already carries,
+                // and merging them in Rust would mean reading the row first —
+                // two statements, no lock between them, and two concurrent
+                // patches silently losing one edit. The column is written as an
+                // expression over its own current value instead, so the merge
+                // happens inside the `UPDATE` and there is nothing to read.
+                let hooks_expr = match req.exec_hooks {
+                    Some(update) => {
+                        // A NULL column merges as `{}`, so a first hook lands on
+                        // a suite that has none.
+                        let mut hooks = Expr::cust_with_expr(
+                            "coalesce($1, '{}'::jsonb)",
+                            Expr::col(TaskSuites::Column::ExecHooks),
+                        );
+                        for (key, op) in [
+                            ("provision", update.provision),
+                            ("cleanup", update.cleanup),
+                            ("background", update.background),
+                        ] {
+                            hooks = match op {
+                                // `||` replaces this one key and leaves the rest.
+                                // Each step parenthesises itself: `-` binds
+                                // tighter than `||`, so an unwrapped chain would
+                                // read as `x || (obj - 'cleanup')`.
+                                Some(UpdateOp::SetTo(spec)) => Expr::cust_with_exprs(
+                                    "($1 || jsonb_build_object($2::text, $3::jsonb))",
+                                    [
+                                        hooks,
+                                        Expr::val(key).into(),
+                                        Expr::val(serde_json::to_value(spec)?).into(),
+                                    ],
+                                ),
+                                Some(UpdateOp::SetNull) => Expr::cust_with_exprs(
+                                    "($1 - $2::text)",
+                                    [hooks, Expr::val(key).into()],
+                                ),
+                                None => hooks,
+                            };
+                        }
+                        // Every hook gone is no hooks at all — the shape `create`
+                        // stores, rather than an object of three nulls.
+                        Some(Expr::cust_with_expr("nullif($1, '{}'::jsonb)", hooks))
+                    }
+                    None => None,
+                };
+
+                // `exec_hooks` is not part of `change`, so it is assigned here
+                // rather than twice: two assignments to one column is an error.
+                let mut stmt = TaskSuites::Entity::update_many()
+                    .set(change)
+                    .filter(TaskSuites::Column::Id.eq(suite_id))
+                    .filter(TaskSuites::Column::State.ne(TaskSuiteState::Cancelled));
+                if let Some(expr) = hooks_expr {
+                    stmt = stmt.col_expr(TaskSuites::Column::ExecHooks, expr);
+                }
+                let changed = stmt.exec(txn).await?;
+                if changed.rows_affected == 0 {
+                    return Err(Error::ApiError(ApiError::InvalidRequest(format!(
+                        "Suite {suite_uuid} was cancelled"
+                    ))));
+                }
+                Ok(suite_id)
+            })
+        })
+        .await?;
+
+    // Eligibility and the pick order are read from the row on every query, so a
+    // change leaves nothing to rebuild — the agents it lets in just have to hear
+    // that the suite is there.
+    if needs_notify {
+        crate::service::agent::notify_suite_available(pool, suite_id).await;
+    }
+    Ok(())
+}
+
 pub async fn user_query_task_suites(
     user_id: i64,
     pool: &InfraPool,

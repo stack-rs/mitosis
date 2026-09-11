@@ -60,6 +60,7 @@ tracing-subscriber = { workspace = true }
 
 [features]
 debugging = ["netmito/debugging"]
+hotpath = ["netmito/hotpath"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]

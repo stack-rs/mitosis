@@ -92,6 +92,16 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
             .layer(middleware::from_fn(print_request_response));
     }
 
+    #[cfg(feature = "hotpath")]
+    {
+        router = router.layer(hotpath::AxumLayer::new());
+        tracing::info!(
+            "Hotpath live monitoring defaults to 127.0.0.1:6770; \
+            set HOTPATH_METRICS_PORT to change port \
+            or HOTPATH_METRICS_SERVER_OFF to disable it"
+        );
+    }
+
     router
 }
 

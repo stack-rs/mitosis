@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
-use crossfire::AsyncRx;
+use crossfire::{AsyncRx, Tx};
 use priority_queue::PriorityQueue;
-use tokio::sync::oneshot::Sender;
 use tokio_util::sync::CancellationToken;
 
 // MARK: TaskDispatcher
@@ -24,7 +23,7 @@ pub enum TaskDispatcherOp {
     BatchAddTask(Vec<i64>, i64, i32),
     BatchAddTasks(Vec<i64>, Vec<(i64, i32)>),
     RemoveTask(i64),
-    FetchTask(i64, Sender<Option<i64>>),
+    FetchTask(i64, Tx<Option<i64>>),
 }
 
 impl TaskDispatcher {

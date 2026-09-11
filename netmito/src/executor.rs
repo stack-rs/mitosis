@@ -26,7 +26,6 @@ use reqwest::header::CONTENT_LENGTH;
 use reqwest::{Client, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_tar::{Builder, Header};
 use tokio_util::sync::CancellationToken;
@@ -433,7 +432,7 @@ impl Executor {
             .await?;
 
         // Compress possible output and upload
-        let (tx, mut rx) = mpsc::channel::<(ArtifactContentType, u64)>(3);
+        let (tx, rx) = crossfire::mpmc::bounded_async::<(ArtifactContentType, u64)>(3);
         // Spawn a task to archive the output
         let timeout_cancel_token = CancellationToken::new();
         let archive_timeout_cancel_token = timeout_cancel_token.clone();
@@ -614,7 +613,7 @@ impl Executor {
             Ok(())
         });
         let upload_artifact_fut = async {
-            while let Some((content_type, content_length)) = rx.recv().await {
+            while let Ok((content_type, content_length)) = rx.recv().await {
                 let url = match self
                     .client
                     .request_upload(content_type, content_length)

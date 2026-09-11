@@ -15,9 +15,8 @@
 use std::collections::{HashMap, VecDeque};
 
 use axum::extract::ws::Message;
-use crossfire::{AsyncRx, MTx};
+use crossfire::{AsyncRx, MTx, Tx};
 use speedy::Writable;
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -47,13 +46,10 @@ pub enum RouterOp {
     PendingNotifications {
         uuid: Uuid,
         ack_by_id: u64,
-        tx: oneshot::Sender<Vec<WsNotificationEvent>>,
+        tx: Tx<Vec<WsNotificationEvent>>,
     },
     /// Read the agent's current sequence counter (`None` if unknown).
-    GetCounter {
-        uuid: Uuid,
-        tx: oneshot::Sender<Option<u64>>,
-    },
+    GetCounter { uuid: Uuid, tx: Tx<Option<u64>> },
 }
 
 /// One agent's notification state.
@@ -267,7 +263,8 @@ impl AgentWsRouter {
         uuid: Uuid,
         ack_by_id: u64,
     ) -> Vec<WsNotificationEvent> {
-        let (resp_tx, resp_rx) = oneshot::channel();
+        let (resp_tx, resp_rx) =
+            crossfire::spsc::bounded_tx_blocking_rx_async::<Vec<WsNotificationEvent>>(1);
         if tx
             .send(RouterOp::PendingNotifications {
                 uuid,
@@ -278,14 +275,14 @@ impl AgentWsRouter {
         {
             return Vec::new();
         }
-        resp_rx.await.unwrap_or_default()
+        resp_rx.recv().await.unwrap_or_default()
     }
 
     pub async fn counter(tx: &MTx<RouterOp>, uuid: Uuid) -> Option<u64> {
-        let (resp_tx, resp_rx) = oneshot::channel();
+        let (resp_tx, resp_rx) = crossfire::spsc::bounded_tx_blocking_rx_async::<Option<u64>>(1);
         if tx.send(RouterOp::GetCounter { uuid, tx: resp_tx }).is_err() {
             return None;
         }
-        resp_rx.await.ok().flatten()
+        resp_rx.recv().await.ok().flatten()
     }
 }

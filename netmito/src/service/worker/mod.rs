@@ -517,7 +517,7 @@ pub async fn fetch_task(
     pool: &InfraPool,
 ) -> crate::error::Result<Option<WorkerTaskResp>> {
     loop {
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = crossfire::spsc::bounded_tx_blocking_rx_async::<Option<i64>>(1);
         if pool
             .worker_task_queue_tx
             .send(TaskDispatcherOp::FetchTask(worker_id, tx))
@@ -526,6 +526,7 @@ pub async fn fetch_task(
             break Err(Error::Custom("send fetch task failed".to_string()));
         } else {
             match rx
+                .recv()
                 .await
                 .map_err(|e| Error::Custom(format!("recv fetch task failed: {e:?}")))?
             {

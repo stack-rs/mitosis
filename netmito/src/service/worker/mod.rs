@@ -6,7 +6,7 @@ use std::{
     str::FromStr,
 };
 
-pub use heartbeat::{HeartbeatOp, HeartbeatQueue};
+pub use heartbeat::{HeartbeatOp, WorkerHeartbeatQueue};
 pub use queue::{TaskDispatcher, TaskDispatcherOp};
 
 use sea_orm::{
@@ -630,19 +630,9 @@ pub async fn report_task(
             if user.state != UserState::Active {
                 return Err(AuthError::PermissionDenied.into());
             }
-            // Load group information to verify group name matches
-            let group = Group::Entity::find_by_id(task.group_id)
-                .one(&pool.db)
-                .await?
-                .ok_or(ApiError::NotFound("Group not found".to_string()))?;
-            if req.group_name != group.group_name {
-                return Err(ApiError::InvalidRequest(format!(
-                    "Group name mismatch: expected '{}', got '{}'",
-                    group.group_name, req.group_name
-                ))
-                .into());
-            }
-            // Verify worker has permission to access this group
+            // Verify worker has permission to access this group. The child's own
+            // group and suite are pinned to the parent's by the submit path,
+            // which also rejects a mismatched `req.group_name`.
             GroupWorker::Entity::find()
                 .filter(GroupWorker::Column::WorkerId.eq(worker_id))
                 .filter(GroupWorker::Column::GroupId.eq(task.group_id))
@@ -652,17 +642,22 @@ pub async fn report_task(
                 .ok_or(ApiError::AuthError(
                     crate::error::AuthError::PermissionDenied,
                 ))?;
-            let resp =
-                service::task::worker_submit_pending_task(pool, task.creator_id, task.uuid, req)
-                    .await
-                    .map_err(|e| match e {
-                        crate::error::Error::AuthError(err) => ApiError::AuthError(err),
-                        crate::error::Error::ApiError(e) => e,
-                        _ => {
-                            tracing::error!("{}", e);
-                            ApiError::InternalServerError
-                        }
-                    })?;
+            let resp = service::task::worker_submit_pending_task(
+                pool,
+                task.creator_id,
+                task.uuid,
+                task.group_id,
+                req,
+            )
+            .await
+            .map_err(|e| match e {
+                crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+                crate::error::Error::ApiError(e) => e,
+                _ => {
+                    tracing::error!("{}", e);
+                    ApiError::InternalServerError
+                }
+            })?;
             let task = ActiveTask::ActiveModel {
                 id: Set(task_id),
                 updated_at: Set(now),
@@ -706,10 +701,21 @@ pub async fn report_task(
                 assigned_task_id: Set(None),
                 ..Default::default()
             };
+            let suite_id = task.task_suite_id;
+            // The suite's counter goes down in the same transaction that
+            // archives the task. Split across two, a failure in between leaves
+            // `incomplete_tasks` permanently too high, and a suite that never
+            // reaches zero never completes. It goes down *first* so this takes
+            // the suite row before the task rows, the order every writer of the
+            // pair uses.
             let (worker_id, worker_state) = pool
                 .db
-                .transaction(|txn| {
+                .transaction::<_, (i64, WorkerState), Error>(|txn| {
                     Box::pin(async move {
+                        if let Some(suite_id) = suite_id {
+                            service::suite::decrement_incomplete_tasks(txn, suite_id, 1, now)
+                                .await?;
+                        }
                         archived_task.insert(txn).await?;
                         ActiveTask::Entity::delete_by_id(task_id).exec(txn).await?;
                         let worker = worker.update(txn).await?;

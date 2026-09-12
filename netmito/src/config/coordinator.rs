@@ -6,6 +6,7 @@ use aws_sdk_s3::{
     Client as S3Client,
 };
 use clap::Args;
+use crossfire::{AsyncRx, MTx};
 use figment::{
     providers::{Env, Format, Serialized, Toml},
     value::magic::RelativePathBuf,
@@ -17,14 +18,15 @@ use redis::{acl::Rule, AsyncCommands};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use time::Duration;
-#[cfg(not(feature = "crossfire-channel"))]
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use crate::{
     error::Error,
-    service::worker::{HeartbeatOp, HeartbeatQueue, TaskDispatcher, TaskDispatcherOp},
+    service::agent::heartbeat::{AgentHeartbeatOp, AgentHeartbeatQueue},
+    service::agent::queue::SuiteQueues,
+    service::worker::{HeartbeatOp, TaskDispatcher, TaskDispatcherOp, WorkerHeartbeatQueue},
+    ws::{AgentWsRouter, RouterOp},
 };
 
 use super::TracingGuard;
@@ -36,6 +38,16 @@ pub const DEFAULT_COORDINATOR_ADDR: SocketAddr =
 pub struct CoordinatorConfig {
     pub(crate) bind: SocketAddr,
     pub(crate) db_url: String,
+    /// Size of the database connection pool. Left unset, sea-orm falls through
+    /// to sqlx's default of 10, which is not enough: a request blocked on a
+    /// contended row holds its connection for the whole wait, so a handful of
+    /// concurrent writers to one group starve every other route of connections.
+    #[serde(default = "default_db_max_connections")]
+    pub(crate) db_max_connections: u32,
+    /// Connections kept open while idle, so a burst after a quiet spell does
+    /// not pay to reconnect.
+    #[serde(default = "default_db_min_connections")]
+    pub(crate) db_min_connections: u32,
     pub(crate) s3_url: String,
     pub(crate) s3_access_key: String,
     pub(crate) s3_secret_key: String,
@@ -60,8 +72,47 @@ pub struct CoordinatorConfig {
     pub(crate) access_token_expires_in: std::time::Duration,
     #[serde(with = "humantime_serde")]
     pub(crate) heartbeat_timeout: std::time::Duration,
+    /// How often to send a WebSocket keepalive to a connected agent, so idle
+    /// notification sockets are not culled by intermediate proxies.
+    #[serde(with = "humantime_serde", default = "default_ws_keepalive_interval")]
+    pub(crate) ws_keepalive_interval: std::time::Duration,
+    /// How long a suite may go without a new task before the coordinator sweeps
+    /// it out of `Open`. It is also how long an agent holds a drained job open
+    /// waiting for more work, so raising it trades idle machine time for fewer
+    /// provision hooks.
+    #[serde(with = "humantime_serde", default = "default_suite_auto_close_timeout")]
+    pub(crate) suite_auto_close_timeout: std::time::Duration,
+    /// How often the coordinator checks its in-memory suite queues against the
+    /// database and drops what is not claimable after all. Two passes have to
+    /// miss a task before it goes, so this is half the time a rolled-back
+    /// transaction can leave one inflating a suite's backlog.
+    #[serde(
+        with = "humantime_serde",
+        default = "default_suite_queue_reconcile_interval"
+    )]
+    pub(crate) suite_queue_reconcile_interval: std::time::Duration,
     pub(crate) log_path: Option<RelativePathBuf>,
     pub(crate) file_log: bool,
+}
+
+fn default_db_max_connections() -> u32 {
+    32
+}
+
+fn default_db_min_connections() -> u32 {
+    8
+}
+
+fn default_ws_keepalive_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(30)
+}
+
+fn default_suite_auto_close_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(120)
+}
+
+fn default_suite_queue_reconcile_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(60)
 }
 
 fn default_mitosis_region() -> String {
@@ -91,6 +142,14 @@ pub struct CoordinatorConfigCli {
     #[arg(long = "db")]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub db_url: Option<String>,
+    /// The size of the database connection pool, default to 32
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub db_max_connections: Option<u32>,
+    /// The number of database connections kept open while idle, default to 8
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub db_min_connections: Option<u32>,
     /// The S3 URL
     #[arg(long = "s3")]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -149,6 +208,20 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub heartbeat_timeout: Option<String>,
+    /// The agent WebSocket keepalive interval, default to 30 seconds
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub ws_keepalive_interval: Option<String>,
+    /// How long a suite may go without a new task before it is swept out of
+    /// Open, and how long an agent holds a drained job. Default 60 seconds
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub suite_auto_close_timeout: Option<String>,
+    /// How often the in-memory suite queues are checked against the database,
+    /// default to 60 seconds
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub suite_queue_reconcile_interval: Option<String>,
     /// The log file path. If not specified, then the default rolling log file path would be used.
     /// If specified, then the log file would be exactly at the path specified.
     #[arg(long)]
@@ -173,6 +246,8 @@ impl Default for CoordinatorConfig {
         Self {
             bind: DEFAULT_COORDINATOR_ADDR,
             db_url: "postgres://mitosis:mitosis@localhost/mitosis".to_string(),
+            db_max_connections: default_db_max_connections(),
+            db_min_connections: default_db_min_connections(),
             redis_url: None,
             redis_worker_password: None,
             redis_client_password: None,
@@ -190,6 +265,9 @@ impl Default for CoordinatorConfig {
             access_token_public_path: "public.pem".to_string().into(),
             access_token_expires_in: std::time::Duration::from_secs(60 * 60 * 24 * 7),
             heartbeat_timeout: std::time::Duration::from_secs(600),
+            ws_keepalive_interval: default_ws_keepalive_interval(),
+            suite_auto_close_timeout: default_suite_auto_close_timeout(),
+            suite_queue_reconcile_interval: default_suite_queue_reconcile_interval(),
             log_path: None,
             file_log: false,
         }
@@ -220,8 +298,7 @@ impl CoordinatorConfig {
     pub fn build_worker_task_queue(
         &self,
         cancel_token: CancellationToken,
-        #[cfg(not(feature = "crossfire-channel"))] rx: UnboundedReceiver<TaskDispatcherOp>,
-        #[cfg(feature = "crossfire-channel")] rx: crossfire::AsyncRx<TaskDispatcherOp>,
+        rx: AsyncRx<TaskDispatcherOp>,
     ) -> TaskDispatcher {
         TaskDispatcher::new(cancel_token, rx)
     }
@@ -230,10 +307,26 @@ impl CoordinatorConfig {
         &self,
         cancel_token: CancellationToken,
         pool: InfraPool,
-        #[cfg(not(feature = "crossfire-channel"))] rx: UnboundedReceiver<HeartbeatOp>,
-        #[cfg(feature = "crossfire-channel")] rx: crossfire::AsyncRx<HeartbeatOp>,
-    ) -> HeartbeatQueue {
-        HeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
+        rx: AsyncRx<HeartbeatOp>,
+    ) -> WorkerHeartbeatQueue {
+        WorkerHeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
+    }
+
+    pub fn build_agent_heartbeat_queue(
+        &self,
+        cancel_token: CancellationToken,
+        pool: InfraPool,
+        rx: AsyncRx<AgentHeartbeatOp>,
+    ) -> AgentHeartbeatQueue {
+        AgentHeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
+    }
+
+    pub fn build_ws_router(
+        &self,
+        cancel_token: CancellationToken,
+        rx: AsyncRx<RouterOp>,
+    ) -> AgentWsRouter {
+        AgentWsRouter::new(cancel_token, rx)
     }
 
     pub async fn build_redis_connection_info(
@@ -298,20 +391,16 @@ impl CoordinatorConfig {
 
     pub async fn build_infra_pool(
         &self,
-        #[cfg(not(feature = "crossfire-channel"))] worker_task_queue_tx: UnboundedSender<
-            TaskDispatcherOp,
-        >,
-        #[cfg(feature = "crossfire-channel")] worker_task_queue_tx: crossfire::MTx<
-            TaskDispatcherOp,
-        >,
-        #[cfg(not(feature = "crossfire-channel"))] worker_heartbeat_queue_tx: UnboundedSender<
-            HeartbeatOp,
-        >,
-        #[cfg(feature = "crossfire-channel")] worker_heartbeat_queue_tx: crossfire::MTx<
-            HeartbeatOp,
-        >,
+        worker_task_queue_tx: MTx<TaskDispatcherOp>,
+        worker_heartbeat_queue_tx: MTx<HeartbeatOp>,
+        agent_heartbeat_queue_tx: MTx<AgentHeartbeatOp>,
+        ws_router_tx: MTx<RouterOp>,
     ) -> crate::error::Result<InfraPool> {
-        let db = sea_orm::Database::connect(&self.db_url).await?;
+        let mut db_opt = sea_orm::ConnectOptions::new(self.db_url.clone());
+        db_opt
+            .max_connections(self.db_max_connections)
+            .min_connections(self.db_min_connections);
+        let db = sea_orm::Database::connect(db_opt).await?;
         let credential = Credentials::new(
             &self.s3_access_key,
             &self.s3_secret_key,
@@ -333,6 +422,11 @@ impl CoordinatorConfig {
             attachments_bucket: self.attachments_bucket.clone(),
             worker_task_queue_tx,
             worker_heartbeat_queue_tx,
+            agent_heartbeat_queue_tx,
+            ws_router_tx,
+            suite_queues: SuiteQueues::new(),
+            boot_uuid: uuid::Uuid::new_v4(),
+            ws_keepalive_interval: self.ws_keepalive_interval,
         })
     }
 
@@ -366,7 +460,7 @@ impl CoordinatorConfig {
     }
 
     pub fn setup_tracing_subscriber(&self) -> crate::error::Result<TracingGuard> {
-        if self.file_log {
+        let (file_layer, file_guard) = if self.file_log {
             let file_logger = self
                 .log_path
                 .as_ref()
@@ -398,37 +492,48 @@ impl CoordinatorConfig {
             let (non_blocking, guard) = tracing_appender::non_blocking(file_logger);
             let env_filter = tracing_subscriber::EnvFilter::try_from_env("MITO_FILE_LOG_LEVEL")
                 .unwrap_or_else(|_| "netmito=info".into());
-            let coordinator_guard = tracing_subscriber::registry()
-                .with(
-                    tracing_subscriber::fmt::layer().with_filter(
-                        tracing_subscriber::EnvFilter::try_from_default_env()
-                            .unwrap_or_else(|_| "netmito=info".into()),
-                    ),
-                )
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .with_writer(non_blocking)
-                        .with_filter(env_filter),
-                )
-                .set_default();
-            Ok(TracingGuard {
-                subscriber_guard: Some(coordinator_guard),
-                file_guard: Some(guard),
-            })
+            let layer = tracing_subscriber::fmt::layer()
+                .with_file(true)
+                .with_line_number(true)
+                .with_writer(non_blocking)
+                .with_filter(env_filter);
+            (Some(layer), Some(guard))
         } else {
-            let coordinator_guard = tracing_subscriber::registry()
-                .with(
-                    tracing_subscriber::fmt::layer().with_filter(
+            (None, None)
+        };
+
+        let registry = tracing_subscriber::registry();
+
+        #[cfg(feature = "hotpath")]
+        let registry = registry.with(hotpath::sqlx_tracing_layer());
+
+        registry
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_file(true)
+                    .with_line_number(true)
+                    .with_filter(
                         tracing_subscriber::EnvFilter::try_from_default_env()
                             .unwrap_or_else(|_| "netmito=info".into()),
                     ),
-                )
-                .set_default();
-            Ok(TracingGuard {
-                subscriber_guard: Some(coordinator_guard),
-                file_guard: None,
-            })
-        }
+            )
+            .with(file_layer)
+            // Temporary workaround for tokio-rs/tracing#2519; drop this layer
+            // once its fix (PR #3572) is released.
+            //
+            // A `with_filter` per-layer filter records its verdict in
+            // thread-local state that only a dispatched event clears. sqlx asks
+            // the log bridge whether `sqlx::query` is on, is wrongly told yes,
+            // then emits through a `tracing` macro whose callsite the filter has
+            // already short-circuited — so the verdict is never cleared and
+            // swallows our next log line instead. Every query does this, so
+            // under load all of our log get rejected. `Identity` is
+            // unfiltered, which keeps rejected callsites at `sometimes` interest
+            // so they reach the subscriber and clear the verdict on their way
+            // out.
+            .with(tracing_subscriber::layer::Identity::new())
+            .init();
+        Ok(TracingGuard { file_guard })
     }
 }
 
@@ -438,14 +543,17 @@ pub struct InfraPool {
     pub s3: S3Client,
     pub artifacts_bucket: String,
     pub attachments_bucket: String,
-    #[cfg(not(feature = "crossfire-channel"))]
-    pub worker_task_queue_tx: UnboundedSender<TaskDispatcherOp>,
-    #[cfg(feature = "crossfire-channel")]
-    pub worker_task_queue_tx: crossfire::MTx<TaskDispatcherOp>,
-    #[cfg(not(feature = "crossfire-channel"))]
-    pub worker_heartbeat_queue_tx: UnboundedSender<HeartbeatOp>,
-    #[cfg(feature = "crossfire-channel")]
-    pub worker_heartbeat_queue_tx: crossfire::MTx<HeartbeatOp>,
+    pub worker_task_queue_tx: MTx<TaskDispatcherOp>,
+    pub worker_heartbeat_queue_tx: MTx<HeartbeatOp>,
+    pub agent_heartbeat_queue_tx: MTx<AgentHeartbeatOp>,
+    pub ws_router_tx: MTx<RouterOp>,
+    /// Dispatch state for the suites that have a job running right now.
+    pub suite_queues: SuiteQueues,
+    /// Identifies this coordinator process. Agents compare it against the
+    /// `boot_id` in a `CounterSync` to notice a restart and reset the
+    /// notification sequence they are tracking.
+    pub boot_uuid: uuid::Uuid,
+    pub ws_keepalive_interval: std::time::Duration,
 }
 
 #[derive(Debug)]

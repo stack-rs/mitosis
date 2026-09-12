@@ -40,20 +40,32 @@ where
                 match (user, group) {
                     (None, None) => {
                         let now = TimeDateTimeWithTimeZone::now_utc();
-                        let creator = User::Entity::find_by_id(user_id)
-                            .one(txn)
-                            .await?
-                            .ok_or::<Error>(ApiError::InternalServerError.into())?;
-                        if creator.group_count >= creator.group_quota {
+                        // The quota check lives in the `WHERE`, so it is decided
+                        // on the row this statement locks. Read the count, test
+                        // it in Rust and write it back, and two concurrent
+                        // creations both pass at the limit and both write
+                        // `count + 1` over the same value — the user ends up past
+                        // quota with the counter understating it.
+                        let bumped = User::Entity::update_many()
+                            .col_expr(
+                                User::Column::GroupCount,
+                                Expr::col(User::Column::GroupCount).add(1),
+                            )
+                            .col_expr(User::Column::UpdatedAt, Expr::value(now))
+                            .filter(User::Column::Id.eq(user_id))
+                            .filter(
+                                Expr::col(User::Column::GroupCount)
+                                    .lt(Expr::col(User::Column::GroupQuota)),
+                            )
+                            .exec(txn)
+                            .await?;
+                        if bumped.rows_affected == 0 {
+                            // Over quota, or no such user — only the first is
+                            // reachable for an authenticated caller.
+                            if User::Entity::find_by_id(user_id).count(txn).await? == 0 {
+                                return Err(ApiError::InternalServerError.into());
+                            }
                             return Err(ApiError::QuotaExceeded.into());
-                        } else {
-                            let creator = User::ActiveModel {
-                                id: Set(creator.id),
-                                group_count: Set(creator.group_count + 1),
-                                updated_at: Set(now),
-                                ..Default::default()
-                            };
-                            creator.update(txn).await?;
                         }
                         let group = Group::ActiveModel {
                             group_name: Set(group_name),

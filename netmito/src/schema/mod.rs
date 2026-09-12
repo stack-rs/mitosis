@@ -1,3 +1,4 @@
+mod agent;
 mod artifact;
 mod attachment;
 mod exec;
@@ -7,6 +8,7 @@ mod task;
 mod user;
 mod worker;
 
+pub use agent::*;
 pub use artifact::*;
 pub use attachment::*;
 pub use exec::*;

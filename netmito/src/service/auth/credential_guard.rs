@@ -44,9 +44,9 @@ impl CredentialGuard {
     /// If the file isn't fully read/write-able, we warn it, but we will still record user's token
     /// in-memory in self.active_credential.
     ///
-    /// Upon new(), we will immediately try to parse the file and try to load the credential into
-    /// self.active_credential. If the credential is not found, the active_credential just stays
-    /// `None`.
+    /// Nothing is read from the file yet: a credential is stored per user, and the user is not
+    /// known until [`load_credential`](Self::load_credential) names one. That call is what fills
+    /// `self.credential`, and it stays `None` until then.
     pub(crate) async fn new(credential_path: Option<PathBuf>, coordinator_url: &Url) -> Self {
         let credential_path = credential_path.or_else(|| {
             dirs::config_dir().map(|mut path| {
@@ -56,16 +56,12 @@ impl CredentialGuard {
             })
         });
 
-        let mut credential_guard = Self {
+        Self {
             credential_path,
             origin: normalize_origin(coordinator_url),
             username: None,
             credential: None,
-        };
-
-        credential_guard.credential = credential_guard.load_credential_file().await;
-
-        credential_guard
+        }
     }
 
     /// The caller wants to access the credential for current username

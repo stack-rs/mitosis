@@ -470,7 +470,12 @@ impl CoordinatorConfig {
             (None, None)
         };
 
-        tracing_subscriber::registry()
+        let registry = tracing_subscriber::registry();
+
+        #[cfg(feature = "hotpath")]
+        let registry = registry.with(hotpath::sqlx_tracing_layer());
+
+        registry
             .with(
                 tracing_subscriber::fmt::layer()
                     .with_file(true)

@@ -38,6 +38,16 @@ pub const DEFAULT_COORDINATOR_ADDR: SocketAddr =
 pub struct CoordinatorConfig {
     pub(crate) bind: SocketAddr,
     pub(crate) db_url: String,
+    /// Size of the database connection pool. Left unset, sea-orm falls through
+    /// to sqlx's default of 10, which is not enough: a request blocked on a
+    /// contended row holds its connection for the whole wait, so a handful of
+    /// concurrent writers to one group starve every other route of connections.
+    #[serde(default = "default_db_max_connections")]
+    pub(crate) db_max_connections: u32,
+    /// Connections kept open while idle, so a burst after a quiet spell does
+    /// not pay to reconnect.
+    #[serde(default = "default_db_min_connections")]
+    pub(crate) db_min_connections: u32,
     pub(crate) s3_url: String,
     pub(crate) s3_access_key: String,
     pub(crate) s3_secret_key: String,
@@ -85,6 +95,14 @@ pub struct CoordinatorConfig {
     pub(crate) file_log: bool,
 }
 
+fn default_db_max_connections() -> u32 {
+    32
+}
+
+fn default_db_min_connections() -> u32 {
+    8
+}
+
 fn default_ws_keepalive_interval() -> std::time::Duration {
     std::time::Duration::from_secs(30)
 }
@@ -124,6 +142,14 @@ pub struct CoordinatorConfigCli {
     #[arg(long = "db")]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub db_url: Option<String>,
+    /// The size of the database connection pool, default to 32
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub db_max_connections: Option<u32>,
+    /// The number of database connections kept open while idle, default to 8
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub db_min_connections: Option<u32>,
     /// The S3 URL
     #[arg(long = "s3")]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -220,6 +246,8 @@ impl Default for CoordinatorConfig {
         Self {
             bind: DEFAULT_COORDINATOR_ADDR,
             db_url: "postgres://mitosis:mitosis@localhost/mitosis".to_string(),
+            db_max_connections: default_db_max_connections(),
+            db_min_connections: default_db_min_connections(),
             redis_url: None,
             redis_worker_password: None,
             redis_client_password: None,
@@ -368,7 +396,11 @@ impl CoordinatorConfig {
         agent_heartbeat_queue_tx: MTx<AgentHeartbeatOp>,
         ws_router_tx: MTx<RouterOp>,
     ) -> crate::error::Result<InfraPool> {
-        let db = sea_orm::Database::connect(&self.db_url).await?;
+        let mut db_opt = sea_orm::ConnectOptions::new(self.db_url.clone());
+        db_opt
+            .max_connections(self.db_max_connections)
+            .min_connections(self.db_min_connections);
+        let db = sea_orm::Database::connect(db_opt).await?;
         let credential = Credentials::new(
             &self.s3_access_key,
             &self.s3_secret_key,

@@ -666,6 +666,16 @@ pub async fn user_query_task_suites(
             }
         }
     }
+    if !query.count {
+        stmt.order_by_expr(
+            Expr::col((TaskSuites::Entity, TaskSuites::Column::Priority)).into(),
+            sea_orm::Order::Desc,
+        )
+        .order_by_expr(
+            Expr::col((TaskSuites::Entity, TaskSuites::Column::CreatedAt)).into(),
+            sea_orm::Order::Asc,
+        );
+    }
     if let Some(limit) = query.limit {
         stmt.limit(limit);
     }

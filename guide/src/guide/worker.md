@@ -26,7 +26,7 @@ All configuration options are optional and have default values.
 The Worker will merge the configuration from the file and the command-line arguments according to the following order (the latter overrides the former):
 
 ```md
-DEFAULT <- `$CONFIG_DIR`/mitosis/config.toml <- config file specified by `cli.config` or local `config.toml` <- env prefixed by `MITO_` <- cli arguments
+DEFAULT <- `$CONFIG_DIR`/mitosis/config.toml <- config file specified by the root-level `--config` option or local `config.toml` <- env prefixed by `MITO_` <- cli arguments
 
 `$CONFIG_DIR` will be different on different platforms:
 
@@ -62,7 +62,7 @@ file_log = false
 To start a Worker, run the following command:
 
 ```bash
-mito worker --config /path/to/worker.toml
+mito --config /path/to/worker.toml worker
 ```
 
 The Worker will start and fetch tasks from the Coordinator at the specified interval.
@@ -72,7 +72,7 @@ Note that the names of command-line arguments may not be the same as those in th
 For example, to change the polling interval, you can run:
 
 ```bash
-mito worker --config /path/to/worker.toml --polling-interval 5m
+mito --config /path/to/worker.toml worker --polling-interval 5m
 ```
 
 You can also specify the groups and their roles to this Worker using the `--groups` argument.
@@ -81,7 +81,7 @@ Groups have `Read` roles can query the Worker for its status and tasks.
 Groups have `Admin` roles can manage the Worker, such as stopping it or changing its configuration.
 
 ```bash
-mito worker --config /path/to/worker.toml --groups group1,group2:write,group3:read,group4:admin
+mito --config /path/to/worker.toml worker --groups group1,group2:write,group3:read,group4:admin
 ```
 
 This will grant group1 and group2 `Write` roles, group3 `Read` role, and group4 `Admin` role to the Worker.
@@ -100,10 +100,10 @@ Run a mitosis worker
 Usage: mito worker [OPTIONS]
 
 Options:
-      --config <CONFIG>
-          The path of the config file
   -c, --coordinator <COORDINATOR_ADDR>
           The address of the coordinator
+      --config <CONFIG>
+          The path of the config file
       --polling-interval <POLLING_INTERVAL>
           The interval to poll tasks or resources
       --heartbeat-interval <HEARTBEAT_INTERVAL>

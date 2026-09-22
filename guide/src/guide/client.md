@@ -13,13 +13,19 @@ But it can be useful if you want to set some default values for the client.
 The Client will merge the configuration from the file and the command-line arguments according to the following order (the latter overrides the former):
 
 ```md
-DEFAULT <- `$CONFIG_DIR`/mitosis/config.toml <- config file specified by `cli.config` or loal `config.toml` <- env prefixed by `MITO_` <- cli arguments
+DEFAULT <- `$CONFIG_DIR`/mitosis/config.toml <- config file specified by the root-level `--config` option or loal `config.toml` <- env prefixed by `MITO_` <- cli arguments
 
 `$CONFIG_DIR` will be different on different platforms:
 
 - Linux: `$XDG_CONFIG_HOME` or `$HOME`/.config
 - macOS: `$HOME`/Library/Application Support
 - Windows: {FOLDERID_RoamingAppData}
+```
+
+A custom configuration file can be specified with the global `--config` option either before or after the `client` subcommand:
+
+```bash
+mito --config /path/to/client.toml client -i
 ```
 
 Typically, to start a Client, we can simply run the following command to enter interactive mode:
@@ -74,10 +80,10 @@ Commands:
   help        Print this message or the help of the given subcommand(s)
 
 Options:
-      --config <CONFIG>
-          The path of the config file
   -c, --coordinator <COORDINATOR_ADDR>
           The address of the coordinator
+      --config <CONFIG>
+          The path of the config file
       --credential-path <CREDENTIAL_PATH>
           The path of the user credential file
   -u, --user <USER>

@@ -1,14 +1,45 @@
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
-use std::env;
-use std::process::Command;
+use std::{env, path::Path, process::Command};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::{manager::ManagerCommand, ManagerConfigCli, WorkerConfigCli};
 use crate::error;
 
+const WORKER_PROCESS_PATTERN: &str = r"mito( --config(=[^ ]+| [^ ]+))? worker( |$)";
+
 pub struct MitoManager;
 
 impl MitoManager {
+    fn is_worker_process(line: &str) -> bool {
+        // `ps aux` has ten columns before the command and its arguments.
+        let mut args = line.split_whitespace().skip(10);
+        let Some(command) = args.next() else {
+            return false;
+        };
+
+        if Path::new(command)
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some("mito")
+        {
+            return false;
+        }
+
+        while let Some(arg) = args.next() {
+            match arg {
+                "--config" => {
+                    let _ = args.next();
+                }
+                "worker" => return true,
+                "coordinator" | "agent" | "client" | "manager" => return false,
+                _ if arg.starts_with("--config=") => {}
+                _ => {}
+            }
+        }
+
+        false
+    }
+
     pub async fn main(cli: ManagerConfigCli) {
         tracing_subscriber::registry()
             .with(
@@ -59,7 +90,7 @@ impl MitoManager {
         let mut worker_lines = Vec::new();
 
         for line in ps_output.lines() {
-            if line.contains("mito worker") && !line.contains("grep") && !line.contains("ps -aux") {
+            if Self::is_worker_process(line) {
                 worker_lines.push(line);
             }
         }
@@ -169,7 +200,7 @@ impl MitoManager {
         // Check current worker count by counting processes
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await; // Give processes time to start
         let output = Command::new("pgrep")
-            .args(["-f", "-c", "mito worker"])
+            .args(["-f", "-c", WORKER_PROCESS_PATTERN])
             .output()
             .map_err(|e| error::Error::Custom(format!("Failed to run pgrep: {}", e)))?;
 
@@ -186,7 +217,7 @@ impl MitoManager {
 
     pub async fn kill_workers() -> crate::error::Result<()> {
         let output = Command::new("pkill")
-            .args(["-f", "mito worker"])
+            .args(["-f", WORKER_PROCESS_PATTERN])
             .output()
             .map_err(|e| error::Error::Custom(format!("Failed to run pkill: {}", e)))?;
 

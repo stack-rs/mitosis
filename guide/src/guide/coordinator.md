@@ -46,7 +46,7 @@ All configuration options are optional and have default values.
 The Coordinator will merge the configuration from the file and the command-line arguments according to the following order (the latter overrides the former):
 
 ```md
-DEFAULT <- `$CONFIG_DIR`/mitosis/config.toml <- config file specified by `cli.config` or loal `config.toml` <- env prefixed by `MITO_` <- cli arguments
+DEFAULT <- `$CONFIG_DIR`/mitosis/config.toml <- config file specified by the root-level `--config` option or loal `config.toml` <- env prefixed by `MITO_` <- cli arguments
 
 `$CONFIG_DIR` will be different on different platforms:
 
@@ -90,7 +90,7 @@ file_log = false
 To start a Coordinator, run the following command:
 
 ```bash
-mito coordinator --config /path/to/coordinator.toml
+mito --config /path/to/coordinator.toml coordinator
 ```
 
 The Coordinator will start and listen for incoming requests on the specified address.
@@ -100,7 +100,7 @@ Note that the names of command-line arguments may not be the same as those in th
 For example, to change the address the Coordinator binds to, you can run:
 
 ```bash
-mito coordinator --config /path/to/coordinator.toml --bind 0.0.0.0:8000
+mito --config /path/to/coordinator.toml coordinator --bind 0.0.0.0:8000
 ```
 
 The full list of command-line arguments can be found by running `mito coordinator --help`:

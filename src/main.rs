@@ -4,7 +4,8 @@ use netmito::{
     agent::MitoAgent,
     client::MitoClient,
     config::{
-        AgentConfigCli, ClientConfigCli, CoordinatorConfigCli, ManagerConfigCli, WorkerConfigCli,
+        manager::ManagerCommand, AgentConfigCli, ClientConfigCli, CoordinatorConfigCli,
+        ManagerConfigCli, WorkerConfigCli,
     },
     coordinator::MitoCoordinator,
     manager::MitoManager,
@@ -19,6 +20,9 @@ shadow!(build);
 #[command(version, about, long_about = None, long_version = CLAP_LONG_VERSION)]
 #[command(propagate_version = true)]
 struct Arguments {
+    /// The path of the config file
+    #[arg(long, global = true)]
+    config: Option<String>,
     #[command(subcommand)]
     mode: Mode,
 }
@@ -37,9 +41,28 @@ enum Mode {
     Manager(ManagerConfigCli),
 }
 
+impl Mode {
+    /// Forward the root config path to the selected runtime mode.
+    fn apply_config(&mut self, config: Option<String>) {
+        match self {
+            Self::Coordinator(cli) => cli.config = config,
+            Self::Worker(cli) => cli.config = config,
+            Self::Agent(cli) => cli.config = config,
+            Self::Client(cli) => cli.config = config,
+            Self::Manager(cli) => {
+                if let ManagerCommand::Spawn { worker_config, .. } = &mut cli.command {
+                    worker_config.config = config;
+                }
+            }
+        }
+    }
+}
+
 fn main() {
-    let args = Arguments::parse();
-    match args.mode {
+    let Arguments { config, mut mode } = Arguments::parse();
+    mode.apply_config(config);
+
+    match mode {
         Mode::Coordinator(coordinator_cli) => {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()

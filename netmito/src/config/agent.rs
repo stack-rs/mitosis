@@ -58,8 +58,8 @@ pub struct AgentConfig {
 #[derive(Args, Debug, Serialize, Default, Clone)]
 #[command(rename_all = "kebab-case")]
 pub struct AgentConfigCli {
-    /// The path of the config file
-    #[arg(long)]
+    /// The path of the config file, injected from the root CLI option.
+    #[arg(skip)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub config: Option<String>,
     /// The address of the coordinator

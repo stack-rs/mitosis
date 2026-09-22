@@ -22,7 +22,7 @@ mito manager status
 
 This command:
 
-- Lists all currently running `mito worker` processes
+- Lists all currently running worker processes, including those started with the root-level `--config` option
 - Shows detailed process information (PID, CPU usage, memory, etc.)
 - Displays the total count of active workers
 
@@ -31,17 +31,21 @@ This command:
 Launch multiple worker processes:
 
 ```bash
-mito manager spawn <count> [worker-options]
+mito [--config <CONFIG>] manager spawn <count> [worker-options]
 ```
 
 - `count`: Number of workers to spawn (must be greater than 0)
 - `worker-options` All available worker options can be passed to the spawn command.
+- `--config`: Optional global configuration file shared by all spawned workers. It can be specified at any subcommand level.
 
 **Example:**
 
 ```bash
 # Spawn 5 workers with default configuration
 mito manager spawn 5
+
+# Spawn 5 workers with a custom configuration file
+mito --config /path/to/worker.toml manager spawn 5
 
 # Spawn 3 workers with custom coordinator and tags
 mito manager spawn 3 --coordinator "127.0.0.1:5000" --tags "gpu,cuda"
@@ -67,7 +71,7 @@ mito manager kill
 
 This command:
 
-- Finds all processes matching `mito worker`
+- Finds all worker processes, including those started with the root-level `--config` option
 - Terminates them using `pkill`
 - Confirms successful termination or reports if no workers were found
 
@@ -118,6 +122,6 @@ mito manager kill
 **Workers not terminating:**
 
 - Check for zombie processes: `ps -aux | grep mito`
-- Force kill if necessary: `sudo pkill -9 -f "mito worker"`
+- Force kill if necessary: `sudo pkill -9 -f 'mito( --config(=[^ ]+| [^ ]+))? worker( |$)'`
 - Restart the manager if processes are stuck
 

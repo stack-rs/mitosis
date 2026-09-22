@@ -134,8 +134,8 @@ pub struct CoordinatorConfigCli {
     #[arg(short, long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub bind: Option<String>,
-    /// The path of the config file
-    #[arg(long)]
+    /// The path of the config file, injected from the root CLI option.
+    #[arg(skip)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub config: Option<String>,
     /// The database URL

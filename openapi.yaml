@@ -1959,7 +1959,7 @@ paths:
         whatever ranks highest now — possibly this same suite, which re-provisions
         it. To keep an agent off a suite, exclude it via the agent-override
         endpoint instead. Requires the Write role in the suite's group. This is
-        the same operation as `POST /agents/{uuid}/job/stop`, addressed by job
+        the same operation as `DELETE /agents/{uuid}/job`, addressed by job
         number and authorized through the suite rather than the agent.
       operationId: stopSuiteJob
       tags:
@@ -2141,8 +2141,8 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
-  /agents/{uuid}/job/stop:
-    post:
+  /agents/{uuid}/job:
+    delete:
       summary: Stop the job an agent is running
       description: >-
         End the agent's current job without stopping the agent: it winds the job
@@ -2332,27 +2332,34 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
-  /agents/tasks/fetch:
-    post:
+  /agents/tasks:
+    get:
       summary: Claim tasks from a suite
       description: >-
         Atomically claim a batch of the suite's ready tasks, highest priority
-        first, moving them to Running under this agent. The coordinator sizes
-        the batch from the suite's schedule and what this agent already holds —
-        an agent that asks is an agent with room, and it takes what it is given.
+        first, moving them to Running under this agent. The batch size is not
+        the agent's to ask for: the coordinator knows the suite's schedule and
+        what this agent already holds, and sizes the batch itself — an agent
+        that asks is an agent with room, and it takes what it is given.
         Concurrent agents never claim the same task. An empty list means nothing
-        is ready right now, not that the suite is finished.
+        is ready right now, not that the suite is finished. A suite that will
+        hand out no more tasks answers 400, which tells the agent to stop
+        claiming — it keeps the job so its cleanup hook still runs. A suite that
+        does not exist, or that this agent is not eligible for, answers 404;
+        the two are deliberately indistinguishable.
       operationId: agentFetchTasks
       tags:
         - Agents
       security:
         - agentAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/FetchTasksReq"
+      parameters:
+        - name: suite_uuid
+          in: query
+          required: true
+          description: The suite to claim from
+          schema:
+            type: string
+            format: uuid
       responses:
         "200":
           description: The claimed tasks
@@ -2360,14 +2367,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/FetchTasksResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
-        "409":
-          $ref: "#/components/responses/Conflict"
 
-  /agents/tasks/report:
     post:
       summary: Report a task result
       description: >-
@@ -2376,7 +2382,7 @@ paths:
         `Commit` (archives the task and ticks the suite's counter), and `Submit`
         (spawns a downstream child in the parent's group, in whichever suite the
         request names — the parent's own, a sibling, or none). A terminal job
-        answers 409 and a task that no longer exists answers 404; both tell the
+        answers 400 and a task that no longer exists answers 404; both tell the
         agent to stop reporting on it.
       operationId: agentReportTask
       tags:
@@ -2404,8 +2410,6 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
-        "409":
-          $ref: "#/components/responses/Conflict"
 
   /agents/tasks/{uuid}:
     get:
@@ -6113,19 +6117,6 @@ components:
         url:
           type: string
           description: Presigned upload URL, for the Upload operation
-
-    FetchTasksReq:
-      type: object
-      required:
-        - suite_uuid
-      properties:
-        suite_uuid:
-          type: string
-          format: uuid
-      description: >-
-        The batch size is not the agent's to ask for: the coordinator knows the
-        suite's schedule and what this agent already holds, and sizes the batch
-        itself.
 
     FetchTasksResp:
       type: object

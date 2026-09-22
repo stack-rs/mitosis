@@ -8,7 +8,7 @@
 //! | impl | lives in | reports to |
 //! |---|---|---|
 //! | `WorkerTaskClient` | `worker.rs` | `POST /workers/tasks` |
-//! | `AgentTaskClient` | `agent.rs` | `POST /agents/tasks/report` |
+//! | `AgentTaskClient` | `agent.rs` | `POST /agents/tasks` |
 //! | `AgentHookClient` | `agent.rs` | `POST /agents/job/hook` |
 
 #[cfg(unix)]

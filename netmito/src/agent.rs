@@ -1369,9 +1369,9 @@ impl SuiteRunner {
     async fn fetch_tasks(&self, suite_uuid: Uuid) -> Result<FetchTasksResp> {
         let resp = self
             .http_client
-            .post(self.api_url("agents/tasks/fetch").as_str())
+            .get(self.api_url("agents/tasks").as_str())
             .bearer_auth(&self.token)
-            .json(&FetchTasksReq { suite_uuid })
+            .query(&FetchTasksReq { suite_uuid })
             .send()
             .await
             .map_err(error::map_reqwest_err)?;
@@ -1537,7 +1537,7 @@ impl AgentConnection {
 }
 
 /// A task the agent runs on a suite's behalf. Same protocol as the worker's,
-/// addressed to `/agents/tasks/report` with the job handle attached.
+/// addressed to `POST /agents/tasks` with the job handle attached.
 struct AgentTaskClient {
     http: AgentConnection,
     job: i64,
@@ -1552,7 +1552,7 @@ impl AgentTaskClient {
     async fn report(&self, op: ReportTaskOp) -> Result<Option<ReportTaskResp>> {
         self.http
             .post_report(
-                "agents/tasks/report",
+                "agents/tasks",
                 &ReportAgentTaskReq {
                     job: self.job,
                     id: self.task_id,

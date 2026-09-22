@@ -1958,13 +1958,13 @@ impl MitoHttpClient {
             .get_credential()
             .ok_or(CredentialGuardError::CredentialNotFound)?
             .token;
-        self.url.set_path(&format!("agents/{uuid}/job/stop"));
+        self.url.set_path(&format!("agents/{uuid}/job"));
         if force {
             self.url.set_query(Some("op=force"));
         }
         let resp = self
             .http_client
-            .post(self.url.as_str())
+            .delete(self.url.as_str())
             .bearer_auth(credential)
             .send()
             .await

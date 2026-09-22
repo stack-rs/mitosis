@@ -29,7 +29,7 @@ pub fn agents_router(st: InfraPool) -> Router<InfraPool> {
         .route("/", post(register_agent))
         .route("/query", post(query_agents))
         .route("/{uuid}", delete(shutdown_agent))
-        .route("/{uuid}/job/stop", post(stop_agent_job))
+        .route("/{uuid}/job", delete(stop_agent_job))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             user_auth_middleware,
@@ -42,8 +42,7 @@ pub fn agents_router(st: InfraPool) -> Router<InfraPool> {
         .route("/suite", post(accept_suite))
         .route("/job", post(report_job))
         .route("/job/hook", post(report_hook))
-        .route("/tasks/fetch", post(fetch_tasks))
-        .route("/tasks/report", post(report_task))
+        .route("/tasks", post(report_task).get(fetch_tasks))
         .route("/tasks/{uuid}", get(query_task))
         .route(
             "/tasks/{uuid}/artifacts/{content_type}",
@@ -104,7 +103,7 @@ async fn shutdown_agent(
     Ok(())
 }
 
-/// `POST /agents/{uuid}/job/stop?op=graceful|force` — end the job the agent is
+/// `DELETE /agents/{uuid}/job?op=graceful|force` — end the job the agent is
 /// running now. The agent stays up and picks a suite again, so this is how a
 /// user preempts one onto higher-priority work.
 async fn stop_agent_job(
@@ -218,12 +217,12 @@ async fn report_hook(
     Ok(Json(resp))
 }
 
-/// `POST /agents/tasks/fetch` — claim a batch of the suite's ready tasks.
+/// `GET /agents/tasks?suite_uuid=…` — claim a batch of the suite's ready tasks.
 #[tracing::instrument(skip_all, fields(agent_uuid = %a.uuid, suite_uuid = %req.suite_uuid))]
 async fn fetch_tasks(
     Extension(a): Extension<AuthAgent>,
     State(pool): State<InfraPool>,
-    Json(req): Json<FetchTasksReq>,
+    Query(req): Query<FetchTasksReq>,
 ) -> Result<Json<FetchTasksResp>, ApiError> {
     let resp = service::agent::task::agent_fetch_tasks(a.id, a.uuid, &pool, req.suite_uuid)
         .await
@@ -231,7 +230,7 @@ async fn fetch_tasks(
     Ok(Json(resp))
 }
 
-/// `POST /agents/tasks/report` — mirrors the worker report, plus the job handle.
+/// `POST /agents/tasks` — mirrors the worker report, plus the job handle.
 async fn report_task(
     Extension(a): Extension<AuthAgent>,
     State(pool): State<InfraPool>,

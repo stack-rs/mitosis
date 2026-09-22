@@ -194,7 +194,10 @@ pub struct AgentHeartbeatReq {
     /// Currently assigned suite UUID (if any)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_suite_uuid: Option<Uuid>,
-    /// The last notification ID the agent has processed
+    /// Latest coordinator generation observed by this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_id: Option<u64>,
+    /// Last processed notification ID within `boot_id`.
     #[serde(default)]
     pub last_notification_id: u64,
     /// Optional metrics
@@ -467,14 +470,17 @@ pub struct SuiteJobQueryResp {
 // Coordinator → agent notifications (WebSocket, `speedy` binary frames)
 // ============================================================================
 
-/// A sequenced notification. The `id` lets an agent that reconnects (or falls
-/// back to heartbeat catch-up) tell what it has already seen.
+/// A sequenced notification from one coordinator generation. The `id` lets an
+/// agent that reconnects (or falls back to heartbeat catch-up) tell what it has
+/// already seen.
 ///
 /// `speedy` carries it over the socket; serde is still needed because the same
 /// events come back as JSON in the heartbeat response.
 #[derive(Debug, Clone, Serialize, Deserialize, Readable, Writable)]
 pub struct WsNotificationEvent {
-    /// Monotonically increasing sequence ID, per agent
+    /// Coordinator generation that produced this notification.
+    pub boot_id: u64,
+    /// Monotonically increasing sequence ID per agent within this generation.
     pub id: u64,
     pub event: AgentNotification,
 }
@@ -527,7 +533,7 @@ pub enum AgentNotification {
     Ping { server_time: i64 },
 
     /// Resync the notification counter (coordinator restart / wrap-around).
-    CounterSync { counter: u64, boot_id: Uuid },
+    CounterSync { counter: u64, boot_id: u64 },
 
     /// Stop the job the agent is running now; the agent itself stays up and
     /// picks a suite again immediately. This is manual preemption: the agent

@@ -2198,10 +2198,10 @@ paths:
       summary: Agent heartbeat
       description: >-
         Report liveness and receive every notification the agent has not
-        acknowledged. `last_notification_id` acknowledges through that id, so
-        anything beyond it is redelivered until the agent confirms it. An agent
-        that misses its heartbeat is marked Offline, its in-flight jobs become
-        Lost, and its uncommitted tasks are reclaimed.
+        acknowledged in its current coordinator generation. `boot_id` identifies
+        that generation, and `last_notification_id` acknowledges through that id
+        within it. An agent that misses its heartbeat is marked Offline, its
+        in-flight jobs become Lost, and its uncommitted tasks are reclaimed.
       operationId: agentHeartbeat
       tags:
         - Agents
@@ -5886,12 +5886,18 @@ components:
         assigned_suite_uuid:
           type: string
           format: uuid
+        boot_id:
+          type: integer
+          format: uint64
+          description: >-
+            The latest coordinator generation observed by the agent. Omitted
+            until the agent receives its first notification.
         last_notification_id:
           type: integer
           format: uint64
           description: >-
-            The highest notification id the agent has processed. Acknowledges
-            through this id; anything beyond it is returned again.
+            The highest notification id processed within `boot_id`.
+            Acknowledges through this id only in that generation.
         metrics:
           $ref: "#/components/schemas/AgentMetrics"
 
@@ -6184,18 +6190,24 @@ components:
         - tasks_cancelled: specific tasks were cancelled
         - shutdown: stop, gracefully or immediately
         - ping: keepalive
-        - counter_sync: reset the notification sequence (coordinator restart)
+        - counter_sync: synchronize the generation-local notification sequence
 
     WsNotificationEvent:
       type: object
       required:
+        - boot_id
         - id
         - event
       properties:
+        boot_id:
+          type: integer
+          format: uint64
+          description: Coordinator generation that produced this notification
         id:
           type: integer
           format: uint64
-          description: Per-agent, monotonically increasing sequence id
+          description: >-
+            Per-agent sequence id, monotonically increasing within `boot_id`
         event:
           $ref: "#/components/schemas/AgentNotification"
 

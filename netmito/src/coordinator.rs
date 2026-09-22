@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use argon2::password_hash::rand_core::OsRng;
+use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -20,6 +21,34 @@ use crate::ws::AgentWsRouter;
 /// How often the idle-suite sweep runs, given the configured idle window.
 fn suite_sweep_period(idle_window: std::time::Duration) -> std::time::Duration {
     (idle_window / 2).max(Duration::from_secs(1))
+}
+
+/// Atomically allocate this coordinator process's generation.
+async fn allocate_boot_id(db: &DatabaseConnection) -> crate::error::Result<u64> {
+    let row = db
+        .query_one(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT nextval('coordinator_boot_id_seq')",
+        ))
+        .await?
+        .ok_or_else(|| {
+            crate::error::Error::Custom(
+                "coordinator boot id sequence returned no value".to_string(),
+            )
+        })?;
+
+    let boot_id: i64 = row.try_get_by_index(0)?;
+    if boot_id <= 0 {
+        return Err(crate::error::Error::Custom(format!(
+            "coordinator boot id must be positive, got {boot_id}"
+        )));
+    }
+
+    u64::try_from(boot_id).map_err(|_| {
+        crate::error::Error::Custom(format!(
+            "coordinator boot id is out of range, got {boot_id}"
+        ))
+    })
 }
 
 pub struct MitoCoordinator {
@@ -129,7 +158,7 @@ impl MitoCoordinator {
             config.build_worker_task_queue(cancel_token.clone(), worker_task_queue_rx);
 
         // Setup infra pool
-        let infra_pool = config
+        let mut infra_pool = config
             .build_infra_pool(
                 worker_task_queue_tx,
                 worker_heartbeat_queue_tx,
@@ -138,20 +167,6 @@ impl MitoCoordinator {
             )
             .await?;
 
-        // Setup worker heartbeat queue
-        let worker_heartbeat_queue = config.build_worker_heartbeat_queue(
-            cancel_token.clone(),
-            infra_pool.clone(),
-            worker_heartbeat_queue_rx,
-        );
-
-        // Setup the agent-side actors: liveness tracking and the notification router
-        let agent_heartbeat_queue = config.build_agent_heartbeat_queue(
-            cancel_token.clone(),
-            infra_pool.clone(),
-            agent_heartbeat_queue_rx,
-        );
-        let ws_router = config.build_ws_router(cancel_token.clone(), ws_router_rx);
         let suite_auto_close_timeout = config.suite_auto_close_timeout;
         let suite_queue_reconcile_interval = config.suite_queue_reconcile_interval;
 
@@ -168,6 +183,24 @@ impl MitoCoordinator {
 
         // Setup database
         Migrator::up(&infra_pool.db, None).await?;
+        infra_pool.boot_id = allocate_boot_id(&infra_pool.db).await?;
+        tracing::info!(
+            boot_id = infra_pool.boot_id,
+            "Allocated coordinator boot generation"
+        );
+
+        let worker_heartbeat_queue = config.build_worker_heartbeat_queue(
+            cancel_token.clone(),
+            infra_pool.clone(),
+            worker_heartbeat_queue_rx,
+        );
+        let agent_heartbeat_queue = config.build_agent_heartbeat_queue(
+            cancel_token.clone(),
+            infra_pool.clone(),
+            agent_heartbeat_queue_rx,
+        );
+        let ws_router =
+            config.build_ws_router(cancel_token.clone(), ws_router_rx, infra_pool.boot_id);
 
         let mut log_dir = dirs::cache_dir().ok_or(crate::error::Error::Custom(
             "Cache dir not found".to_string(),

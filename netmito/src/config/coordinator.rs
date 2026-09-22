@@ -325,8 +325,9 @@ impl CoordinatorConfig {
         &self,
         cancel_token: CancellationToken,
         rx: AsyncRx<RouterOp>,
+        boot_id: u64,
     ) -> AgentWsRouter {
-        AgentWsRouter::new(cancel_token, rx)
+        AgentWsRouter::new(cancel_token, rx, boot_id)
     }
 
     pub async fn build_redis_connection_info(
@@ -425,7 +426,8 @@ impl CoordinatorConfig {
             agent_heartbeat_queue_tx,
             ws_router_tx,
             suite_queues: SuiteQueues::new(),
-            boot_uuid: uuid::Uuid::new_v4(),
+            // Allocated from the database after migrations and before this pool is cloned.
+            boot_id: 0,
             ws_keepalive_interval: self.ws_keepalive_interval,
         })
     }
@@ -549,10 +551,8 @@ pub struct InfraPool {
     pub ws_router_tx: MTx<RouterOp>,
     /// Dispatch state for the suites that have a job running right now.
     pub suite_queues: SuiteQueues,
-    /// Identifies this coordinator process. Agents compare it against the
-    /// `boot_id` in a `CounterSync` to notice a restart and reset the
-    /// notification sequence they are tracking.
-    pub boot_uuid: uuid::Uuid,
+    /// Strictly increasing generation allocated for this coordinator process.
+    pub boot_id: u64,
     pub ws_keepalive_interval: std::time::Duration,
 }
 

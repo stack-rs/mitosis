@@ -75,12 +75,13 @@ impl AgentSession {
     ///
     /// `None` means nothing was queued and nothing should be pushed: a nudge
     /// the agent has not acted on yet is still the same nudge.
-    fn push(&mut self, event: AgentNotification) -> Option<WsNotificationEvent> {
+    fn push(&mut self, boot_id: u64, event: AgentNotification) -> Option<WsNotificationEvent> {
         if self.buffer.iter().any(|e| e.event.coalesces_with(&event)) {
             return None;
         }
         self.counter = self.counter.saturating_add(1);
         let event = WsNotificationEvent {
+            boot_id,
             id: self.counter,
             event,
         };
@@ -107,14 +108,16 @@ impl AgentSession {
 /// Actor owning every agent's notification session.
 pub struct AgentWsRouter {
     sessions: HashMap<Uuid, AgentSession>,
+    boot_id: u64,
     cancel_token: CancellationToken,
     rx: AsyncRx<RouterOp>,
 }
 
 impl AgentWsRouter {
-    pub fn new(cancel_token: CancellationToken, rx: AsyncRx<RouterOp>) -> Self {
+    pub fn new(cancel_token: CancellationToken, rx: AsyncRx<RouterOp>, boot_id: u64) -> Self {
         Self {
             sessions: HashMap::new(),
+            boot_id,
             cancel_token,
             rx,
         }
@@ -180,8 +183,9 @@ impl AgentWsRouter {
                 }
             }
             RouterOp::Notify { uuid, event } => {
+                let boot_id = self.boot_id;
                 let session = self.sessions.entry(uuid).or_insert_with(AgentSession::new);
-                let Some(event) = session.push(event) else {
+                let Some(event) = session.push(boot_id, event) else {
                     return;
                 };
                 if let Some(sender) = session.sender.as_ref() {

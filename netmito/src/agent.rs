@@ -16,7 +16,7 @@ use std::{
     collections::VecDeque,
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -109,11 +109,12 @@ pub struct MitoAgent;
 struct AgentClient {
     coordinator_addr: Url,
     token: String,
-    /// Highest notification id processed; echoed on every heartbeat
+    /// Highest notification ID processed in the current coordinator generation.
     notification_counter: u64,
-    /// Which coordinator boot our counter belongs to. A different one means the
-    /// coordinator restarted and our sequence is meaningless.
-    coordinator_boot_id: Option<Uuid>,
+    /// Coordinator generation paired with `notification_counter`.
+    coordinator_boot_id: Option<u64>,
+    /// Highest generation decoded by any receive path; zero means unknown.
+    max_observed_boot_id: Arc<AtomicU64>,
     state: AgentState,
     assigned_suite_uuid: Option<Uuid>,
     has_pending_suite: bool,
@@ -147,6 +148,47 @@ struct AgentClient {
     /// and a bump that lands while the job is fetching is still there when it
     /// next looks.
     fetch_wake: watch::Sender<u64>,
+}
+
+/// Advance to the highest generation observed by a notification receive path.
+fn synchronize_notification_generation(
+    coordinator_boot_id: &mut Option<u64>,
+    notification_counter: &mut u64,
+    observed_boot_id: u64,
+) -> bool {
+    if observed_boot_id == 0 {
+        return false;
+    }
+
+    match *coordinator_boot_id {
+        Some(current) if observed_boot_id <= current => false,
+        _ => {
+            *coordinator_boot_id = Some(observed_boot_id);
+            *notification_counter = 0;
+            true
+        }
+    }
+}
+
+/// Update the generation-local notification position, rejecting stale events.
+fn accept_notification_generation(
+    coordinator_boot_id: &mut Option<u64>,
+    notification_counter: &mut u64,
+    boot_id: u64,
+    notification_id: u64,
+) -> bool {
+    match *coordinator_boot_id {
+        Some(current) if boot_id < current => false,
+        Some(current) if boot_id == current => {
+            *notification_counter = (*notification_counter).max(notification_id);
+            true
+        }
+        _ => {
+            *coordinator_boot_id = Some(boot_id);
+            *notification_counter = notification_id;
+            true
+        }
+    }
 }
 
 impl MitoAgent {
@@ -278,6 +320,7 @@ impl MitoAgent {
             token: register.token,
             notification_counter: register.notification_counter,
             coordinator_boot_id: None,
+            max_observed_boot_id: Arc::new(AtomicU64::new(0)),
             state: AgentState::Idle,
             assigned_suite_uuid: None,
             // Registration is itself a reason to look for work: the coordinator
@@ -450,8 +493,7 @@ impl AgentClient {
                 }
 
                 Ok(event) = ws_rx.recv(), if ws_enabled => {
-                    self.notification_counter = self.notification_counter.max(event.id);
-                    self.handle_notification(event.event);
+                    self.handle_notification_event(event);
                 }
 
                 _ = heartbeat_timer.tick() => {
@@ -505,12 +547,19 @@ impl AgentClient {
         let ws_url = url.to_string();
         let token = self.token.clone();
         let reconnect_interval = self.ws_reconnect_interval;
+        let max_observed_boot_id = self.max_observed_boot_id.clone();
 
         tokio::spawn(async move {
             while !cancel_token.is_cancelled() {
                 tracing::debug!("Connecting to {ws_url}");
-                match Self::websocket_session(&ws_url, &token, &mut notification_tx, &cancel_token)
-                    .await
+                match Self::websocket_session(
+                    &ws_url,
+                    &token,
+                    &mut notification_tx,
+                    &max_observed_boot_id,
+                    &cancel_token,
+                )
+                .await
                 {
                     Ok(()) => tracing::debug!("Agent WebSocket closed"),
                     // Notifications are an optimization — the heartbeat carries
@@ -553,6 +602,53 @@ impl AgentClient {
         if let Some(token) = &self.drain_token {
             token.cancel();
         }
+    }
+
+    fn synchronize_observed_generation(&mut self) {
+        let observed_boot_id = self.max_observed_boot_id.load(Ordering::Acquire);
+        let previous_boot_id = self.coordinator_boot_id;
+        if !synchronize_notification_generation(
+            &mut self.coordinator_boot_id,
+            &mut self.notification_counter,
+            observed_boot_id,
+        ) {
+            return;
+        }
+
+        match previous_boot_id {
+            Some(previous) => tracing::warn!(
+                previous_boot_id = previous,
+                coordinator_boot_id = observed_boot_id,
+                "Coordinator generation advanced"
+            ),
+            None => tracing::debug!(
+                coordinator_boot_id = observed_boot_id,
+                "Learned coordinator generation"
+            ),
+        }
+    }
+
+    fn handle_notification_event(&mut self, event: WsNotificationEvent) {
+        self.max_observed_boot_id
+            .fetch_max(event.boot_id, Ordering::AcqRel);
+        self.synchronize_observed_generation();
+
+        if !accept_notification_generation(
+            &mut self.coordinator_boot_id,
+            &mut self.notification_counter,
+            event.boot_id,
+            event.id,
+        ) {
+            tracing::debug!(
+                notification_boot_id = event.boot_id,
+                current_boot_id = ?self.coordinator_boot_id,
+                notification_id = event.id,
+                "Dropping notification from stale coordinator generation"
+            );
+            return;
+        }
+
+        self.handle_notification(event.event);
     }
 
     fn handle_notification(&mut self, notification: AgentNotification) {
@@ -651,23 +747,20 @@ impl AgentClient {
             }
             AgentNotification::Ping { .. } => {}
             AgentNotification::CounterSync { counter, boot_id } => {
-                if self.coordinator_boot_id != Some(boot_id) {
-                    if let Some(previous) = self.coordinator_boot_id {
-                        tracing::warn!("Coordinator restarted ({previous} → {boot_id})");
-                    }
-                    self.coordinator_boot_id = Some(boot_id);
-                    self.notification_counter = counter;
-                } else if counter > self.notification_counter {
-                    self.notification_counter = counter;
+                if self.coordinator_boot_id == Some(boot_id) {
+                    self.notification_counter = self.notification_counter.max(counter);
                 }
             }
         };
     }
 
     async fn send_heartbeat(&mut self) -> Result<()> {
+        self.synchronize_observed_generation();
+
         let req = AgentHeartbeatReq {
             state: self.state,
             assigned_suite_uuid: self.assigned_suite_uuid,
+            boot_id: self.coordinator_boot_id,
             last_notification_id: self.notification_counter,
             metrics: None,
         };
@@ -696,10 +789,17 @@ impl AgentClient {
         }
         let resp: AgentHeartbeatResp = parse_json(resp, "heartbeat").await?;
 
+        // Observe the whole batch before executing any of it, so stale events
+        // earlier in the response cannot run ahead of a newer generation.
+        if let Some(boot_id) = resp.notifications.iter().map(|event| event.boot_id).max() {
+            self.max_observed_boot_id
+                .fetch_max(boot_id, Ordering::AcqRel);
+        }
+        self.synchronize_observed_generation();
+
         // Catch-up path: whatever the WebSocket did not deliver arrives here.
         for event in resp.notifications {
-            self.notification_counter = self.notification_counter.max(event.id);
-            self.handle_notification(event.event);
+            self.handle_notification_event(event);
         }
         Ok(())
     }
@@ -809,6 +909,7 @@ impl AgentClient {
         ws_url: &str,
         token: &str,
         notification_tx: &mut AsyncTx<WsNotificationEvent>,
+        max_observed_boot_id: &AtomicU64,
         cancel_token: &CancellationToken,
     ) -> Result<()> {
         let host = Url::parse(ws_url)
@@ -855,6 +956,7 @@ impl AgentClient {
                             continue;
                         }
                     };
+                    max_observed_boot_id.fetch_max(event.boot_id, Ordering::AcqRel);
                     let id = event.id;
                     let send_result = tokio::select! {
                         biased;
@@ -1811,4 +1913,115 @@ async fn parse_json<T: serde::de::DeserializeOwned>(
     resp.json::<T>()
         .await
         .map_err(|e| error::Error::Custom(format!("Unreadable {what} response: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{accept_notification_generation, synchronize_notification_generation};
+
+    #[test]
+    fn first_notification_establishes_generation() {
+        let mut boot_id = None;
+        let mut counter = 0;
+
+        assert!(accept_notification_generation(
+            &mut boot_id,
+            &mut counter,
+            7,
+            12,
+        ));
+        assert_eq!(boot_id, Some(7));
+        assert_eq!(counter, 12);
+    }
+
+    #[test]
+    fn current_generation_counter_never_regresses() {
+        let mut boot_id = Some(7);
+        let mut counter = 12;
+
+        assert!(accept_notification_generation(
+            &mut boot_id,
+            &mut counter,
+            7,
+            9,
+        ));
+        assert_eq!(boot_id, Some(7));
+        assert_eq!(counter, 12);
+    }
+
+    #[test]
+    fn newer_generation_replaces_counter_and_stale_events_are_rejected() {
+        let mut boot_id = Some(7);
+        let mut counter = 99;
+
+        assert!(accept_notification_generation(
+            &mut boot_id,
+            &mut counter,
+            8,
+            1,
+        ));
+        assert_eq!(boot_id, Some(8));
+        assert_eq!(counter, 1);
+
+        assert!(!accept_notification_generation(
+            &mut boot_id,
+            &mut counter,
+            7,
+            100,
+        ));
+        assert_eq!(boot_id, Some(8));
+        assert_eq!(counter, 1);
+
+        assert!(accept_notification_generation(
+            &mut boot_id,
+            &mut counter,
+            8,
+            2,
+        ));
+        assert_eq!(counter, 2);
+    }
+
+    #[test]
+    fn observed_new_generation_invalidates_earlier_queued_events() {
+        let mut boot_id = Some(7);
+        let mut counter = 19;
+
+        // The receive task has already decoded boot 8, even though that event
+        // is still behind two boot 7 events in the local queue.
+        assert!(synchronize_notification_generation(
+            &mut boot_id,
+            &mut counter,
+            8,
+        ));
+        assert_eq!(boot_id, Some(8));
+        assert_eq!(counter, 0);
+
+        assert!(!accept_notification_generation(
+            &mut boot_id,
+            &mut counter,
+            7,
+            20,
+        ));
+        assert!(!accept_notification_generation(
+            &mut boot_id,
+            &mut counter,
+            7,
+            21,
+        ));
+        assert!(accept_notification_generation(
+            &mut boot_id,
+            &mut counter,
+            8,
+            1,
+        ));
+        assert!(!accept_notification_generation(
+            &mut boot_id,
+            &mut counter,
+            7,
+            22,
+        ));
+
+        assert_eq!(boot_id, Some(8));
+        assert_eq!(counter, 1);
+    }
 }

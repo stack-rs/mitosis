@@ -11,6 +11,7 @@ mod m20260703_000000_create_task_suite_tables;
 mod m20260703_000001_alter_tasks_link_suites;
 mod m20260703_000002_alter_tasks_exec_spec;
 mod m20260703_000003_restrict_group_worker_fk;
+mod m20260917_000000_create_coordinator_boot_id_sequence;
 
 pub struct Migrator;
 
@@ -29,6 +30,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260703_000001_alter_tasks_link_suites::Migration),
             Box::new(m20260703_000002_alter_tasks_exec_spec::Migration),
             Box::new(m20260703_000003_restrict_group_worker_fk::Migration),
+            Box::new(m20260917_000000_create_coordinator_boot_id_sequence::Migration),
         ]
     }
 }

@@ -854,11 +854,9 @@ pub(crate) async fn stop_agent_job(
 
 /// Record a heartbeat and hand back everything the agent has not seen.
 ///
-///
-/// Heartbeat is used both to re-notify the agent of pending tasks, and also
-/// use for syncing the counters so that if the agent has a counter ahead of
-/// the coordinator, the coordinator must have been restarted, and we should
-/// notify the agent to resync.
+/// Notification IDs are local to a coordinator generation. The agent reports
+/// both its observed boot ID and last processed ID so stale generations can be
+/// rejected and current-generation notifications replayed safely.
 pub async fn agent_heartbeat(
     agent_id: i64,
     agent_uuid: Uuid,
@@ -917,6 +915,60 @@ pub async fn agent_heartbeat(
         ),
     }
 
+    let coordinator_counter = AgentWsRouter::counter(&pool.ws_router_tx, agent_uuid)
+        .await
+        .unwrap_or_default();
+
+    let ack_by_id = match req.boot_id {
+        Some(agent_boot_id) if agent_boot_id > pool.boot_id => {
+            tracing::warn!(
+                agent_uuid = %agent_uuid,
+                agent_boot_id,
+                coordinator_boot_id = pool.boot_id,
+                "Agent reported a newer coordinator generation; withholding notifications"
+            );
+            return Ok(AgentHeartbeatResp::default());
+        }
+        Some(agent_boot_id) if agent_boot_id == pool.boot_id => {
+            if req.last_notification_id <= coordinator_counter {
+                req.last_notification_id
+            } else {
+                tracing::warn!(
+                    agent_uuid = %agent_uuid,
+                    agent_counter = req.last_notification_id,
+                    coordinator_counter,
+                    "Notification counter desync; sending CounterSync"
+                );
+                AgentWsRouter::notify(
+                    &pool.ws_router_tx,
+                    agent_uuid,
+                    AgentNotification::CounterSync {
+                        counter: coordinator_counter,
+                        boot_id: pool.boot_id,
+                    },
+                );
+                coordinator_counter
+            }
+        }
+        agent_boot_id => {
+            tracing::info!(
+                agent_uuid = %agent_uuid,
+                agent_boot_id = ?agent_boot_id,
+                coordinator_boot_id = pool.boot_id,
+                "Synchronizing agent to coordinator generation"
+            );
+            AgentWsRouter::notify(
+                &pool.ws_router_tx,
+                agent_uuid,
+                AgentNotification::CounterSync {
+                    counter: coordinator_counter,
+                    boot_id: pool.boot_id,
+                },
+            );
+            0
+        }
+    };
+
     // An idle agent with nothing assigned and work waiting gets a fresh nudge.
     // The suite it would land on is not named: it is re-picked in `accept`, and
     // by then a reservation may have moved the answer on.
@@ -931,34 +983,9 @@ pub async fn agent_heartbeat(
         }
     }
 
-    // The agent claiming a higher notification id than we ever issued means our
-    // sequence restarted with the process; hand it our boot id and counter.
-    if let Some(counter) = AgentWsRouter::counter(&pool.ws_router_tx, agent_uuid).await {
-        if req.last_notification_id > counter {
-            tracing::warn!(
-                agent_uuid = %agent_uuid,
-                agent_counter = req.last_notification_id,
-                coordinator_counter = counter,
-                "Notification counter desync — sending CounterSync"
-            );
-            AgentWsRouter::notify(
-                &pool.ws_router_tx,
-                agent_uuid,
-                AgentNotification::CounterSync {
-                    counter,
-                    boot_id: pool.boot_uuid,
-                },
-            );
-        }
-    }
-
     // Any unacked messages get sent in batch in heartbeat response
-    let notifications = AgentWsRouter::pending_notifications(
-        &pool.ws_router_tx,
-        agent_uuid,
-        req.last_notification_id,
-    )
-    .await;
+    let notifications =
+        AgentWsRouter::pending_notifications(&pool.ws_router_tx, agent_uuid, ack_by_id).await;
 
     Ok(AgentHeartbeatResp { notifications })
 }
@@ -1505,7 +1532,7 @@ pub async fn notify_agents_of_restart(pool: &InfraPool) -> Result<()> {
         .await?;
     tracing::info!(
         agents = agents.len(),
-        boot_id = %pool.boot_uuid,
+        boot_id = pool.boot_id,
         "Announcing coordinator restart to known agents"
     );
     for uuid in agents {
@@ -1514,7 +1541,7 @@ pub async fn notify_agents_of_restart(pool: &InfraPool) -> Result<()> {
             uuid,
             AgentNotification::CounterSync {
                 counter: 0,
-                boot_id: pool.boot_uuid,
+                boot_id: pool.boot_id,
             },
         );
     }

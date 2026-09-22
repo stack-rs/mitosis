@@ -108,7 +108,7 @@ fn default_ws_keepalive_interval() -> std::time::Duration {
 }
 
 fn default_suite_auto_close_timeout() -> std::time::Duration {
-    std::time::Duration::from_secs(120)
+    std::time::Duration::from_secs(60)
 }
 
 fn default_suite_queue_reconcile_interval() -> std::time::Duration {

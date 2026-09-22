@@ -96,6 +96,10 @@ pub struct QueryTasksArgs {
     /// The name of the group the tasks belong to
     #[arg(short, long)]
     pub group: Option<String>,
+    /// The UUID of the task suite the tasks belong to. Names the group on its
+    /// own, so `--group` is only needed to double-check it
+    #[arg(long = "suite")]
+    pub suite_uuid: Option<Uuid>,
     /// The tags of the tasks
     #[arg(short, long, num_args = 0.., value_delimiter = ',')]
     pub tags: Vec<String>,
@@ -142,6 +146,10 @@ pub struct CancelTasksArgs {
     /// The name of the group the tasks belong to
     #[arg(short, long)]
     pub group: Option<String>,
+    /// The UUID of the task suite the tasks belong to. Names the group on its
+    /// own, so `--group` is only needed to double-check it
+    #[arg(long = "suite")]
+    pub suite_uuid: Option<Uuid>,
     /// The tags of the tasks
     #[arg(short, long, num_args = 0.., value_delimiter = ',')]
     pub tags: Vec<String>,
@@ -215,6 +223,7 @@ impl From<QueryTasksArgs> for TasksQueryReq {
                 Some(args.creators.into_iter().collect())
             },
             group_name: args.group,
+            suite_uuid: args.suite_uuid,
             tags: if args.tags.is_empty() {
                 None
             } else {
@@ -283,6 +292,7 @@ impl From<CancelTasksArgs> for TasksCancelByFilterReq {
                 Some(args.creators.into_iter().collect())
             },
             group_name: args.group,
+            suite_uuid: args.suite_uuid,
             tags: if args.tags.is_empty() {
                 None
             } else {

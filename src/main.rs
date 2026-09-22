@@ -1,8 +1,11 @@
 use crate::build::CLAP_LONG_VERSION;
 use clap::{Parser, Subcommand};
 use netmito::{
+    agent::MitoAgent,
     client::MitoClient,
-    config::{ClientConfigCli, CoordinatorConfigCli, ManagerConfigCli, WorkerConfigCli},
+    config::{
+        AgentConfigCli, ClientConfigCli, CoordinatorConfigCli, ManagerConfigCli, WorkerConfigCli,
+    },
     coordinator::MitoCoordinator,
     manager::MitoManager,
     worker::MitoWorker,
@@ -26,6 +29,8 @@ enum Mode {
     Coordinator(CoordinatorConfigCli),
     /// Run a mitosis worker.
     Worker(WorkerConfigCli),
+    /// Run a mitosis agent, which executes task suites.
+    Agent(AgentConfigCli),
     /// Run a mitosis client.
     Client(ClientConfigCli),
     /// Manage mitosis workers.
@@ -51,6 +56,17 @@ fn main() {
                 .unwrap()
                 .block_on(async {
                     MitoWorker::main(worker_cli).await;
+                });
+        }
+        Mode::Agent(agent_cli) => {
+            // Multi-threaded: the agent runs its main loop, a WebSocket reader,
+            // and a suite runner concurrently.
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    MitoAgent::main(agent_cli).await;
                 });
         }
         Mode::Client(client_cli) => {

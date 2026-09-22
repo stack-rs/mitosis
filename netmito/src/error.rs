@@ -84,17 +84,17 @@ pub enum DecodeTokenError {
 #[derive(thiserror::Error, Debug)]
 pub enum S3Error {
     #[error(transparent)]
-    ListBucketsError(#[from] SdkError<ListBucketsError>),
+    ListBucketsError(Box<SdkError<ListBucketsError>>),
     #[error(transparent)]
-    CreateBucketError(#[from] SdkError<CreateBucketError>),
+    CreateBucketError(Box<SdkError<CreateBucketError>>),
     #[error(transparent)]
-    PutObjectError(#[from] SdkError<PutObjectError>),
+    PutObjectError(Box<SdkError<PutObjectError>>),
     #[error(transparent)]
-    GetObjectError(#[from] SdkError<GetObjectError>),
+    GetObjectError(Box<SdkError<GetObjectError>>),
     #[error(transparent)]
-    DeleteObjectError(#[from] SdkError<DeleteObjectError>),
+    DeleteObjectError(Box<SdkError<DeleteObjectError>>),
     #[error(transparent)]
-    DeleteObjectsError(#[from] SdkError<DeleteObjectsError>),
+    DeleteObjectsError(Box<SdkError<DeleteObjectsError>>),
     #[error(transparent)]
     PresigningConfigError(#[from] PresigningConfigError),
     #[error("{0}")]
@@ -244,6 +244,42 @@ pub(crate) async fn get_error_from_resp(resp: reqwest::Response) -> RequestError
 impl From<figment::Error> for Error {
     fn from(e: figment::Error) -> Self {
         Error::ConfigError(Box::new(e))
+    }
+}
+
+impl From<SdkError<ListBucketsError>> for S3Error {
+    fn from(e: SdkError<ListBucketsError>) -> Self {
+        S3Error::ListBucketsError(Box::new(e))
+    }
+}
+
+impl From<SdkError<CreateBucketError>> for S3Error {
+    fn from(e: SdkError<CreateBucketError>) -> Self {
+        S3Error::CreateBucketError(Box::new(e))
+    }
+}
+
+impl From<SdkError<PutObjectError>> for S3Error {
+    fn from(e: SdkError<PutObjectError>) -> Self {
+        S3Error::PutObjectError(Box::new(e))
+    }
+}
+
+impl From<SdkError<GetObjectError>> for S3Error {
+    fn from(e: SdkError<GetObjectError>) -> Self {
+        S3Error::GetObjectError(Box::new(e))
+    }
+}
+
+impl From<SdkError<DeleteObjectError>> for S3Error {
+    fn from(e: SdkError<DeleteObjectError>) -> Self {
+        S3Error::DeleteObjectError(Box::new(e))
+    }
+}
+
+impl From<SdkError<DeleteObjectsError>> for S3Error {
+    fn from(e: SdkError<DeleteObjectsError>) -> Self {
+        S3Error::DeleteObjectsError(Box::new(e))
     }
 }
 

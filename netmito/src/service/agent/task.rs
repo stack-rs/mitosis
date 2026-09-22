@@ -1,0 +1,392 @@
+//! Task claim and result reporting for agents.
+//!
+//! ## Claiming
+//!
+//! Agents claim straight from the database: one transaction selects the
+//! highest-priority `Ready` tasks of the suite `FOR UPDATE SKIP LOCKED` and
+//! flips them to `Running`. `SKIP LOCKED` is what makes it safe — concurrent
+//! agents step over each other's locked rows instead of contending, so no two
+//! agents can claim the same task and none of them block.
+//!
+//! [`queue::SuiteQueues`] sits in front of that as a hint and a policy gate: it
+//! sizes the batch from the suite's schedule and what this job is already
+//! holding, the ids it has queued for the suite are tried first, and while the
+//! suite is reserved for the jobs already on it, everybody else is answered
+//! empty. It never decides what a claim *means* — the transaction below does,
+//! against the database.
+//!
+//! [`queue::SuiteQueues`]: crate::service::agent::queue::SuiteQueues
+//!
+//! ## Reporting
+//!
+//! Agents use the same [`ReportTaskOp`] variants as workers, with the suite job
+//! handle attached. Every report is validated against the job first: it must
+//! exist, belong to this agent, and be non-terminal — a terminal job answers
+//! `400 Bad Request`, which the agent reads as "the job is closed, stop".
+//!
+//! | Op | Behaviour |
+//! |---|---|
+//! | `Finish` | task → `Finished` (not yet archived) |
+//! | `Cancel` | task → `Cancelled`; the agent follows up with `Commit` |
+//! | `Upload` | request for presigned S3 URL for an artifact (records metadata, charges group quota) |
+//! | `Commit` | archives the task with its result, decrements the suite's `incomplete_tasks` (completing the suite if that empties an already-`Closed` one), triggers the downstream task if one was spawned |
+//! | `Submit` | spawns a downstream child in the parent's group, in any suite that group owns or none |
+
+use sea_orm::{prelude::*, QueryOrder, QuerySelect, Set, TransactionTrait};
+use uuid::Uuid;
+
+use crate::{
+    config::InfraPool,
+    entity::{
+        active_tasks as ActiveTasks, archived_tasks as ArchivedTasks,
+        state::{TaskState, TaskSuiteState},
+        task_suites as TaskSuites, StoredTaskModel,
+    },
+    error::{ApiError, Error, Result},
+    schema::{ExecSpec, FetchTasksResp, ReportTaskOp, TaskExecOptions, WorkerTaskResp},
+    service::{agent::job, agent::matching, agent::queue, s3::group_upload_artifact},
+};
+
+/// Claim as many of a suite's ready tasks as this agent still has room for.
+///
+/// The agent asks for no particular number: the suite's schedule says how many
+/// one job may hold, and the queue knows how many this one is holding already.
+pub async fn agent_fetch_tasks(
+    agent_id: i64,
+    agent_uuid: Uuid,
+    pool: &InfraPool,
+    suite_uuid: Uuid,
+) -> Result<FetchTasksResp> {
+    let suite = TaskSuites::Entity::find()
+        .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
+        .one(&pool.db)
+        .await?
+        .ok_or_else(|| Error::ApiError(ApiError::NotFound(format!("Suite {suite_uuid}"))))?;
+
+    if !matching::is_agent_eligible(&pool.db, suite.id, agent_id).await? {
+        return Err(Error::ApiError(ApiError::NotFound(format!(
+            "Suite {suite_uuid}"
+        ))));
+    }
+    if !suite.state.allows_task_execution() {
+        return Err(Error::ApiError(ApiError::InvalidRequest(format!(
+            "Suite {suite_uuid} is {} and hands out no more tasks",
+            suite.state
+        ))));
+    }
+
+    let now = TimeDateTimeWithTimeZone::now_utc();
+    let suite_id = suite.id;
+
+    // Read from the same snapshot as the eligibility check above, which is at
+    // most a claim-transaction old. Erring on the side of `true` for a suite the
+    // sweep has just settled only costs one more poll.
+    let hold_job_open = matches!(suite.state, TaskSuiteState::Open);
+
+    let budget = queue::task_budget(&serde_json::from_value(suite.worker_schedule).inspect_err(
+        |e| {
+            tracing::error!("Stored worker schedule is unreadable: {e}");
+        },
+    )?);
+
+    // While a suite is reserved for the jobs already running it, everyone else
+    // is answered as if it were drained. `hold_job_open` still stands: an agent
+    // that is holding stays holding, and comes back when the window is over.
+    let Some((max_count, hinted)) = pool.suite_queues.take(suite_id, agent_id, budget) else {
+        tracing::debug!("Suite is reserved for the agents already running it; handing out nothing");
+        pool.suite_queues.served(suite_id, agent_id, 0, &[]);
+        return Ok(FetchTasksResp {
+            tasks: Vec::new(),
+            hold_job_open,
+        });
+    };
+    // Full: it is holding as much as its workers and their buffer can take. It
+    // asks again the moment one of them commits.
+    if max_count == 0 {
+        tracing::debug!("Agent is holding a full batch already; handing out nothing");
+        pool.suite_queues.served(suite_id, agent_id, 0, &[]);
+        return Ok(FetchTasksResp {
+            tasks: Vec::new(),
+            hold_job_open,
+        });
+    }
+
+    // What the queue believed was claimable, for `served` to check the claim
+    // against.
+    let hinted_count = hinted.len();
+
+    let claimed = pool
+        .db
+        .transaction::<_, Vec<ActiveTasks::Model>, Error>(|txn| {
+            Box::pin(async move {
+                // The queued ids first: they are this suite's newest work, and
+                // taking them by id skips the ordered scan. They are only a
+                // hint, so any that are no longer `Ready` simply do not come
+                // back, and the query below makes up the difference.
+                let mut candidates = if hinted.is_empty() {
+                    Vec::new()
+                } else {
+                    claim_candidates(txn, suite_id, Some(hinted), max_count).await?
+                };
+                if candidates.len() < max_count as usize {
+                    let want = max_count - candidates.len() as u32;
+                    let claimed: Vec<i64> = candidates.iter().map(|t| t.id).collect();
+                    for task in claim_candidates(txn, suite_id, None, want).await? {
+                        if !claimed.contains(&task.id) {
+                            candidates.push(task);
+                        }
+                    }
+                }
+                if candidates.is_empty() {
+                    return Ok(Vec::new());
+                }
+
+                let ids: Vec<i64> = candidates.iter().map(|t| t.id).collect();
+                ActiveTasks::Entity::update_many()
+                    .col_expr(ActiveTasks::Column::State, Expr::value(TaskState::Running))
+                    .col_expr(ActiveTasks::Column::RunnerUuid, Expr::value(agent_uuid))
+                    .col_expr(ActiveTasks::Column::UpdatedAt, Expr::value(now))
+                    .filter(ActiveTasks::Column::Id.is_in(ids))
+                    .exec(txn)
+                    .await?;
+
+                Ok(candidates)
+            })
+        })
+        .await?;
+
+    let claimed_ids: Vec<i64> = claimed.iter().map(|task| task.id).collect();
+    pool.suite_queues
+        .served(suite_id, agent_id, hinted_count, &claimed_ids);
+
+    let mut tasks = Vec::with_capacity(claimed.len());
+    for task in claimed {
+        let spec: ExecSpec = serde_json::from_value(task.spec).inspect_err(|e| {
+            tracing::error!(task_uuid = %task.uuid, "Stored task spec is unreadable: {e}");
+        })?;
+        let exec_options: Option<TaskExecOptions> = task
+            .exec_options
+            .map(serde_json::from_value)
+            .transpose()
+            .inspect_err(|e| {
+                tracing::error!(task_uuid = %task.uuid, "Stored exec_options are unreadable: {e}");
+            })?;
+        tasks.push(WorkerTaskResp {
+            id: task.id,
+            uuid: task.uuid,
+            upstream_task_uuid: task.upstream_task_uuid,
+            spec,
+            exec_options,
+        });
+    }
+
+    tracing::debug!(count = tasks.len(), "Agent claimed tasks from a suite");
+    Ok(FetchTasksResp {
+        tasks,
+        hold_job_open,
+    })
+}
+
+/// Lock up to `limit` of a suite's claimable tasks for the caller's transaction,
+/// either from a set of candidate ids or, with `ids` as `None`, in priority
+/// order across the whole suite.
+///
+/// `SKIP LOCKED` is what makes this safe to run concurrently: agents step over
+/// each other's locked rows instead of contending, so no two can claim the same
+/// task and none of them block.
+async fn claim_candidates<C: ConnectionTrait>(
+    txn: &C,
+    suite_id: i64,
+    ids: Option<Vec<i64>>,
+    limit: u32,
+) -> Result<Vec<ActiveTasks::Model>> {
+    let mut query = ActiveTasks::Entity::find()
+        .filter(ActiveTasks::Column::TaskSuiteId.eq(suite_id))
+        .filter(ActiveTasks::Column::State.eq(TaskState::Ready));
+    if let Some(ids) = ids {
+        query = query.filter(ActiveTasks::Column::Id.is_in(ids));
+    }
+    Ok(query
+        .order_by_desc(ActiveTasks::Column::Priority)
+        .order_by_asc(ActiveTasks::Column::Id)
+        .limit(limit as u64)
+        .lock_with_behavior(
+            sea_orm::sea_query::LockType::Update,
+            sea_orm::sea_query::LockBehavior::SkipLocked,
+        )
+        .all(txn)
+        .await?)
+}
+
+/// Report the result of a task this agent claimed.
+pub async fn agent_report_task(
+    agent_id: i64,
+    agent_uuid: Uuid,
+    job_handle: i64,
+    task_id: i64,
+    op: ReportTaskOp,
+    pool: &InfraPool,
+) -> Result<Option<String>> {
+    let now = TimeDateTimeWithTimeZone::now_utc();
+
+    let job_row = job::load_validate_job(&pool.db, job_handle, agent_id).await?;
+    job::reject_if_terminal(&job_row)?;
+
+    let task = ActiveTasks::Entity::find_by_id(task_id)
+        .one(&pool.db)
+        .await?
+        .ok_or_else(|| Error::ApiError(ApiError::NotFound(format!("Task {task_id}"))))?;
+
+    // Ownership: only the agent the task was handed to may report on it. A task
+    // reclaimed after a heartbeat lapse has had its runner cleared, so a late
+    // report from the old owner lands here as "not found" rather than
+    // overwriting the re-run.
+    if task.runner_uuid != Some(agent_uuid) {
+        return Err(Error::ApiError(ApiError::NotFound(format!(
+            "Task {task_id}"
+        ))));
+    }
+
+    match op {
+        ReportTaskOp::Finish => {
+            tracing::debug!(agent_uuid = %agent_uuid, task_uuid = %task.uuid, "Agent finished a task");
+            ActiveTasks::Entity::update_many()
+                .col_expr(ActiveTasks::Column::State, Expr::value(TaskState::Finished))
+                .col_expr(ActiveTasks::Column::UpdatedAt, Expr::value(now))
+                .filter(ActiveTasks::Column::Id.eq(task.id))
+                .exec(&pool.db)
+                .await?;
+        }
+
+        ReportTaskOp::Cancel => {
+            tracing::debug!(agent_uuid = %agent_uuid, task_uuid = %task.uuid, "Agent cancelled a task");
+            // Already cancelled (the user got there first) is an acknowledgement,
+            // not an error.
+            if task.state != TaskState::Cancelled {
+                ActiveTasks::Entity::update_many()
+                    .col_expr(
+                        ActiveTasks::Column::State,
+                        Expr::value(TaskState::Cancelled),
+                    )
+                    .col_expr(ActiveTasks::Column::UpdatedAt, Expr::value(now))
+                    .filter(ActiveTasks::Column::Id.eq(task.id))
+                    .exec(&pool.db)
+                    .await?;
+            }
+        }
+
+        ReportTaskOp::Commit(res) => {
+            tracing::debug!(agent_uuid = %agent_uuid, task_uuid = %task.uuid, "Agent committed a task");
+            if task.state != TaskState::Finished && task.state != TaskState::Cancelled {
+                return Err(Error::ApiError(ApiError::InvalidRequest(
+                    "Task must be Finished or Cancelled before Commit".to_string(),
+                )));
+            }
+            let result = serde_json::to_value(res)?;
+            let archived = ArchivedTasks::ActiveModel {
+                id: Set(task.id),
+                creator_id: Set(task.creator_id),
+                group_id: Set(task.group_id),
+                task_id: Set(task.task_id),
+                uuid: Set(task.uuid),
+                tags: Set(task.tags.clone()),
+                labels: Set(task.labels.clone()),
+                created_at: Set(task.created_at),
+                updated_at: Set(now),
+                state: Set(task.state),
+                runner_uuid: Set(task.runner_uuid),
+                priority: Set(task.priority),
+                spec: Set(task.spec.clone()),
+                exec_options: Set(task.exec_options.clone()),
+                result: Set(Some(result)),
+                upstream_task_uuid: Set(task.upstream_task_uuid),
+                downstream_task_uuid: Set(task.downstream_task_uuid),
+                task_suite_id: Set(task.task_suite_id),
+            };
+
+            let inner_task_id = task.id;
+            let suite_id = task.task_suite_id;
+            pool.db
+                .transaction::<_, (), Error>(|txn| {
+                    Box::pin(async move {
+                        // Suite row first, then the task rows: every writer of
+                        // the pair takes them in that order, and a cancel that
+                        // holds the suite while deleting its tasks would
+                        // otherwise close a cycle against this, the hottest
+                        // path there is. Ordering only — the three writes commit
+                        // together either way.
+                        if let Some(suite_id) = suite_id {
+                            crate::service::suite::decrement_incomplete_tasks(
+                                txn, suite_id, 1, now,
+                            )
+                            .await?;
+                        }
+                        archived.insert(txn).await?;
+                        ActiveTasks::Entity::delete_by_id(inner_task_id)
+                            .exec(txn)
+                            .await?;
+                        Ok(())
+                    })
+                })
+                .await?;
+
+            // The job is holding one task fewer, and has a slot free to take
+            // another with.
+            if let Some(suite_id) = suite_id {
+                pool.suite_queues.finished(suite_id, agent_id);
+            }
+
+            // Task chaining: a child registered by an earlier Submit goes
+            // Pending → Ready now that its parent has committed.
+            if let Some(downstream_uuid) = task.downstream_task_uuid {
+                crate::service::task::worker_trigger_pending_task(pool, downstream_uuid).await?;
+            }
+        }
+
+        ReportTaskOp::Upload {
+            content_type,
+            content_length,
+        } => {
+            let (_, url) = group_upload_artifact(
+                pool,
+                StoredTaskModel::Active(task),
+                content_type,
+                content_length,
+            )
+            .await?;
+            return Ok(Some(url));
+        }
+
+        ReportTaskOp::Submit(req) => {
+            if task.state != TaskState::Finished && task.state != TaskState::Cancelled {
+                return Err(Error::ApiError(ApiError::InvalidRequest(
+                    "Task must be Finished or Cancelled before spawning a new task".to_string(),
+                )));
+            }
+            // The child stays in the parent's group, but is free to name any
+            // suite that group owns — the parent's own suite, a sibling one, or
+            // none at all for a task the workers pick up. The submit path
+            // enforces the group rule.
+            let resp = crate::service::task::worker_submit_pending_task(
+                pool,
+                task.creator_id,
+                task.uuid,
+                task.group_id,
+                *req,
+            )
+            .await?;
+
+            ActiveTasks::Entity::update_many()
+                .col_expr(
+                    ActiveTasks::Column::DownstreamTaskUuid,
+                    Expr::value(Some(resp.uuid)),
+                )
+                .col_expr(ActiveTasks::Column::UpdatedAt, Expr::value(now))
+                .filter(ActiveTasks::Column::Id.eq(task.id))
+                .exec(&pool.db)
+                .await?;
+        }
+    }
+
+    Ok(None)
+}

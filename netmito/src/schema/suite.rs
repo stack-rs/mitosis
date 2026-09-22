@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 use crate::entity::state::TaskSuiteState;
 
-use super::exec::ExecHooks;
+use super::agent::SuiteJobInfo;
+use super::exec::{ExecHooks, ExecSpec};
 
 /// Request to create a new task suite
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +44,98 @@ pub struct CreateTaskSuiteResp {
     pub uuid: Uuid,
 }
 
+/// A change to a field whose column is nullable. The field itself is wrapped in
+/// an `Option`, where absent means "leave alone" — so the two variants are the
+/// only things a caller can ask for, and neither can be confused with silence.
+///
+/// Fields backed by a `NOT NULL` column keep a plain `Option`: they have no null
+/// to set, and their cleared state is a value (an empty array, say).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", content = "value", rename_all = "snake_case")]
+pub enum UpdateOp<T> {
+    SetTo(T),
+    SetNull,
+}
+
+impl<T> UpdateOp<T> {
+    /// The value this op stores.
+    pub fn into_value(self) -> Option<T> {
+        match self {
+            Self::SetTo(value) => Some(value),
+            Self::SetNull => None,
+        }
+    }
+}
+
+/// Per-hook changes to a suite's `exec_hooks`. Each hook is set, cleared, or —
+/// absent — left as it was; the alternative, replacing the whole object, would
+/// drop the hooks a caller merely failed to mention. Clearing all three stores
+/// no hooks at all, the shape creation leaves behind for a suite with none.
+///
+/// The merge itself is done in SQL, over the column's own value, so two
+/// concurrent patches cannot lose each other's edit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExecHooksUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<UpdateOp<ExecSpec>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<UpdateOp<ExecSpec>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<UpdateOp<ExecSpec>>,
+}
+
+impl ExecHooksUpdate {
+    pub fn is_empty(&self) -> bool {
+        self.provision.is_none() && self.cleanup.is_none() && self.background.is_none()
+    }
+}
+
+/// Request to change a suite's properties. Every field is absent-means-unchanged,
+/// and an empty request is rejected rather than treated as a no-op.
+///
+/// A change reaches the jobs started after it, never the ones already running:
+/// slot counts and hooks are snapshotted when a job starts, and an agent that
+/// stops matching the new tags still finishes what it holds.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChangeTaskSuiteReq {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<UpdateOp<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<UpdateOp<String>>,
+    /// Tags for agent matching. An empty set matches every agent the suite's
+    /// group can write to, since matching is array containment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<HashSet<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<HashSet<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    /// Replaces the plan wholesale — a patch could not express switching to
+    /// another scheduling policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_schedule: Option<WorkerSchedulePlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_hooks: Option<ExecHooksUpdate>,
+}
+
+impl ChangeTaskSuiteReq {
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none()
+            && self.description.is_none()
+            && self.tags.is_none()
+            && self.labels.is_none()
+            && self.priority.is_none()
+            && self.worker_schedule.is_none()
+            && self.exec_hooks.as_ref().map_or(true, |h| h.is_empty())
+    }
+
+    /// Whether the change touches what the scheduler reads: who may run the
+    /// suite, and where it sits in the pick order.
+    pub fn affects_scheduling(&self) -> bool {
+        self.tags.is_some() || self.priority.is_some()
+    }
+}
+
 /// Worker scheduling policy for the suite
 /// This enum allows for future extension with different scheduling strategies
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,9 +151,17 @@ pub enum WorkerSchedulePlan {
         /// Optional CPU core binding strategy
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cpu_binding: Option<CpuBinding>,
-        /// How many tasks to prefetch locally per worker (default: 16)
-        #[serde(default = "default_prefetch_count")]
-        task_prefetch_count: u32,
+        /// Whether the agent may hold claimed tasks beyond the ones it is
+        /// running, so a slot that frees has one waiting instead of paying a
+        /// round trip for it. The depth is not configurable: it is one more
+        /// worker's worth per worker, which is what makes the agent's buffer
+        /// the same size as its slot count.
+        ///
+        /// Turning it off costs a round trip per task and is worth it only for
+        /// suites whose tasks run far longer than that, where holding a task
+        /// claimed on a busy agent is worse than leaving it for a free one.
+        #[serde(default = "default_prefetch")]
+        prefetch: bool,
     },
     // Future extensions:
     // AutoScale { min_workers, max_workers, scale_up_threshold, scale_down_threshold, ... }
@@ -68,8 +169,8 @@ pub enum WorkerSchedulePlan {
     // Priority { high_priority_workers, low_priority_workers, ... }
 }
 
-fn default_prefetch_count() -> u32 {
-    16
+fn default_prefetch() -> bool {
+    true
 }
 
 /// CPU core binding configuration
@@ -172,11 +273,17 @@ pub struct ParsedTaskSuiteInfo {
     pub completed_at: Option<OffsetDateTime>,
 }
 
-/// Detailed suite response: the suite plus the UUIDs of its assigned agents
+/// Detailed suite response: the suite, the UUIDs of the agents currently
+/// eligible to run it — tag-matched plus manual includes, minus manual excludes,
+/// computed at query time rather than stored — and the jobs running it right now.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSuiteQueryResp {
     pub info: ParsedTaskSuiteInfo,
     pub eligible_agents: Vec<Uuid>,
+    /// The suite's non-terminal jobs, oldest first: who is running it and how
+    /// far along each runner is. Empty means nothing holds the suite. Eligible
+    /// agents are the ones that *may* run it, these are the ones that *are*.
+    pub active_jobs: Vec<SuiteJobInfo>,
 }
 
 /// Query parameter for `DELETE /suites/{uuid}` selecting the cancellation mode

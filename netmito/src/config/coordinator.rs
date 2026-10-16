@@ -6,6 +6,7 @@ use aws_sdk_s3::{
     Client as S3Client,
 };
 use clap::Args;
+use crossfire::{AsyncRx, MTx};
 use figment::{
     providers::{Env, Format, Serialized, Toml},
     value::magic::RelativePathBuf,
@@ -17,14 +18,12 @@ use redis::{acl::Rule, AsyncCommands};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use time::Duration;
-#[cfg(not(feature = "crossfire-channel"))]
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use crate::{
     error::Error,
-    service::worker::{HeartbeatOp, HeartbeatQueue, TaskDispatcher, TaskDispatcherOp},
+    service::worker::{HeartbeatOp, TaskDispatcher, TaskDispatcherOp, WorkerHeartbeatQueue},
 };
 
 use super::TracingGuard;
@@ -36,6 +35,16 @@ pub const DEFAULT_COORDINATOR_ADDR: SocketAddr =
 pub struct CoordinatorConfig {
     pub(crate) bind: SocketAddr,
     pub(crate) db_url: String,
+    /// Size of the database connection pool. Left unset, sea-orm falls through
+    /// to sqlx's default of 10, which is not enough: a request blocked on a
+    /// contended row holds its connection for the whole wait, so a handful of
+    /// concurrent writers to one group starve every other route of connections.
+    #[serde(default = "default_db_max_connections")]
+    pub(crate) db_max_connections: u32,
+    /// Connections kept open while idle, so a burst after a quiet spell does
+    /// not pay to reconnect.
+    #[serde(default = "default_db_min_connections")]
+    pub(crate) db_min_connections: u32,
     pub(crate) s3_url: String,
     pub(crate) s3_access_key: String,
     pub(crate) s3_secret_key: String,
@@ -62,6 +71,14 @@ pub struct CoordinatorConfig {
     pub(crate) heartbeat_timeout: std::time::Duration,
     pub(crate) log_path: Option<RelativePathBuf>,
     pub(crate) file_log: bool,
+}
+
+fn default_db_max_connections() -> u32 {
+    32
+}
+
+fn default_db_min_connections() -> u32 {
+    8
 }
 
 fn default_mitosis_region() -> String {
@@ -91,6 +108,14 @@ pub struct CoordinatorConfigCli {
     #[arg(long = "db")]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub db_url: Option<String>,
+    /// The size of the database connection pool, default to 32
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub db_max_connections: Option<u32>,
+    /// The number of database connections kept open while idle, default to 8
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub db_min_connections: Option<u32>,
     /// The S3 URL
     #[arg(long = "s3")]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -173,6 +198,8 @@ impl Default for CoordinatorConfig {
         Self {
             bind: DEFAULT_COORDINATOR_ADDR,
             db_url: "postgres://mitosis:mitosis@localhost/mitosis".to_string(),
+            db_max_connections: default_db_max_connections(),
+            db_min_connections: default_db_min_connections(),
             redis_url: None,
             redis_worker_password: None,
             redis_client_password: None,
@@ -220,8 +247,7 @@ impl CoordinatorConfig {
     pub fn build_worker_task_queue(
         &self,
         cancel_token: CancellationToken,
-        #[cfg(not(feature = "crossfire-channel"))] rx: UnboundedReceiver<TaskDispatcherOp>,
-        #[cfg(feature = "crossfire-channel")] rx: crossfire::AsyncRx<TaskDispatcherOp>,
+        rx: AsyncRx<TaskDispatcherOp>,
     ) -> TaskDispatcher {
         TaskDispatcher::new(cancel_token, rx)
     }
@@ -230,10 +256,9 @@ impl CoordinatorConfig {
         &self,
         cancel_token: CancellationToken,
         pool: InfraPool,
-        #[cfg(not(feature = "crossfire-channel"))] rx: UnboundedReceiver<HeartbeatOp>,
-        #[cfg(feature = "crossfire-channel")] rx: crossfire::AsyncRx<HeartbeatOp>,
-    ) -> HeartbeatQueue {
-        HeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
+        rx: AsyncRx<HeartbeatOp>,
+    ) -> WorkerHeartbeatQueue {
+        WorkerHeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
     }
 
     pub async fn build_redis_connection_info(
@@ -298,20 +323,14 @@ impl CoordinatorConfig {
 
     pub async fn build_infra_pool(
         &self,
-        #[cfg(not(feature = "crossfire-channel"))] worker_task_queue_tx: UnboundedSender<
-            TaskDispatcherOp,
-        >,
-        #[cfg(feature = "crossfire-channel")] worker_task_queue_tx: crossfire::MTx<
-            TaskDispatcherOp,
-        >,
-        #[cfg(not(feature = "crossfire-channel"))] worker_heartbeat_queue_tx: UnboundedSender<
-            HeartbeatOp,
-        >,
-        #[cfg(feature = "crossfire-channel")] worker_heartbeat_queue_tx: crossfire::MTx<
-            HeartbeatOp,
-        >,
+        worker_task_queue_tx: MTx<TaskDispatcherOp>,
+        worker_heartbeat_queue_tx: MTx<HeartbeatOp>,
     ) -> crate::error::Result<InfraPool> {
-        let db = sea_orm::Database::connect(&self.db_url).await?;
+        let mut db_opt = sea_orm::ConnectOptions::new(self.db_url.clone());
+        db_opt
+            .max_connections(self.db_max_connections)
+            .min_connections(self.db_min_connections);
+        let db = sea_orm::Database::connect(db_opt).await?;
         let credential = Credentials::new(
             &self.s3_access_key,
             &self.s3_secret_key,
@@ -366,7 +385,7 @@ impl CoordinatorConfig {
     }
 
     pub fn setup_tracing_subscriber(&self) -> crate::error::Result<TracingGuard> {
-        if self.file_log {
+        let (file_layer, file_guard) = if self.file_log {
             let file_logger = self
                 .log_path
                 .as_ref()
@@ -398,37 +417,48 @@ impl CoordinatorConfig {
             let (non_blocking, guard) = tracing_appender::non_blocking(file_logger);
             let env_filter = tracing_subscriber::EnvFilter::try_from_env("MITO_FILE_LOG_LEVEL")
                 .unwrap_or_else(|_| "netmito=info".into());
-            let coordinator_guard = tracing_subscriber::registry()
-                .with(
-                    tracing_subscriber::fmt::layer().with_filter(
-                        tracing_subscriber::EnvFilter::try_from_default_env()
-                            .unwrap_or_else(|_| "netmito=info".into()),
-                    ),
-                )
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .with_writer(non_blocking)
-                        .with_filter(env_filter),
-                )
-                .set_default();
-            Ok(TracingGuard {
-                subscriber_guard: Some(coordinator_guard),
-                file_guard: Some(guard),
-            })
+            let layer = tracing_subscriber::fmt::layer()
+                .with_file(true)
+                .with_line_number(true)
+                .with_writer(non_blocking)
+                .with_filter(env_filter);
+            (Some(layer), Some(guard))
         } else {
-            let coordinator_guard = tracing_subscriber::registry()
-                .with(
-                    tracing_subscriber::fmt::layer().with_filter(
+            (None, None)
+        };
+
+        let registry = tracing_subscriber::registry();
+
+        #[cfg(feature = "hotpath")]
+        let registry = registry.with(hotpath::sqlx_tracing_layer());
+
+        registry
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_file(true)
+                    .with_line_number(true)
+                    .with_filter(
                         tracing_subscriber::EnvFilter::try_from_default_env()
                             .unwrap_or_else(|_| "netmito=info".into()),
                     ),
-                )
-                .set_default();
-            Ok(TracingGuard {
-                subscriber_guard: Some(coordinator_guard),
-                file_guard: None,
-            })
-        }
+            )
+            .with(file_layer)
+            // Temporary workaround for tokio-rs/tracing#2519; drop this layer
+            // once its fix (PR #3572) is released.
+            //
+            // A `with_filter` per-layer filter records its verdict in
+            // thread-local state that only a dispatched event clears. sqlx asks
+            // the log bridge whether `sqlx::query` is on, is wrongly told yes,
+            // then emits through a `tracing` macro whose callsite the filter has
+            // already short-circuited — so the verdict is never cleared and
+            // swallows our next log line instead. Every query does this, so
+            // under load all of our log get rejected. `Identity` is
+            // unfiltered, which keeps rejected callsites at `sometimes` interest
+            // so they reach the subscriber and clear the verdict on their way
+            // out.
+            .with(tracing_subscriber::layer::Identity::new())
+            .init();
+        Ok(TracingGuard { file_guard })
     }
 }
 
@@ -438,14 +468,8 @@ pub struct InfraPool {
     pub s3: S3Client,
     pub artifacts_bucket: String,
     pub attachments_bucket: String,
-    #[cfg(not(feature = "crossfire-channel"))]
-    pub worker_task_queue_tx: UnboundedSender<TaskDispatcherOp>,
-    #[cfg(feature = "crossfire-channel")]
-    pub worker_task_queue_tx: crossfire::MTx<TaskDispatcherOp>,
-    #[cfg(not(feature = "crossfire-channel"))]
-    pub worker_heartbeat_queue_tx: UnboundedSender<HeartbeatOp>,
-    #[cfg(feature = "crossfire-channel")]
-    pub worker_heartbeat_queue_tx: crossfire::MTx<HeartbeatOp>,
+    pub worker_task_queue_tx: MTx<TaskDispatcherOp>,
+    pub worker_heartbeat_queue_tx: MTx<HeartbeatOp>,
 }
 
 #[derive(Debug)]

@@ -32,6 +32,7 @@ pub struct ArtifactQueryResp {
 pub struct ArtifactsDownloadByFilterReq {
     pub creator_usernames: Option<HashSet<String>>,
     pub group_name: Option<String>,
+    pub suite_uuid: Option<Uuid>,
     pub tags: Option<HashSet<String>>,
     pub labels: Option<HashSet<String>>,
     pub states: Option<HashSet<TaskState>>,
@@ -70,6 +71,7 @@ pub struct ArtifactsDownloadListResp {
 pub struct ArtifactsDeleteByFilterReq {
     pub creator_usernames: Option<HashSet<String>>,
     pub group_name: Option<String>,
+    pub suite_uuid: Option<Uuid>,
     pub tags: Option<HashSet<String>>,
     pub labels: Option<HashSet<String>>,
     pub states: Option<HashSet<TaskState>>,

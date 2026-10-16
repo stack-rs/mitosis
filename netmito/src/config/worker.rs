@@ -252,7 +252,7 @@ impl WorkerConfig {
         T: std::fmt::Display,
         U: Into<T>,
     {
-        if self.file_log {
+        let (file_layer, file_guard) = if self.file_log {
             let id = worker_id.into();
             let id_str = id.to_string();
 
@@ -333,59 +333,44 @@ impl WorkerConfig {
             let env_filter = tracing_subscriber::EnvFilter::try_from_env("MITO_FILE_LOG_LEVEL")
                 .unwrap_or_else(|_| "netmito=info".into());
 
-            // If shared_log is enabled, wrap the writer to add worker UUID prefix
-            let coordinator_guard = if self.shared_log {
-                let worker_writer = WorkerIdMakeWriter {
+            // One file holds several workers when `shared_log` is on, so each
+            // line there carries its worker id. `BoxMakeWriter` erases the two
+            // writers to a single type, which is what lets both cases share the
+            // one layer stack below.
+            let writer = if self.shared_log {
+                tracing_subscriber::fmt::writer::BoxMakeWriter::new(WorkerIdMakeWriter {
                     inner: non_blocking,
                     worker_id: id_str,
-                };
-
-                tracing_subscriber::registry()
-                    .with(
-                        tracing_subscriber::fmt::layer().with_filter(
-                            tracing_subscriber::EnvFilter::try_from_default_env()
-                                .unwrap_or_else(|_| "netmito=info".into()),
-                        ),
-                    )
-                    .with(
-                        tracing_subscriber::fmt::layer()
-                            .with_writer(worker_writer)
-                            .with_filter(env_filter),
-                    )
-                    .set_default()
+                })
             } else {
-                tracing_subscriber::registry()
-                    .with(
-                        tracing_subscriber::fmt::layer().with_filter(
-                            tracing_subscriber::EnvFilter::try_from_default_env()
-                                .unwrap_or_else(|_| "netmito=info".into()),
-                        ),
-                    )
-                    .with(
-                        tracing_subscriber::fmt::layer()
-                            .with_writer(non_blocking)
-                            .with_filter(env_filter),
-                    )
-                    .set_default()
+                tracing_subscriber::fmt::writer::BoxMakeWriter::new(non_blocking)
             };
-
-            Ok(TracingGuard {
-                subscriber_guard: Some(coordinator_guard),
-                file_guard: Some(guard),
-            })
+            let layer = tracing_subscriber::fmt::layer()
+                .with_file(true)
+                .with_line_number(true)
+                .with_writer(writer)
+                .with_filter(env_filter);
+            (Some(layer), Some(guard))
         } else {
-            let coordinator_guard = tracing_subscriber::registry()
-                .with(
-                    tracing_subscriber::fmt::layer().with_filter(
+            (None, None)
+        };
+
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_file(true)
+                    .with_line_number(true)
+                    .with_filter(
                         tracing_subscriber::EnvFilter::try_from_default_env()
                             .unwrap_or_else(|_| "netmito=info".into()),
                     ),
-                )
-                .set_default();
-            Ok(TracingGuard {
-                subscriber_guard: Some(coordinator_guard),
-                file_guard: None,
-            })
-        }
+            )
+            .with(file_layer)
+            // Same tracing-subscriber workaround as the coordinator's
+            // `setup_tracing_subscriber` — see there for why, and drop both when
+            // tokio-rs/tracing#2519 is fixed.
+            .with(tracing_subscriber::layer::Identity::new())
+            .init();
+        Ok(TracingGuard { file_guard })
     }
 }

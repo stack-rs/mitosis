@@ -3,46 +3,60 @@ use std::path::PathBuf;
 
 use argon2::password_hash::rand_core::OsRng;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::layer::SubscriberExt;
 
 use crate::api::router;
 use crate::config::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 use crate::migration::{Migrator, MigratorTrait};
 use crate::service::s3::setup_buckets;
-use crate::service::worker::{restore_workers, HeartbeatQueue, TaskDispatcher};
+use crate::service::worker::{restore_workers, TaskDispatcher, WorkerHeartbeatQueue};
 use crate::signal::shutdown_signal;
 
 pub struct MitoCoordinator {
     pub infra_pool: InfraPool,
     pub worker_task_queue: TaskDispatcher,
-    pub worker_heartbeat_queue: HeartbeatQueue,
+    pub worker_heartbeat_queue: WorkerHeartbeatQueue,
     pub cancel_token: CancellationToken,
     pub log_dir: PathBuf,
 }
 
 impl MitoCoordinator {
     pub async fn main(cli: CoordinatorConfigCli) {
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "netmito=info".into()),
-            )
-            .with(tracing_subscriber::fmt::layer())
-            .init();
-        match CoordinatorConfig::new(&cli) {
-            Ok(config) => {
-                let _guards = config.setup_tracing_subscriber().inspect_err(|e| {
+        // `set_default` rather than `init`: config loading is the only thing
+        // this has to cover, and the real subscriber replaces it below
+        let bootstrap = tracing::dispatcher::set_default(&tracing::Dispatch::new(
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "netmito=info".into()),
+                )
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_file(true)
+                        .with_line_number(true),
+                ),
+        ));
+        let config = match CoordinatorConfig::new(&cli) {
+            Ok(config) => config,
+            Err(e) => {
+                tracing::error!("{}", e);
+                return;
+            }
+        };
+        // Nothing below would be logged anywhere if this failed: the bootstrap
+        // is about to go and it is what installs the replacement.
+        let _guards = match config.setup_tracing_subscriber() {
+            Ok(guards) => guards,
+            Err(e) => {
+                tracing::error!("{}", e);
+                return;
+            }
+        };
+        drop(bootstrap);
+        match Self::setup(config).await {
+            Ok(coordinator) => {
+                if let Err(e) = coordinator.run().await {
                     tracing::error!("{}", e);
-                });
-                match Self::setup(config).await {
-                    Ok(coordinator) => {
-                        if let Err(e) = coordinator.run().await {
-                            tracing::error!("{}", e);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("{}", e);
-                    }
                 }
             }
             Err(e) => {
@@ -85,14 +99,7 @@ impl MitoCoordinator {
             .map_err(|_| crate::error::Error::Custom("set shutdown secret failed".to_string()))?;
         let cancel_token = CancellationToken::new();
 
-        #[cfg(not(feature = "crossfire-channel"))]
-        let (worker_task_queue_tx, worker_task_queue_rx) = tokio::sync::mpsc::unbounded_channel();
-        #[cfg(feature = "crossfire-channel")]
         let (worker_task_queue_tx, worker_task_queue_rx) = crossfire::mpsc::unbounded_async();
-        #[cfg(not(feature = "crossfire-channel"))]
-        let (worker_heartbeat_queue_tx, worker_heartbeat_queue_rx) =
-            tokio::sync::mpsc::unbounded_channel();
-        #[cfg(feature = "crossfire-channel")]
         let (worker_heartbeat_queue_tx, worker_heartbeat_queue_rx) =
             crossfire::mpsc::unbounded_async();
 

@@ -14,11 +14,10 @@ use reqwest::header::CONTENT_LENGTH;
 use reqwest::{Client, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_tar::{Builder, Header};
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::layer::SubscriberExt;
 use url::Url;
 use uuid::Uuid;
 
@@ -224,15 +223,23 @@ impl TaskExecutor {
 
 impl MitoWorker {
     pub async fn main(cli: WorkerConfigCli) {
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "netmito=info".into()),
-            )
-            .with(tracing_subscriber::fmt::layer())
-            .init();
+        // `set_default` rather than `init`: this only has to cover config
+        // loading and registration. The real subscriber needs the worker id the
+        // coordinator hands back, so `setup` installs it and drops this one.
+        let bootstrap = tracing::dispatcher::set_default(&tracing::Dispatch::new(
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "netmito=info".into()),
+                )
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_file(true)
+                        .with_line_number(true),
+                ),
+        ));
         match WorkerConfig::new(&cli) {
-            Ok(config) => match Self::setup(config).await {
+            Ok(config) => match Self::setup(config, bootstrap).await {
                 Ok((mut worker, _guards)) => {
                     if let Err(e) = worker.run().await {
                         tracing::error!("{}", e);
@@ -249,7 +256,14 @@ impl MitoWorker {
         }
     }
 
-    pub async fn setup(mut config: WorkerConfig) -> crate::error::Result<(Self, TracingGuard)> {
+    /// `bootstrap` is `main`'s temporary subscriber, released as soon as the
+    /// real one is installed below. Holding it across the awaits before that is
+    /// sound only because the worker runs on a current-thread runtime — a
+    /// `DefaultGuard` is thread-local.
+    pub async fn setup(
+        mut config: WorkerConfig,
+        bootstrap: tracing::subscriber::DefaultGuard,
+    ) -> crate::error::Result<(Self, TracingGuard)> {
         tracing::debug!("Worker is setting up");
         let http_client = Client::new();
         let mut credential_guard = CredentialGuard::new(
@@ -308,6 +322,8 @@ impl MitoWorker {
             tokio::fs::create_dir_all(&cache_path.join("resource")).await?;
             tokio::fs::create_dir_all(&log_dir).await?;
             let guards = config.setup_tracing_subscriber::<&uuid::Uuid, _>(&resp.worker_id)?;
+            // The worker's own subscriber is live now; stop shadowing it.
+            drop(bootstrap);
             let redis_client = if config.skip_redis {
                 None
             } else {
@@ -1065,7 +1081,7 @@ async fn process_task_result(
     };
     report_task(task_executor, req).await?;
     // Compress possible output and upload
-    let (tx, mut rx) = mpsc::channel::<(ArtifactContentType, u64)>(3);
+    let (tx, rx) = crossfire::spsc::unbounded_async::<(ArtifactContentType, u64)>();
     // Spawn a task to archive the output
     let timeout_cancel_token = CancellationToken::new();
     let archive_timeout_cancel_token = timeout_cancel_token.clone();
@@ -1110,7 +1126,7 @@ async fn process_task_result(
                             encoder.shutdown().await?;
                             let file = encoder.into_inner();
                             let size = file.metadata().await?.len();
-                            if let Err(e) = tx.send((ArtifactContentType::Result, size)).await {
+                            if let Err(e) = tx.send((ArtifactContentType::Result, size)) {
                                 tracing::error!("Failed to send result size: {}", e);
                                 archive_cancel_token.cancel();
                                 return Ok(());
@@ -1166,7 +1182,7 @@ async fn process_task_result(
                             encoder.shutdown().await?;
                             let file = encoder.into_inner();
                             let size = file.metadata().await?.len();
-                            if let Err(e) = tx.send((ArtifactContentType::ExecLog, size)).await {
+                            if let Err(e) = tx.send((ArtifactContentType::ExecLog, size)) {
                                 tracing::error!("Failed to compress exec log: {}", e);
                                 archive_cancel_token.cancel();
                                 return Ok(());
@@ -1225,7 +1241,7 @@ async fn process_task_result(
                             encoder.shutdown().await?;
                             let file = encoder.into_inner();
                             let size = file.metadata().await?.len();
-                            if let Err(e) = tx.send((ArtifactContentType::StdLog, size)).await {
+                            if let Err(e) = tx.send((ArtifactContentType::StdLog, size)) {
                                 tracing::error!("Failed to compress std log: {}", e);
                                 archive_cancel_token.cancel();
                                 return Ok(());
@@ -1246,7 +1262,10 @@ async fn process_task_result(
         Ok(())
     });
     let upload_artifact_fut = async {
-        while let Some((content_type, content_length)) = rx.recv().await {
+        // Move `rx` in, so it drops when uploading stops and the archiver's
+        // next `send` fails instead of compressing output nobody uploads.
+        let rx = rx;
+        while let Ok((content_type, content_length)) = rx.recv().await {
             let req = ReportTaskReq {
                 id,
                 op: ReportTaskOp::Upload {

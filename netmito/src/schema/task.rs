@@ -100,6 +100,9 @@ pub struct TaskQueryInfo {
     pub uuid: Uuid,
     pub creator_username: String,
     pub group_name: String,
+    /// The suite that owns this task, if any. A suite always belongs to
+    /// `group_name`, since submitting to one pins the task's group to it.
+    pub suite_uuid: Option<Uuid>,
     pub task_id: i64,
     pub tags: Vec<String>,
     pub labels: Vec<String>,
@@ -120,6 +123,7 @@ pub struct ParsedTaskQueryInfo {
     pub uuid: Uuid,
     pub creator_username: String,
     pub group_name: String,
+    pub suite_uuid: Option<Uuid>,
     pub task_id: i64,
     pub tags: Vec<String>,
     pub labels: Vec<String>,
@@ -142,6 +146,10 @@ pub struct ParsedTaskQueryInfo {
 pub struct TasksQueryReq {
     pub creator_usernames: Option<HashSet<String>>,
     pub group_name: Option<String>,
+    /// Restrict to the tasks of one suite. The suite names its own group, so it
+    /// fills in `group_name` when that was left out and contradicts it
+    /// otherwise.
+    pub suite_uuid: Option<Uuid>,
     pub tags: Option<HashSet<String>>,
     pub labels: Option<HashSet<String>>,
     pub states: Option<HashSet<TaskState>>,
@@ -160,6 +168,7 @@ pub struct TasksQueryReq {
 pub struct TasksCancelByFilterReq {
     pub creator_usernames: Option<HashSet<String>>,
     pub group_name: Option<String>,
+    pub suite_uuid: Option<Uuid>,
     pub tags: Option<HashSet<String>>,
     pub labels: Option<HashSet<String>>,
     pub states: Option<HashSet<TaskState>>,

@@ -675,6 +675,10 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             Expr::col((Group::Entity, Group::Column::GroupName)),
             Alias::new("group_name"),
         )
+        .expr_as(
+            Expr::col((TaskSuites::Entity, TaskSuites::Column::Uuid)),
+            Alias::new("suite_uuid"),
+        )
         .from(ActiveTasks::Entity)
         .join(
             sea_orm::JoinType::Join,
@@ -689,6 +693,16 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             Group::Entity,
             Expr::col((ActiveTasks::Entity, ActiveTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        // Left join: a task without a suite is the common case, and those
+        // rows have to survive it.
+        .join(
+            sea_orm::JoinType::LeftJoin,
+            TaskSuites::Entity,
+            Expr::col((TaskSuites::Entity, TaskSuites::Column::Id)).eq(Expr::col((
+                ActiveTasks::Entity,
+                ActiveTasks::Column::TaskSuiteId,
+            ))),
         )
         .and_where(Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Uuid)).eq(uuid))
         .limit(1)
@@ -724,6 +738,10 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             Expr::col((Group::Entity, Group::Column::GroupName)),
             Alias::new("group_name"),
         )
+        .expr_as(
+            Expr::col((TaskSuites::Entity, TaskSuites::Column::Uuid)),
+            Alias::new("suite_uuid"),
+        )
         .from(ArchivedTasks::Entity)
         .join(
             sea_orm::JoinType::Join,
@@ -738,6 +756,16 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             Group::Entity,
             Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        // Left join: a task without a suite is the common case, and those
+        // rows have to survive it.
+        .join(
+            sea_orm::JoinType::LeftJoin,
+            TaskSuites::Entity,
+            Expr::col((TaskSuites::Entity, TaskSuites::Column::Id)).eq(Expr::col((
+                ArchivedTasks::Entity,
+                ArchivedTasks::Column::TaskSuiteId,
+            ))),
         )
         .and_where(Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Uuid)).eq(uuid))
         .limit(1)
@@ -768,6 +796,7 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
         uuid: info.uuid,
         creator_username: info.creator_username,
         group_name: info.group_name,
+        suite_uuid: info.suite_uuid,
         task_id: info.task_id,
         tags: info.tags,
         labels: info.labels,
@@ -790,12 +819,21 @@ struct UserGroupRoleQueryRes {
     role: UserGroupRole,
 }
 
+/// The suite a query is restricted to, resolved together with the group that
+/// owns it so the two can be checked against each other.
+#[derive(FromQueryResult)]
+struct SuiteIdWithGroup {
+    id: i64,
+    group_name: String,
+}
+
+/// Returns the id of the suite the query names, for [`apply_task_filters`].
 pub(crate) async fn check_task_list_query(
     user_id: i64,
     pool: &InfraPool,
     query: &mut TasksQueryReq,
     role: UserGroupRole,
-) -> crate::error::Result<()> {
+) -> crate::error::Result<Option<i64>> {
     if let Some(ref tags) = query.tags {
         if tags.is_empty() {
             return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
@@ -824,6 +862,69 @@ pub(crate) async fn check_task_list_query(
             )));
         }
     }
+    // A suite belongs to exactly one group, and submitting to it pins the task
+    // to that same group, so the suite names the group rather than narrowing
+    // it: it fills in a group the caller left out, and contradicts one they got
+    // wrong. Resolved through the caller's own memberships, so a suite in a
+    // group they are not in, one that does not exist, and one that disagrees
+    // with `group_name` are all the same answer — and that answer never names
+    // the owning group, which would otherwise leak out of a bare uuid.
+    let suite_id = match query.suite_uuid {
+        None => None,
+        Some(suite_uuid) => {
+            let builder = pool.db.get_database_backend();
+            let suite_stmt = Query::select()
+                .column((TaskSuites::Entity, TaskSuites::Column::Id))
+                .expr_as(
+                    Expr::col((Group::Entity, Group::Column::GroupName)),
+                    Alias::new("group_name"),
+                )
+                .from(TaskSuites::Entity)
+                .join(
+                    sea_orm::JoinType::Join,
+                    Group::Entity,
+                    Expr::col((TaskSuites::Entity, TaskSuites::Column::GroupId))
+                        .eq(Expr::col((Group::Entity, Group::Column::Id))),
+                )
+                .join(
+                    sea_orm::JoinType::Join,
+                    UserGroup::Entity,
+                    Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))
+                        .eq(Expr::col((TaskSuites::Entity, TaskSuites::Column::GroupId))),
+                )
+                .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+                .and_where(Expr::col((TaskSuites::Entity, TaskSuites::Column::Uuid)).eq(suite_uuid))
+                .to_owned();
+            let suite = SuiteIdWithGroup::find_by_statement(builder.build(&suite_stmt))
+                .one(&pool.db)
+                .await?
+                .ok_or_else(|| {
+                    // This fires when there is no query result, i.e. the suite does not exist or
+                    // the user does not have access to it
+                    Error::ApiError(crate::error::ApiError::NotFound(format!(
+                        "User doesn't have permission or suite with uuid {suite_uuid}"
+                    )))
+                })?;
+            match query.group_name {
+                Some(ref group_name) if *group_name != suite.group_name => {
+                    // This fires then the user's specified group_name does not match
+                    // the actual owner group of the suite.
+                    return Err(Error::ApiError(crate::error::ApiError::NotFound(format!(
+                        "User doesn't have permission or suite with uuid {suite_uuid}"
+                    ))));
+                }
+                Some(_) => {}
+                None => {
+                    tracing::debug!(
+                        "No group name specified, use the suite's group {} instead",
+                        suite.group_name
+                    );
+                    query.group_name = Some(suite.group_name);
+                }
+            }
+            Some(suite.id)
+        }
+    };
     if query.group_name.is_none() {
         let username = User::Entity::find()
             .filter(User::Column::Id.eq(user_id))
@@ -866,7 +967,7 @@ pub(crate) async fn check_task_list_query(
             }
         }
     }
-    Ok(())
+    Ok(suite_id)
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -905,7 +1006,19 @@ pub(crate) fn apply_task_filters(
     active_stmt: &mut sea_orm::sea_query::SelectStatement,
     archive_stmt: &mut sea_orm::sea_query::SelectStatement,
     query: &TasksQueryReq,
+    suite_id: Option<i64>,
 ) -> crate::error::Result<()> {
+    // The id rather than `query.suite_uuid`: `check_task_list_query` had to read
+    // the row anyway to authorize it, and the archive keeps the same column, so
+    // neither statement needs the suite table joined.
+    if let Some(suite_id) = suite_id {
+        active_stmt.and_where(
+            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::TaskSuiteId)).eq(suite_id),
+        );
+        archive_stmt.and_where(
+            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::TaskSuiteId)).eq(suite_id),
+        );
+    }
     if let Some(runner_uuid) = query.runner_uuid {
         active_stmt.and_where(
             Expr::col((ActiveTasks::Entity, ActiveTasks::Column::RunnerUuid)).eq(runner_uuid),
@@ -1105,7 +1218,7 @@ pub async fn query_tasks_by_filter(
     pool: &InfraPool,
     mut query: TasksQueryReq,
 ) -> crate::error::Result<TasksQueryResp> {
-    check_task_list_query(user_id, pool, &mut query, UserGroupRole::Read).await?;
+    let suite_id = check_task_list_query(user_id, pool, &mut query, UserGroupRole::Read).await?;
     let mut active_stmt = Query::select();
     if query.count {
         active_stmt.expr(Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Uuid)).count());
@@ -1134,6 +1247,10 @@ pub async fn query_tasks_by_filter(
             .expr_as(
                 Expr::col((Group::Entity, Group::Column::GroupName)),
                 Alias::new("group_name"),
+            )
+            .expr_as(
+                Expr::col((TaskSuites::Entity, TaskSuites::Column::Uuid)),
+                Alias::new("suite_uuid"),
             );
     }
     active_stmt
@@ -1151,6 +1268,16 @@ pub async fn query_tasks_by_filter(
             Group::Entity,
             Expr::col((ActiveTasks::Entity, ActiveTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        // Left join: a task without a suite is the common case, and those
+        // rows have to survive it.
+        .join(
+            sea_orm::JoinType::LeftJoin,
+            TaskSuites::Entity,
+            Expr::col((TaskSuites::Entity, TaskSuites::Column::Id)).eq(Expr::col((
+                ActiveTasks::Entity,
+                ActiveTasks::Column::TaskSuiteId,
+            ))),
         );
     let mut archive_stmt = Query::select();
     if query.count {
@@ -1186,6 +1313,10 @@ pub async fn query_tasks_by_filter(
             .expr_as(
                 Expr::col((Group::Entity, Group::Column::GroupName)),
                 Alias::new("group_name"),
+            )
+            .expr_as(
+                Expr::col((TaskSuites::Entity, TaskSuites::Column::Uuid)),
+                Alias::new("suite_uuid"),
             );
     }
     archive_stmt
@@ -1203,10 +1334,20 @@ pub async fn query_tasks_by_filter(
             Group::Entity,
             Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        // Left join: a task without a suite is the common case, and those
+        // rows have to survive it.
+        .join(
+            sea_orm::JoinType::LeftJoin,
+            TaskSuites::Entity,
+            Expr::col((TaskSuites::Entity, TaskSuites::Column::Id)).eq(Expr::col((
+                ArchivedTasks::Entity,
+                ArchivedTasks::Column::TaskSuiteId,
+            ))),
         );
 
     // Apply filters using the shared helper function
-    apply_task_filters(&mut active_stmt, &mut archive_stmt, &query)?;
+    apply_task_filters(&mut active_stmt, &mut archive_stmt, &query, suite_id)?;
     let builder = pool.db.get_database_backend();
     let resp = if query.count {
         let active_count = CountQuery::find_by_statement(builder.build(&active_stmt))
@@ -1258,6 +1399,7 @@ pub async fn cancel_tasks_by_filter(
     let mut query = TasksQueryReq {
         creator_usernames: req.creator_usernames,
         group_name: req.group_name,
+        suite_uuid: req.suite_uuid,
         tags: req.tags,
         labels: req.labels,
         runner_uuid: None,
@@ -1288,7 +1430,7 @@ pub async fn cancel_tasks_by_filter(
     };
 
     // Validate query and fill in defaults (also checks Write permission)
-    check_task_list_query(user_id, pool, &mut query, UserGroupRole::Write).await?;
+    let suite_id = check_task_list_query(user_id, pool, &mut query, UserGroupRole::Write).await?;
     let group_name = query.group_name.clone().unwrap_or_default();
 
     // Build task ID subquery with the same filters (avoids parameter limits)
@@ -1313,7 +1455,12 @@ pub async fn cancel_tasks_by_filter(
 
     // Apply the same filters to the subquery
     let mut dummy_archive_stmt = Query::select().from(ArchivedTasks::Entity).to_owned();
-    apply_task_filters(&mut task_id_subquery, &mut dummy_archive_stmt, &query)?;
+    apply_task_filters(
+        &mut task_id_subquery,
+        &mut dummy_archive_stmt,
+        &query,
+        suite_id,
+    )?;
 
     // Build the complete CTE statement before the transaction to avoid lifetime issues
 

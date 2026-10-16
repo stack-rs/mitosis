@@ -1,10 +1,10 @@
 use sea_orm::sea_query::{
     extension::postgres::PgExpr, Alias, CommonTableExpression, DeleteStatement, ExprTrait,
-    InsertStatement, PgFunc, Query,
+    InsertStatement, LockType, Order, PgFunc, Query, WithClause,
 };
 use sea_orm::ActiveValue::NotSet;
-use sea_orm::{prelude::*, FromQueryResult, Set, TransactionTrait};
-use std::collections::HashSet;
+use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, Set, TransactionTrait};
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::entity::role::{GroupWorkerRole, UserGroupRole};
@@ -31,7 +31,7 @@ use super::worker::{remove_task, TaskDispatcherOp};
 
 // XXX: Not sure if we can relax the constrains on local path checking.
 // We currently only check if the path is absolute or contains `..` and not check for `.`.
-fn check_exec_spec(spec: &ExecSpec) -> crate::error::Result<()> {
+pub(crate) fn check_exec_spec(spec: &ExecSpec) -> crate::error::Result<()> {
     if spec.resources.iter().any(|r| {
         r.local_path.is_absolute()
             || r.local_path
@@ -45,9 +45,15 @@ fn check_exec_spec(spec: &ExecSpec) -> crate::error::Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 enum Submitter {
     User,
-    Worker(Uuid),
+    /// A running task spawning a downstream child, identified by the parent's
+    /// uuid and the group the parent itself lives in.
+    Task {
+        upstream_task_uuid: Uuid,
+        parent_group_id: i64,
+    },
 }
 
 async fn internal_submit_task(
@@ -71,7 +77,9 @@ async fn internal_submit_task(
     // Used later when creating active tasks active model
     let (state, upstream_task_uuid) = match submitter {
         Submitter::User => (Set(crate::entity::state::TaskState::Ready), NotSet),
-        Submitter::Worker(upstream_task_uuid) => (
+        Submitter::Task {
+            upstream_task_uuid, ..
+        } => (
             Set(crate::entity::state::TaskState::Pending),
             Set(Some(upstream_task_uuid)),
         ),
@@ -89,54 +97,18 @@ async fn internal_submit_task(
         .transaction::<_, (ActiveTasks::Model, Option<TaskSuites::Model>), crate::error::Error>(
             |txn| {
                 Box::pin(async move {
-                    // Determine the owning group and (optionally) the suite, then
-                    // atomically bump the group's task counter. When a suite is designated it
-                    // is authoritative: the task's group is the suite's owning group, and the
-                    // request's group_name must match it.
-                    let (group_id, task_id, suite) = match suite_uuid {
-                        None => {
-                            // No suite: resolve the user-specified group, verify the caller's
-                            // membership, and bump its task counter in one statement.
-                            // Membership goes through a subquery rather than a
-                            // joined `FROM user_group`: sea-orm emits an
-                            // unqualified `RETURNING "id", …`, which Postgres
-                            // rejects as ambiguous the moment a second table
-                            // with an `id` column is in scope. Every suite-less
-                            // `POST /tasks` 500s without this.
-                            let member_of = Query::select()
-                                .column(UserGroup::Column::GroupId)
-                                .from(UserGroup::Entity)
-                                .and_where(Expr::col(UserGroup::Column::UserId).eq(creator_id))
-                                // TODO: when there is 'exec' access level, enforce access check here.
-                                //
-                                // .and_where(
-                                //     Expr::col(UserGroup::Column::Role)
-                                //         .gte(UserGroupRole::Write),
-                                // )
-                                .to_owned();
-                            let group = Group::Entity::update_many()
-                                .col_expr(
-                                    Group::Column::TaskCount,
-                                    Expr::col((Group::Entity, Group::Column::TaskCount)).add(1),
-                                )
-                                .col_expr(Group::Column::UpdatedAt, Expr::value(now))
-                                .filter(Group::Column::GroupName.eq(&group_name))
-                                .filter(Group::Column::Id.in_subquery(member_of))
-                                .exec_with_returning(txn)
-                                .await?
-                                .into_iter()
-                                .next()
-                                .ok_or_else(|| {
-                                    Error::ApiError(crate::error::ApiError::NotFound(format!(
-                                        "User doesn't have permission or group with name {}",
-                                        group_name
-                                    )))
-                                })?;
-                            (group.id, group.task_count, None)
-                        }
-                        Some(suite_uuid) => {
-                            // Suite designated: resolve it (and the caller's membership in its
-                            // owning group) in one join. The suite is authoritative for the group.
+                    // Resolve the designated suite, if any. How it is authorized
+                    // depends on the submitter: a user reaches a suite through their
+                    // own group memberships, while a task spawning a child may target
+                    // any suite owned by the group the parent task itself lives in.
+                    //
+                    // The parent's creator is deliberately not re-checked, so a long-running suite
+                    // keeps spawning work after that user leaves the group.
+                    let suite = match (suite_uuid, submitter) {
+                        (None, _) => None,
+                        (Some(suite_uuid), Submitter::User) => {
+                            // Resolve the suite and the caller's membership in its
+                            // owning group in one join.
                             let builder = txn.get_database_backend();
                             let suite_stmt = Query::select()
                                 .columns([
@@ -189,64 +161,195 @@ async fn internal_submit_task(
                                             suite_uuid
                                         )))
                                     })?;
-                            // The suite must be able to accept new tasks.
-                            if !suite.state.can_accept_tasks() {
-                                return Err(Error::ApiError(
-                                    crate::error::ApiError::InvalidRequest(format!(
-                                        "Suite is in {} state and cannot accept new tasks",
-                                        suite.state
-                                    )),
-                                ));
-                            }
-                            // Derive the owning group from the suite and bump its counter.
+                            Some(suite)
+                        }
+                        (
+                            Some(suite_uuid),
+                            Submitter::Task {
+                                parent_group_id, ..
+                            },
+                        ) => Some(
+                            TaskSuites::Entity::find()
+                                .filter(TaskSuites::Column::Uuid.eq(suite_uuid))
+                                .filter(TaskSuites::Column::GroupId.eq(parent_group_id))
+                                .one(txn)
+                                .await?
+                                .ok_or_else(|| {
+                                    // A suite owned by another group is reported the
+                                    // same way as one that does not exist.
+                                    Error::ApiError(crate::error::ApiError::NotFound(format!(
+                                        "Suite with uuid {} in the parent task's group",
+                                        suite_uuid
+                                    )))
+                                })?,
+                        ),
+                    };
+
+                    // A first, unlocked look, so a suite that is plainly closed to
+                    // new work is rejected with its actual state named. The
+                    // binding check is the `WHERE` on the counter bump below —
+                    // this one is only the better error message.
+                    if let Some(suite) = &suite {
+                        if !suite.state.can_accept_tasks() {
+                            return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
+                                format!(
+                                    "Suite is in {} state and cannot accept new tasks",
+                                    suite.state
+                                ),
+                            )));
+                        }
+                    }
+
+                    // The owning group, when it is already pinned by something other
+                    // than `group_name`: a designated suite owns the task, and a
+                    // task-spawned child always stays in its parent's group. `None`
+                    // is the plain user path, where the group is resolved from
+                    // `group_name` and the caller's membership.
+                    let pinned_group_id = match (&suite, submitter) {
+                        (Some(suite), _) => Some(suite.group_id),
+                        (
+                            None,
+                            Submitter::Task {
+                                parent_group_id, ..
+                            },
+                        ) => Some(parent_group_id),
+                        (None, Submitter::User) => None,
+                    };
+
+                    // Bump the owning group's task counter atomically.
+                    let (group_id, task_id) = match pinned_group_id {
+                        Some(pinned_group_id) => {
                             let group = Group::Entity::update_many()
                                 .col_expr(
                                     Group::Column::TaskCount,
                                     Expr::col(Group::Column::TaskCount).add(1),
                                 )
                                 .col_expr(Group::Column::UpdatedAt, Expr::value(now))
-                                .filter(Group::Column::Id.eq(suite.group_id))
+                                .filter(Group::Column::Id.eq(pinned_group_id))
                                 .exec_with_returning(txn)
                                 .await?
                                 .into_iter()
                                 .next()
                                 .ok_or_else(|| {
-                                    // The suite's group row must exist (FK)
-                                    tracing::error!(
-                                        "Owning group {} of suite {} not found",
-                                        suite.group_id,
-                                        suite_uuid
-                                    );
+                                    // The row must exist: both the suite and the
+                                    // parent task hold an FK to it.
+                                    tracing::error!("Owning group {} not found", pinned_group_id);
                                     Error::ApiError(crate::error::ApiError::InternalServerError)
                                 })?;
-                            // The request's group_name must match the suite's owning group.
-                            // Safe to reveal the real group: access to the suite is proven.
+                            // The request's group_name must match
                             if group.group_name != group_name {
+                                let owner = match &suite {
+                                    Some(suite) => {
+                                        format!(
+                                            "Suite {} belongs to group {}",
+                                            suite.uuid, group.group_name
+                                        )
+                                    }
+                                    None => format!(
+                                        "The parent task belongs to group {}",
+                                        group.group_name
+                                    ),
+                                };
                                 return Err(Error::ApiError(
                                     crate::error::ApiError::InvalidRequest(format!(
-                                        "Suite {} belongs to group {}, not {}",
-                                        suite_uuid, group.group_name, group_name
+                                        "{}, not {}",
+                                        owner, group_name
                                     )),
                                 ));
                             }
-                            (group.id, group.task_count, Some(suite))
+                            (group.id, group.task_count)
+                        }
+                        None => {
+                            // Resolve the user-specified group, verify the caller's
+                            // membership, and bump its task counter in one statement.
+                            // Membership goes through a subquery rather than a
+                            // joined `FROM user_group`: sea-orm emits an
+                            // unqualified `RETURNING "id", …`, which Postgres
+                            // rejects as ambiguous the moment a second table
+                            // with an `id` column is in scope. Every suite-less
+                            // `POST /tasks` 500s without this.
+                            let member_of = Query::select()
+                                .column(UserGroup::Column::GroupId)
+                                .from(UserGroup::Entity)
+                                .and_where(Expr::col(UserGroup::Column::UserId).eq(creator_id))
+                                // TODO: when there is 'exec' access level, enforce access check here.
+                                //
+                                // .and_where(
+                                //     Expr::col(UserGroup::Column::Role)
+                                //         .gte(UserGroupRole::Write),
+                                // )
+                                .to_owned();
+                            let group = Group::Entity::update_many()
+                                .col_expr(
+                                    Group::Column::TaskCount,
+                                    Expr::col((Group::Entity, Group::Column::TaskCount)).add(1),
+                                )
+                                .col_expr(Group::Column::UpdatedAt, Expr::value(now))
+                                .filter(Group::Column::GroupName.eq(&group_name))
+                                .filter(Group::Column::Id.in_subquery(member_of))
+                                .exec_with_returning(txn)
+                                .await?
+                                .into_iter()
+                                .next()
+                                .ok_or_else(|| {
+                                    Error::ApiError(crate::error::ApiError::NotFound(format!(
+                                        "User doesn't have permission or group with name {}",
+                                        group_name
+                                    )))
+                                })?;
+                            (group.id, group.task_count)
                         }
                     };
 
+                    // One statement, so both increments are evaluated server-side
+                    // on the row this `UPDATE` itself locked. Read the counters
+                    // first and write literals back and two concurrent submits
+                    // both see `total = n` and both write `n + 1`: the suite
+                    // undercounts, `decrement_incomplete_tasks` reaches zero with
+                    // tasks still `Ready`, and the surplus is stranded in a
+                    // `Complete` suite that hands out nothing.
+                    //
+                    // The state predicate carries the accepts-tasks check, so no
+                    // row is bumped after a cancellation that committed since the
+                    // read above.
                     let suite = match suite {
                         None => None,
-                        Some(suite) => {
-                            let prev_total_tasks = suite.total_tasks;
-                            let prev_incomplete_tasks = suite.incomplete_tasks;
-                            let mut suite: TaskSuites::ActiveModel = suite.into();
-                            suite.total_tasks = Set(prev_total_tasks + 1);
-                            suite.incomplete_tasks = Set(prev_incomplete_tasks + 1);
-                            suite.last_task_submitted_at = Set(Some(now));
-                            suite.updated_at = Set(now);
-                            suite.state = Set(TaskSuiteState::Open);
-                            suite.completed_at = Set(None);
-                            Some(suite.update(txn).await?)
-                        }
+                        Some(suite) => Some(
+                            TaskSuites::Entity::update_many()
+                                .col_expr(
+                                    TaskSuites::Column::TotalTasks,
+                                    Expr::col(TaskSuites::Column::TotalTasks).add(1),
+                                )
+                                .col_expr(
+                                    TaskSuites::Column::IncompleteTasks,
+                                    Expr::col(TaskSuites::Column::IncompleteTasks).add(1),
+                                )
+                                .col_expr(
+                                    TaskSuites::Column::LastTaskSubmittedAt,
+                                    Expr::value(Some(now)),
+                                )
+                                .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+                                .col_expr(
+                                    TaskSuites::Column::State,
+                                    Expr::value(TaskSuiteState::Open),
+                                )
+                                .col_expr(
+                                    TaskSuites::Column::CompletedAt,
+                                    Expr::value(None::<TimeDateTimeWithTimeZone>),
+                                )
+                                .filter(TaskSuites::Column::Id.eq(suite.id))
+                                .filter(TaskSuites::Column::State.ne(TaskSuiteState::Cancelled))
+                                .exec_with_returning(txn)
+                                .await?
+                                .into_iter()
+                                .next()
+                                .ok_or_else(|| {
+                                    // Cancelled between the read above and here.
+                                    Error::ApiError(crate::error::ApiError::InvalidRequest(
+                                        format!("Suite {} stopped accepting new tasks", suite.uuid),
+                                    ))
+                                })?,
+                        ),
                     };
 
                     let task_uuid = Uuid::new_v4();
@@ -267,9 +370,24 @@ async fn internal_submit_task(
                         exec_options: Set(exec_options_json),
                         result: Set(None),
                         upstream_task_uuid,
+                        task_suite_id: Set(suite.as_ref().map(|s| s.id)),
                         ..Default::default()
                     };
                     let task = task.insert(txn).await?;
+
+                    // Queued here, inside the transaction, and never after it
+                    // commits. The queue is emptied by `served`, which removes
+                    // what a claim locked — so a task pushed before its commit
+                    // is always pushed before any `served` that could take it
+                    // back out, because no claim can lock a row it cannot yet
+                    // see. Push after the commit instead and a claim landing in
+                    // between wins the race: it takes the task, `served` finds
+                    // nothing in the queue to remove, and the push then puts an
+                    // already-running task back on the suite's backlog, where
+                    // nothing will ever remove it again.
+                    // TODO: once suites have a ready queue, push a `Ready` suite task
+                    // onto it here with `queues.push_ready(suite.id, [(task.id, task.priority)])`.
+
                     Ok((task, suite))
                 })
             },
@@ -339,13 +457,29 @@ pub async fn user_submit_task(
     internal_submit_task(pool, creator_id, Submitter::User, req).await
 }
 
+/// Submit the downstream child of a running task, on behalf of the worker or
+/// agent executing it.
+///
+/// The child stays in the parent's group, and `req.suite_uuid` may name any
+/// suite that group owns — the parent's own suite, a sibling one, or `None` for
+/// a suite-less task dispatched to workers.
 pub async fn worker_submit_pending_task(
     pool: &InfraPool,
     creator_id: i64,
     upstream_task_uuid: Uuid,
+    parent_group_id: i64,
     req: SubmitTaskReq,
 ) -> crate::error::Result<SubmitTaskResp> {
-    internal_submit_task(pool, creator_id, Submitter::Worker(upstream_task_uuid), req).await
+    internal_submit_task(
+        pool,
+        creator_id,
+        Submitter::Task {
+            upstream_task_uuid,
+            parent_group_id,
+        },
+        req,
+    )
+    .await
 }
 
 pub async fn worker_trigger_pending_task(pool: &InfraPool, uuid: Uuid) -> crate::error::Result<()> {
@@ -362,6 +496,13 @@ pub async fn worker_trigger_pending_task(pool: &InfraPool, uuid: Uuid) -> crate:
     task.state = Set(TaskState::Ready);
     task.updated_at = Set(TimeDateTimeWithTimeZone::now_utc());
     let task = task.update(&pool.db).await?;
+    // A suite task never enters the worker queues — agents pull it from its
+    // suite. Wake the idle eligible agents instead.
+    if let Some(_suite_id) = task.task_suite_id {
+        // TODO: once agents can be notified, call
+        // `notify_suite_available(pool, _suite_id)` here.
+        return Ok(());
+    }
     // Batch add task to worker task queues
     let builder = pool.db.get_database_backend();
     let tasks_stmt = Query::select()
@@ -613,6 +754,7 @@ pub async fn user_cancel_task(
                     }
                 }
                 let now = TimeDateTimeWithTimeZone::now_utc();
+                let suite_id = task.task_suite_id;
                 let res = TaskResultSpec {
                     exit_status: 0,
                     msg: Some(crate::schema::TaskResultMessage::UserCancellation),
@@ -638,6 +780,14 @@ pub async fn user_cancel_task(
                     downstream_task_uuid: Set(task.downstream_task_uuid),
                     task_suite_id: Set(task.task_suite_id),
                 };
+                // A cancelled suite task never reaches an agent `Commit`, so
+                // this is the only chance to give the suite its count back. It
+                // goes first so the suite row is taken before the task rows —
+                // the order every writer of the pair uses.
+                if let Some(suite_id) = suite_id {
+                    crate::service::suite::decrement_incomplete_tasks(txn, suite_id, 1, now)
+                        .await?;
+                }
                 archived_task.insert(txn).await?;
                 ActiveTasks::Entity::delete_by_id(task.id).exec(txn).await?;
                 Ok(task.id)
@@ -646,6 +796,8 @@ pub async fn user_cancel_task(
         .await?;
     let _ = remove_task(task_id, pool)
         .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
+    // TODO: once suites have a ready queue, remove a cancelled suite task from it
+    // as well.
     Ok(())
 }
 
@@ -675,6 +827,10 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             Expr::col((Group::Entity, Group::Column::GroupName)),
             Alias::new("group_name"),
         )
+        .expr_as(
+            Expr::col((TaskSuites::Entity, TaskSuites::Column::Uuid)),
+            Alias::new("suite_uuid"),
+        )
         .from(ActiveTasks::Entity)
         .join(
             sea_orm::JoinType::Join,
@@ -689,6 +845,16 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             Group::Entity,
             Expr::col((ActiveTasks::Entity, ActiveTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        // Left join: a task without a suite is the common case, and those
+        // rows have to survive it.
+        .join(
+            sea_orm::JoinType::LeftJoin,
+            TaskSuites::Entity,
+            Expr::col((TaskSuites::Entity, TaskSuites::Column::Id)).eq(Expr::col((
+                ActiveTasks::Entity,
+                ActiveTasks::Column::TaskSuiteId,
+            ))),
         )
         .and_where(Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Uuid)).eq(uuid))
         .limit(1)
@@ -724,6 +890,10 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             Expr::col((Group::Entity, Group::Column::GroupName)),
             Alias::new("group_name"),
         )
+        .expr_as(
+            Expr::col((TaskSuites::Entity, TaskSuites::Column::Uuid)),
+            Alias::new("suite_uuid"),
+        )
         .from(ArchivedTasks::Entity)
         .join(
             sea_orm::JoinType::Join,
@@ -738,6 +908,16 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             Group::Entity,
             Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        // Left join: a task without a suite is the common case, and those
+        // rows have to survive it.
+        .join(
+            sea_orm::JoinType::LeftJoin,
+            TaskSuites::Entity,
+            Expr::col((TaskSuites::Entity, TaskSuites::Column::Id)).eq(Expr::col((
+                ArchivedTasks::Entity,
+                ArchivedTasks::Column::TaskSuiteId,
+            ))),
         )
         .and_where(Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::Uuid)).eq(uuid))
         .limit(1)
@@ -768,6 +948,7 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
         uuid: info.uuid,
         creator_username: info.creator_username,
         group_name: info.group_name,
+        suite_uuid: info.suite_uuid,
         task_id: info.task_id,
         tags: info.tags,
         labels: info.labels,
@@ -790,12 +971,21 @@ struct UserGroupRoleQueryRes {
     role: UserGroupRole,
 }
 
+/// The suite a query is restricted to, resolved together with the group that
+/// owns it so the two can be checked against each other.
+#[derive(FromQueryResult)]
+struct SuiteIdWithGroup {
+    id: i64,
+    group_name: String,
+}
+
+/// Returns the id of the suite the query names, for [`apply_task_filters`].
 pub(crate) async fn check_task_list_query(
     user_id: i64,
     pool: &InfraPool,
     query: &mut TasksQueryReq,
     role: UserGroupRole,
-) -> crate::error::Result<()> {
+) -> crate::error::Result<Option<i64>> {
     if let Some(ref tags) = query.tags {
         if tags.is_empty() {
             return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
@@ -824,6 +1014,69 @@ pub(crate) async fn check_task_list_query(
             )));
         }
     }
+    // A suite belongs to exactly one group, and submitting to it pins the task
+    // to that same group, so the suite names the group rather than narrowing
+    // it: it fills in a group the caller left out, and contradicts one they got
+    // wrong. Resolved through the caller's own memberships, so a suite in a
+    // group they are not in, one that does not exist, and one that disagrees
+    // with `group_name` are all the same answer — and that answer never names
+    // the owning group, which would otherwise leak out of a bare uuid.
+    let suite_id = match query.suite_uuid {
+        None => None,
+        Some(suite_uuid) => {
+            let builder = pool.db.get_database_backend();
+            let suite_stmt = Query::select()
+                .column((TaskSuites::Entity, TaskSuites::Column::Id))
+                .expr_as(
+                    Expr::col((Group::Entity, Group::Column::GroupName)),
+                    Alias::new("group_name"),
+                )
+                .from(TaskSuites::Entity)
+                .join(
+                    sea_orm::JoinType::Join,
+                    Group::Entity,
+                    Expr::col((TaskSuites::Entity, TaskSuites::Column::GroupId))
+                        .eq(Expr::col((Group::Entity, Group::Column::Id))),
+                )
+                .join(
+                    sea_orm::JoinType::Join,
+                    UserGroup::Entity,
+                    Expr::col((UserGroup::Entity, UserGroup::Column::GroupId))
+                        .eq(Expr::col((TaskSuites::Entity, TaskSuites::Column::GroupId))),
+                )
+                .and_where(Expr::col((UserGroup::Entity, UserGroup::Column::UserId)).eq(user_id))
+                .and_where(Expr::col((TaskSuites::Entity, TaskSuites::Column::Uuid)).eq(suite_uuid))
+                .to_owned();
+            let suite = SuiteIdWithGroup::find_by_statement(builder.build(&suite_stmt))
+                .one(&pool.db)
+                .await?
+                .ok_or_else(|| {
+                    // This fires when there is no query result, i.e. the suite does not exist or
+                    // the user does not have access to it
+                    Error::ApiError(crate::error::ApiError::NotFound(format!(
+                        "User doesn't have permission or suite with uuid {suite_uuid}"
+                    )))
+                })?;
+            match query.group_name {
+                Some(ref group_name) if *group_name != suite.group_name => {
+                    // This fires then the user's specified group_name does not match
+                    // the actual owner group of the suite.
+                    return Err(Error::ApiError(crate::error::ApiError::NotFound(format!(
+                        "User doesn't have permission or suite with uuid {suite_uuid}"
+                    ))));
+                }
+                Some(_) => {}
+                None => {
+                    tracing::debug!(
+                        "No group name specified, use the suite's group {} instead",
+                        suite.group_name
+                    );
+                    query.group_name = Some(suite.group_name);
+                }
+            }
+            Some(suite.id)
+        }
+    };
     if query.group_name.is_none() {
         let username = User::Entity::find()
             .filter(User::Column::Id.eq(user_id))
@@ -866,7 +1119,7 @@ pub(crate) async fn check_task_list_query(
             }
         }
     }
-    Ok(())
+    Ok(suite_id)
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -905,7 +1158,19 @@ pub(crate) fn apply_task_filters(
     active_stmt: &mut sea_orm::sea_query::SelectStatement,
     archive_stmt: &mut sea_orm::sea_query::SelectStatement,
     query: &TasksQueryReq,
+    suite_id: Option<i64>,
 ) -> crate::error::Result<()> {
+    // The id rather than `query.suite_uuid`: `check_task_list_query` had to read
+    // the row anyway to authorize it, and the archive keeps the same column, so
+    // neither statement needs the suite table joined.
+    if let Some(suite_id) = suite_id {
+        active_stmt.and_where(
+            Expr::col((ActiveTasks::Entity, ActiveTasks::Column::TaskSuiteId)).eq(suite_id),
+        );
+        archive_stmt.and_where(
+            Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::TaskSuiteId)).eq(suite_id),
+        );
+    }
     if let Some(runner_uuid) = query.runner_uuid {
         active_stmt.and_where(
             Expr::col((ActiveTasks::Entity, ActiveTasks::Column::RunnerUuid)).eq(runner_uuid),
@@ -1105,7 +1370,7 @@ pub async fn query_tasks_by_filter(
     pool: &InfraPool,
     mut query: TasksQueryReq,
 ) -> crate::error::Result<TasksQueryResp> {
-    check_task_list_query(user_id, pool, &mut query, UserGroupRole::Read).await?;
+    let suite_id = check_task_list_query(user_id, pool, &mut query, UserGroupRole::Read).await?;
     let mut active_stmt = Query::select();
     if query.count {
         active_stmt.expr(Expr::col((ActiveTasks::Entity, ActiveTasks::Column::Uuid)).count());
@@ -1134,6 +1399,10 @@ pub async fn query_tasks_by_filter(
             .expr_as(
                 Expr::col((Group::Entity, Group::Column::GroupName)),
                 Alias::new("group_name"),
+            )
+            .expr_as(
+                Expr::col((TaskSuites::Entity, TaskSuites::Column::Uuid)),
+                Alias::new("suite_uuid"),
             );
     }
     active_stmt
@@ -1151,6 +1420,16 @@ pub async fn query_tasks_by_filter(
             Group::Entity,
             Expr::col((ActiveTasks::Entity, ActiveTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        // Left join: a task without a suite is the common case, and those
+        // rows have to survive it.
+        .join(
+            sea_orm::JoinType::LeftJoin,
+            TaskSuites::Entity,
+            Expr::col((TaskSuites::Entity, TaskSuites::Column::Id)).eq(Expr::col((
+                ActiveTasks::Entity,
+                ActiveTasks::Column::TaskSuiteId,
+            ))),
         );
     let mut archive_stmt = Query::select();
     if query.count {
@@ -1186,6 +1465,10 @@ pub async fn query_tasks_by_filter(
             .expr_as(
                 Expr::col((Group::Entity, Group::Column::GroupName)),
                 Alias::new("group_name"),
+            )
+            .expr_as(
+                Expr::col((TaskSuites::Entity, TaskSuites::Column::Uuid)),
+                Alias::new("suite_uuid"),
             );
     }
     archive_stmt
@@ -1203,10 +1486,20 @@ pub async fn query_tasks_by_filter(
             Group::Entity,
             Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
+        )
+        // Left join: a task without a suite is the common case, and those
+        // rows have to survive it.
+        .join(
+            sea_orm::JoinType::LeftJoin,
+            TaskSuites::Entity,
+            Expr::col((TaskSuites::Entity, TaskSuites::Column::Id)).eq(Expr::col((
+                ArchivedTasks::Entity,
+                ArchivedTasks::Column::TaskSuiteId,
+            ))),
         );
 
     // Apply filters using the shared helper function
-    apply_task_filters(&mut active_stmt, &mut archive_stmt, &query)?;
+    apply_task_filters(&mut active_stmt, &mut archive_stmt, &query, suite_id)?;
     let builder = pool.db.get_database_backend();
     let resp = if query.count {
         let active_count = CountQuery::find_by_statement(builder.build(&active_stmt))
@@ -1244,6 +1537,34 @@ pub async fn query_tasks_by_filter(
 #[derive(FromQueryResult)]
 struct IdResult {
     id: i64,
+    task_suite_id: Option<i64>,
+}
+
+/// Tick `incomplete_tasks` down once per cancelled task, for every suite a
+/// batch cancel touched.
+///
+/// The rows come straight from the archive's `RETURNING`, so this counts what
+/// was actually cancelled rather than what was asked for.
+async fn decrement_incomplete_tasks_by_suite<C: ConnectionTrait>(
+    txn: &C,
+    suite_ids: impl IntoIterator<Item = Option<i64>>,
+    now: TimeDateTimeWithTimeZone,
+) -> crate::error::Result<()> {
+    let mut per_suite: HashMap<i64, i32> = HashMap::new();
+    for suite_id in suite_ids.into_iter().flatten() {
+        *per_suite.entry(suite_id).or_default() += 1;
+    }
+    // Sorted, not iterated straight off the map: each decrement writes its
+    // suite row and holds that lock to commit, so two cancels over overlapping
+    // suites in opposite orders deadlock. The `locked` CTE of each batch cancel
+    // has normally taken these rows already, which makes this a backstop — it
+    // still matters for the straggler suite that CTE cannot cover.
+    let mut per_suite: Vec<(i64, i32)> = per_suite.into_iter().collect();
+    per_suite.sort_unstable_by_key(|(suite_id, _)| *suite_id);
+    for (suite_id, count) in per_suite {
+        crate::service::suite::decrement_incomplete_tasks(txn, suite_id, count, now).await?;
+    }
+    Ok(())
 }
 
 /// Cancel multiple tasks by filter criteria.
@@ -1258,6 +1579,7 @@ pub async fn cancel_tasks_by_filter(
     let mut query = TasksQueryReq {
         creator_usernames: req.creator_usernames,
         group_name: req.group_name,
+        suite_uuid: req.suite_uuid,
         tags: req.tags,
         labels: req.labels,
         runner_uuid: None,
@@ -1288,7 +1610,7 @@ pub async fn cancel_tasks_by_filter(
     };
 
     // Validate query and fill in defaults (also checks Write permission)
-    check_task_list_query(user_id, pool, &mut query, UserGroupRole::Write).await?;
+    let suite_id = check_task_list_query(user_id, pool, &mut query, UserGroupRole::Write).await?;
     let group_name = query.group_name.clone().unwrap_or_default();
 
     // Build task ID subquery with the same filters (avoids parameter limits)
@@ -1313,19 +1635,78 @@ pub async fn cancel_tasks_by_filter(
 
     // Apply the same filters to the subquery
     let mut dummy_archive_stmt = Query::select().from(ArchivedTasks::Entity).to_owned();
-    apply_task_filters(&mut task_id_subquery, &mut dummy_archive_stmt, &query)?;
+    apply_task_filters(
+        &mut task_id_subquery,
+        &mut dummy_archive_stmt,
+        &query,
+        suite_id,
+    )?;
 
     // Build the complete CTE statement before the transaction to avoid lifetime issues
+
+    // The suite rows this cancel will decrement. Every other writer of the pair
+    // takes the suite row before the task rows, and this is how a batch cancel
+    // joins them — on its own it learns its suites from the archive's `RETURNING`,
+    // far too late to lock anything.
+    //
+    // In the same statement as the delete, so one snapshot covers both: the filter
+    // selects the same tasks in each CTE, and a task submitted in between is
+    // invisible to either.
+    //
+    // `ORDER BY id` is load-bearing. Postgres puts `LockRows` above the sort, so
+    // rows are locked in id order; any scan is therefore a prefix of ascending
+    // ids, and overlapping cancels cannot take two rows in opposite orders.
+    let locked_suites = Query::select()
+        .column(TaskSuites::Column::Id)
+        .from(TaskSuites::Entity)
+        .and_where(
+            Expr::col(TaskSuites::Column::Id).in_subquery(
+                Query::select()
+                    .column(ActiveTasks::Column::TaskSuiteId)
+                    .from(ActiveTasks::Entity)
+                    .and_where(
+                        Expr::col(ActiveTasks::Column::Id).in_subquery(task_id_subquery.clone()),
+                    )
+                    .and_where(Expr::col(ActiveTasks::Column::TaskSuiteId).is_not_null())
+                    .to_owned(),
+            ),
+        )
+        .order_by(TaskSuites::Column::Id, Order::Asc)
+        .lock(LockType::Update)
+        .to_owned();
+    let locked_cte = CommonTableExpression::new()
+        .query(locked_suites)
+        .table_name(Alias::new("locked"))
+        .to_owned();
 
     let delete_stmt = DeleteStatement::new()
         .from_table(ActiveTasks::Entity)
         .and_where(Expr::col(ActiveTasks::Column::Id).in_subquery(task_id_subquery))
+        // This predicate is the guarantee, not a nicety: a task is deleted only if
+        // its suite came out of `locked`, and producing that row is what locked it.
+        // So the suite row is always taken before the task row, whatever plan the
+        // subquery gets.
+        .and_where(
+            Expr::col(ActiveTasks::Column::TaskSuiteId)
+                .is_null()
+                .or(Expr::col(ActiveTasks::Column::TaskSuiteId).in_subquery(
+                    Query::select()
+                        .expr(Expr::col(Alias::new("id")))
+                        .from(Alias::new("locked"))
+                        .to_owned(),
+                )),
+        )
         .returning_all()
         .to_owned();
 
-    let cte = CommonTableExpression::new()
+    let deleted_cte = CommonTableExpression::new()
         .query(delete_stmt)
         .table_name(Alias::new("deleted"))
+        .to_owned();
+
+    let with_ctes = WithClause::new()
+        .cte(locked_cte)
+        .cte(deleted_cte)
         .to_owned();
 
     // Get the database backend before the transaction
@@ -1336,7 +1717,7 @@ pub async fn cancel_tasks_by_filter(
     let task_ids = pool
         .db
         .transaction::<_, Vec<i64>, crate::error::Error>(|txn| {
-            let cte = cte.clone();
+            let with_ctes = with_ctes.clone();
             Box::pin(async move {
                 let now = TimeDateTimeWithTimeZone::now_utc();
                 let res = TaskResultSpec {
@@ -1364,6 +1745,7 @@ pub async fn cancel_tasks_by_filter(
                     .expr(Expr::value(result.clone()))
                     .expr(Expr::col(Alias::new("upstream_task_uuid")))
                     .expr(Expr::col(Alias::new("downstream_task_uuid")))
+                    .expr(Expr::col(Alias::new("task_suite_id")))
                     .from(Alias::new("deleted"))
                     .to_owned();
 
@@ -1388,21 +1770,28 @@ pub async fn cancel_tasks_by_filter(
                         ArchivedTasks::Column::Result,
                         ArchivedTasks::Column::UpstreamTaskUuid,
                         ArchivedTasks::Column::DownstreamTaskUuid,
+                        // Without this the archived copy of a suite task loses
+                        // its suite, and the count below has nothing to key on.
+                        ArchivedTasks::Column::TaskSuiteId,
                     ])
                     .to_owned();
 
                 insert_stmt.select_from(select_from_cte).unwrap();
-                insert_stmt.returning_col(ArchivedTasks::Column::Id);
-                let insert_with_cte = insert_stmt.with(cte.into());
+                insert_stmt.returning_all();
+                let insert_with_cte = insert_stmt.with(with_ctes);
 
                 let stmt = builder.build(&insert_with_cte);
 
-                let task_ids: Vec<i64> = IdResult::find_by_statement(stmt)
-                    .all(txn)
-                    .await?
-                    .into_iter()
-                    .map(|r| r.id)
-                    .collect();
+                let cancelled: Vec<IdResult> = IdResult::find_by_statement(stmt).all(txn).await?;
+
+                decrement_incomplete_tasks_by_suite(
+                    txn,
+                    cancelled.iter().map(|r| r.task_suite_id),
+                    now,
+                )
+                .await?;
+
+                let task_ids: Vec<i64> = cancelled.into_iter().map(|r| r.id).collect();
 
                 Ok(task_ids)
             })
@@ -1414,6 +1803,8 @@ pub async fn cancel_tasks_by_filter(
         let _ = remove_task(*task_id, pool)
             .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
     }
+    // TODO: once suites have a ready queue, remove the cancelled suite tasks
+    // from it as well.
 
     Ok(TasksCancelByFilterResp {
         cancelled_count: task_ids.len() as u64,
@@ -1425,6 +1816,7 @@ pub async fn cancel_tasks_by_filter(
 struct IdUuidResult {
     id: i64,
     uuid: Uuid,
+    task_suite_id: Option<i64>,
 }
 
 pub async fn cancel_tasks_by_uuids(
@@ -1488,15 +1880,69 @@ pub async fn cancel_tasks_by_uuids(
 
         // Build CTE for DELETE RETURNING + INSERT SELECT to avoid parameter limits
         // Convert the SELECT statement into a subquery for the DELETE
+        // The suite rows this cancel will decrement. Every other writer of the pair
+        // takes the suite row before the task rows, and this is how a batch cancel
+        // joins them — on its own it learns its suites from the archive's `RETURNING`,
+        // far too late to lock anything.
+        //
+        // In the same statement as the delete, so one snapshot covers both: the filter
+        // selects the same tasks in each CTE, and a task submitted in between is
+        // invisible to either.
+        //
+        // `ORDER BY id` is load-bearing. Postgres puts `LockRows` above the sort, so
+        // rows are locked in id order; any scan is therefore a prefix of ascending
+        // ids, and overlapping cancels cannot take two rows in opposite orders.
+        let locked_suites = Query::select()
+            .column(TaskSuites::Column::Id)
+            .from(TaskSuites::Entity)
+            .and_where(
+                Expr::col(TaskSuites::Column::Id).in_subquery(
+                    Query::select()
+                        .column(ActiveTasks::Column::TaskSuiteId)
+                        .from(ActiveTasks::Entity)
+                        .and_where(
+                            Expr::col(ActiveTasks::Column::Id).in_subquery(id_subquery.clone()),
+                        )
+                        .and_where(Expr::col(ActiveTasks::Column::TaskSuiteId).is_not_null())
+                        .to_owned(),
+                ),
+            )
+            .order_by(TaskSuites::Column::Id, Order::Asc)
+            .lock(LockType::Update)
+            .to_owned();
+        let locked_cte = CommonTableExpression::new()
+            .query(locked_suites)
+            .table_name(Alias::new("locked"))
+            .to_owned();
+
         let delete_stmt = DeleteStatement::new()
             .from_table(ActiveTasks::Entity)
             .and_where(Expr::col(ActiveTasks::Column::Id).in_subquery(id_subquery))
+            // This predicate is the guarantee, not a nicety: a task is deleted only if
+            // its suite came out of `locked`, and producing that row is what locked it.
+            // So the suite row is always taken before the task row, whatever plan the
+            // subquery gets.
+            .and_where(
+                Expr::col(ActiveTasks::Column::TaskSuiteId)
+                    .is_null()
+                    .or(Expr::col(ActiveTasks::Column::TaskSuiteId).in_subquery(
+                        Query::select()
+                            .expr(Expr::col(Alias::new("id")))
+                            .from(Alias::new("locked"))
+                            .to_owned(),
+                    )),
+            )
             .returning_all()
             .to_owned();
 
-        let cte = CommonTableExpression::new()
+        let deleted_cte = CommonTableExpression::new()
             .query(delete_stmt)
             .table_name(Alias::new("deleted"))
+            .to_owned();
+
+        let with_ctes = WithClause::new()
+            .cte(locked_cte)
+            .cte(deleted_cte)
             .to_owned();
 
         // Execute delete and insert in a single transaction
@@ -1504,7 +1950,7 @@ pub async fn cancel_tasks_by_uuids(
         let (task_ids, found_uuids) = pool
             .db
             .transaction::<_, (Vec<i64>, HashSet<Uuid>), crate::error::Error>(|txn| {
-                let cte = cte.clone();
+                let with_ctes = with_ctes.clone();
                 Box::pin(async move {
                     let now = TimeDateTimeWithTimeZone::now_utc();
                     let res = TaskResultSpec {
@@ -1533,6 +1979,7 @@ pub async fn cancel_tasks_by_uuids(
                         .expr(Expr::value(result.clone()))
                         .expr(Expr::col(Alias::new("upstream_task_uuid")))
                         .expr(Expr::col(Alias::new("downstream_task_uuid")))
+                        .expr(Expr::col(Alias::new("task_suite_id")))
                         .from(Alias::new("deleted"))
                         .to_owned();
 
@@ -1557,17 +2004,28 @@ pub async fn cancel_tasks_by_uuids(
                             ArchivedTasks::Column::Result,
                             ArchivedTasks::Column::UpstreamTaskUuid,
                             ArchivedTasks::Column::DownstreamTaskUuid,
+                            // Without this the archived copy of a suite task
+                            // loses its suite, and the count below has nothing
+                            // to key on.
+                            ArchivedTasks::Column::TaskSuiteId,
                         ])
                         .to_owned();
 
                     insert_stmt.select_from(select_from_cte).unwrap();
                     insert_stmt.returning_all();
-                    let insert_with_cte = insert_stmt.with(cte.into());
+                    let insert_with_cte = insert_stmt.with(with_ctes);
 
                     let stmt = builder.build(&insert_with_cte);
 
                     let results: Vec<IdUuidResult> =
                         IdUuidResult::find_by_statement(stmt).all(txn).await?;
+
+                    decrement_incomplete_tasks_by_suite(
+                        txn,
+                        results.iter().map(|r| r.task_suite_id),
+                        now,
+                    )
+                    .await?;
 
                     let task_ids: Vec<i64> = results.iter().map(|r| r.id).collect();
                     let found_uuids: HashSet<Uuid> = results.into_iter().map(|r| r.uuid).collect();
@@ -1587,6 +2045,8 @@ pub async fn cancel_tasks_by_uuids(
         let _ = remove_task(*task_id, pool)
             .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
     }
+    // TODO: once suites have a ready queue, remove the cancelled suite tasks
+    // from it as well.
 
     // Determine which UUIDs failed (not found or no permission)
     let failed_uuids: Vec<Uuid> = req

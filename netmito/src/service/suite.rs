@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use sea_orm::sea_query::extension::postgres::PgExpr;
-use sea_orm::sea_query::{Alias, PgFunc, Query};
+use sea_orm::sea_query::{
+    Alias, CommonTableExpression, DeleteStatement, InsertStatement, PgFunc, Query, WithClause,
+};
 use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, Set, TransactionTrait};
 use uuid::Uuid;
 
@@ -27,6 +29,84 @@ use crate::service::task::{check_exec_spec, parse_operators_with_number, Operato
 #[derive(FromQueryResult)]
 struct GroupIdResult {
     id: i64,
+}
+
+#[derive(FromQueryResult)]
+struct TaskUuidResult {
+    uuid: Uuid,
+}
+
+/// Hand `count` finished tasks back to a suite: tick `incomplete_tasks` down,
+/// and complete the suite if that empties an already-`Closed` one.
+///
+/// Every path that takes an active task out of a suite ends here. A path that
+/// archives a suite task without calling this parks the
+/// suite short of `Complete` and leaves agents cycling over work that is no
+/// longer there.
+///
+/// The subtraction is deliberately unguarded. Every caller has just removed
+/// exactly `count` rows from `active_tasks`, and each of those rows added one to
+/// the counter when it was submitted, so the arithmetic cannot legitimately go
+/// below zero. Clamping it would only turn a bug elsewhere into a suite that
+/// looks fine; a negative counter is reported instead, loudly.
+///
+/// Draining an `Open` suite does not complete it: it stays `Open` until it has
+/// also been quiet for `suite_auto_close_timeout`, which is what lets the agent
+/// hold its job — and its provisioned environment — open for a late arrival.
+/// [`sweep_inactive_suites`] settles it afterwards. A `Closed` suite has no such
+/// window to wait out, so it is completed here.
+///
+/// The suite row must be taken before any task row, either by this call or by
+/// the caller before it — see the lock-order note on [`crate::service`].
+pub(crate) async fn decrement_incomplete_tasks<C: ConnectionTrait>(
+    db: &C,
+    suite_id: i64,
+    count: i32,
+    now: TimeDateTimeWithTimeZone,
+) -> Result<()> {
+    if count <= 0 {
+        return Ok(());
+    }
+
+    let updated = TaskSuites::Entity::update_many()
+        .col_expr(
+            TaskSuites::Column::IncompleteTasks,
+            Expr::col(TaskSuites::Column::IncompleteTasks).sub(count),
+        )
+        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+        .filter(TaskSuites::Column::Id.eq(suite_id))
+        .exec_with_returning(db)
+        .await?;
+
+    // Nothing here can repair it, and swallowing it would leave a suite that
+    // never completes and never gets claimed, with no trace of why.
+    for suite in updated.iter().filter(|s| s.incomplete_tasks < 0) {
+        tracing::error!(
+            suite_id = suite.id,
+            incomplete_tasks = suite.incomplete_tasks,
+            decremented = count,
+            "A suite's incomplete_tasks went negative: more tasks were taken off it than were ever counted"
+        );
+    }
+
+    // Conditional on the state and the count, which is what makes a second
+    // statement safe without a transaction around the pair: a submission racing
+    // it either lands first and leaves a non-zero count, or lands after and sets
+    // `Open` itself.
+    TaskSuites::Entity::update_many()
+        .col_expr(
+            TaskSuites::Column::State,
+            Expr::value(TaskSuiteState::Complete),
+        )
+        .col_expr(TaskSuites::Column::CompletedAt, Expr::value(Some(now)))
+        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+        .filter(TaskSuites::Column::Id.eq(suite_id))
+        .filter(TaskSuites::Column::State.eq(TaskSuiteState::Closed))
+        .filter(TaskSuites::Column::IncompleteTasks.eq(0))
+        .exec(db)
+        .await?;
+
+    Ok(())
 }
 
 /// The largest worker count a plan may ask an agent for.
@@ -725,6 +805,9 @@ pub async fn user_close_task_suite(user_id: i64, pool: &InfraPool, suite_uuid: U
                         Err(ResolveError::Fatal(e)) => return Err(e),
                     };
 
+                // `authorize_suite` takes no lock, so this only names the state
+                // in the error; the `WHERE` below is what actually rejects a
+                // second close.
                 if suite.state != TaskSuiteState::Open {
                     return Err(Error::ApiError(ApiError::InvalidRequest(format!(
                         "Cannot transition from {} to Closed",
@@ -732,10 +815,21 @@ pub async fn user_close_task_suite(user_id: i64, pool: &InfraPool, suite_uuid: U
                     ))));
                 }
 
-                let mut suite: TaskSuites::ActiveModel = suite.into();
-                suite.state = Set(TaskSuiteState::Closed);
-                suite.updated_at = Set(now);
-                suite.update(txn).await?;
+                let closed = TaskSuites::Entity::update_many()
+                    .col_expr(
+                        TaskSuites::Column::State,
+                        Expr::value(TaskSuiteState::Closed),
+                    )
+                    .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+                    .filter(TaskSuites::Column::Id.eq(suite.id))
+                    .filter(TaskSuites::Column::State.eq(TaskSuiteState::Open))
+                    .exec(txn)
+                    .await?;
+                if closed.rows_affected == 0 {
+                    return Err(Error::ApiError(ApiError::InvalidRequest(format!(
+                        "Suite {suite_uuid} is no longer Open"
+                    ))));
+                }
                 Ok(())
             })
         })
@@ -758,9 +852,11 @@ pub async fn user_cancel_task_suite(
     _op: CancelTaskSuiteOp,
 ) -> Result<()> {
     let now = TimeDateTimeWithTimeZone::now_utc();
+    let builder = pool.db.get_database_backend();
 
-    pool.db
-        .transaction::<_, u64, Error>(|txn| {
+    let (_suite_id, _cancelled_task_uuids) = pool
+        .db
+        .transaction::<_, (i64, Vec<Uuid>), Error>(|txn| {
             Box::pin(async move {
                 // Resolve the suite and authorize the caller's Write role in one join.
                 let suite =
@@ -778,6 +874,35 @@ pub async fn user_cancel_task_suite(
                     ))));
                 }
 
+                // The suite is cancelled *before* its tasks are archived, not
+                // after. This statement locks the suite row, and every submit
+                // bumps that same row under a `state <> Cancelled` predicate — so
+                // once this commits, a concurrent submit either got in ahead of
+                // the delete below or is rejected outright. Write the suite last
+                // instead and a submit landing between the delete and the write
+                // leaves a live task in a cancelled suite that nothing will ever
+                // claim, with `incomplete_tasks` already zeroed.
+                //
+                // Zero is exact for the same reason: the delete below takes every
+                // active row of the suite, and nothing can add another.
+                let fenced = TaskSuites::Entity::update_many()
+                    .col_expr(
+                        TaskSuites::Column::State,
+                        Expr::value(TaskSuiteState::Cancelled),
+                    )
+                    .col_expr(TaskSuites::Column::IncompleteTasks, Expr::value(0))
+                    .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+                    .col_expr(TaskSuites::Column::CompletedAt, Expr::value(Some(now)))
+                    .filter(TaskSuites::Column::Id.eq(suite.id))
+                    .filter(TaskSuites::Column::State.ne(TaskSuiteState::Cancelled))
+                    .exec(txn)
+                    .await?;
+                if fenced.rows_affected == 0 {
+                    return Err(Error::ApiError(ApiError::InvalidRequest(format!(
+                        "Suite {suite_uuid} is already in cancelled state"
+                    ))));
+                }
+
                 // All cancelled tasks share this result.
                 let result = serde_json::to_value(TaskResultSpec {
                     exit_status: 0,
@@ -785,73 +910,127 @@ pub async fn user_cancel_task_suite(
                 })
                 .inspect_err(|e| tracing::error!("{}", e))?;
 
-                // Archive every non-terminal task of the suite as Cancelled:
-                let tasks = ActiveTasks::Entity::delete_many()
-                    .filter(ActiveTasks::Column::TaskSuiteId.eq(suite.id))
-                    .filter(
-                        ActiveTasks::Column::State
-                            .is_not_in([TaskState::Cancelled, TaskState::Unknown]),
+                // Avoid returning the rows so that we won't trigger psql's too many
+                // argument error when archiving many tasks.
+                //
+                // `Cancelled` rows are taken deliberately: that state means an
+                // agent reported `Cancel` and has not yet sent the `Commit` that
+                // would archive the task. Leaving them behind stalls them in
+                // `active_tasks` forever — the `Commit` is about to be refused by
+                // a terminal job, no other agent can claim a non-`Ready` task, and
+                // nothing reclaims that state.
+                let delete_stmt = DeleteStatement::new()
+                    .from_table(ActiveTasks::Entity)
+                    .and_where(Expr::col(ActiveTasks::Column::TaskSuiteId).eq(suite.id))
+                    .and_where(
+                        Expr::col(ActiveTasks::Column::State).is_not_in([TaskState::Unknown]),
                     )
-                    .exec_with_returning(txn)
-                    .await?;
+                    .returning_all()
+                    .to_owned();
+                let deleted_cte = CommonTableExpression::new()
+                    .query(delete_stmt)
+                    .table_name(Alias::new("deleted"))
+                    .to_owned();
 
-                // The inflight subset is the only set tied to an executing agent: each
-                // carries the `runner_uuid` of the agent running it. A Force cancel must
-                // signal those agents to stop so they don't commit tasks we just archived.
-                // Collected now and intentionally left unused.
-                // TODO: wire this to a per-agent shutdown/TasksCancelled
-                // push once the agent/notification layer exists
-                let _inflight_signals: Vec<(Option<Uuid>, Uuid)> = tasks
-                    .iter()
-                    .filter(|t| matches!(t.state, TaskState::Running | TaskState::Finished))
-                    .map(|t| (t.runner_uuid, t.uuid))
-                    .collect();
+                // The archived copy: every column read out of `deleted` by name,
+                // with `updated_at`, `state` and `result` overwritten by three
+                // values bound once for the whole statement.
+                let select_from_deleted = Query::select()
+                    .expr(Expr::col(Alias::new("id")))
+                    .expr(Expr::col(Alias::new("creator_id")))
+                    .expr(Expr::col(Alias::new("group_id")))
+                    .expr(Expr::col(Alias::new("task_id")))
+                    .expr(Expr::col(Alias::new("uuid")))
+                    .expr(Expr::col(Alias::new("tags")))
+                    .expr(Expr::col(Alias::new("labels")))
+                    .expr(Expr::col(Alias::new("created_at")))
+                    .expr(Expr::value(now))
+                    .expr(Expr::value(TaskState::Cancelled))
+                    .expr(Expr::col(Alias::new("runner_uuid")))
+                    .expr(Expr::col(Alias::new("exec_options")))
+                    .expr(Expr::col(Alias::new("priority")))
+                    .expr(Expr::col(Alias::new("spec")))
+                    .expr(Expr::value(result))
+                    .expr(Expr::col(Alias::new("upstream_task_uuid")))
+                    .expr(Expr::col(Alias::new("downstream_task_uuid")))
+                    .expr(Expr::col(Alias::new("task_suite_id")))
+                    .from(Alias::new("deleted"))
+                    .to_owned();
 
-                let cancelled_count = tasks.len() as u64;
-                if !tasks.is_empty() {
-                    let archived: Vec<ArchivedTasks::ActiveModel> = tasks
-                        .into_iter()
-                        .map(|task| ArchivedTasks::ActiveModel {
-                            id: Set(task.id),
-                            creator_id: Set(task.creator_id),
-                            group_id: Set(task.group_id),
-                            task_id: Set(task.task_id),
-                            uuid: Set(task.uuid),
-                            tags: Set(task.tags),
-                            labels: Set(task.labels),
-                            created_at: Set(task.created_at),
-                            updated_at: Set(now),
-                            state: Set(TaskState::Cancelled),
-                            runner_uuid: Set(task.runner_uuid),
-                            priority: Set(task.priority),
-                            spec: Set(task.spec),
-                            exec_options: Set(task.exec_options),
-                            result: Set(Some(result.clone())),
-                            upstream_task_uuid: Set(task.upstream_task_uuid),
-                            downstream_task_uuid: Set(task.downstream_task_uuid),
-                            task_suite_id: Set(task.task_suite_id),
-                        })
-                        .collect();
+                let mut insert_stmt = InsertStatement::new()
+                    .into_table(ArchivedTasks::Entity)
+                    .columns([
+                        ArchivedTasks::Column::Id,
+                        ArchivedTasks::Column::CreatorId,
+                        ArchivedTasks::Column::GroupId,
+                        ArchivedTasks::Column::TaskId,
+                        ArchivedTasks::Column::Uuid,
+                        ArchivedTasks::Column::Tags,
+                        ArchivedTasks::Column::Labels,
+                        ArchivedTasks::Column::CreatedAt,
+                        ArchivedTasks::Column::UpdatedAt,
+                        ArchivedTasks::Column::State,
+                        ArchivedTasks::Column::RunnerUuid,
+                        ArchivedTasks::Column::ExecOptions,
+                        ArchivedTasks::Column::Priority,
+                        ArchivedTasks::Column::Spec,
+                        ArchivedTasks::Column::Result,
+                        ArchivedTasks::Column::UpstreamTaskUuid,
+                        ArchivedTasks::Column::DownstreamTaskUuid,
+                        // Without this the archived copy of a suite task loses
+                        // its suite.
+                        ArchivedTasks::Column::TaskSuiteId,
+                    ])
+                    .to_owned();
+                // Infallible here: the column list and the select have the same
+                // arity, which is a property of this code, not of the request.
+                insert_stmt.select_from(select_from_deleted).unwrap();
+                let archived_cte = CommonTableExpression::new()
+                    .query(insert_stmt)
+                    .table_name(Alias::new("archived"))
+                    .to_owned();
 
-                    ArchivedTasks::Entity::insert_many(archived)
-                        .exec(txn)
-                        .await?;
-                }
+                // The in-flight subset is the only one an agent is holding right
+                // now. Those agents are told which task uuids vanished, so they
+                // stop rather than reporting against rows we just archived.
+                //
+                // This reads `deleted`, not `archived`, because it needs each
+                // task's state as it stood *before* the archive rewrote it to
+                // `Cancelled`. `archived` is never referenced, and does not have
+                // to be: Postgres runs a data-modifying CTE exactly once and to
+                // completion whether or not the primary query reads its output.
+                let in_flight_stmt = Query::select()
+                    .expr(Expr::col(Alias::new("uuid")))
+                    .from(Alias::new("deleted"))
+                    .and_where(Expr::col(Alias::new("state")).is_in([
+                        TaskState::Running,
+                        TaskState::Finished,
+                        TaskState::Cancelled,
+                    ]))
+                    .to_owned();
 
-                let mut suite: TaskSuites::ActiveModel = suite.into();
-                suite.state = Set(TaskSuiteState::Cancelled);
-                suite.updated_at = Set(now);
-                suite.completed_at = Set(Some(now));
-                suite.update(txn).await?;
+                let with_ctes = WithClause::new()
+                    .cte(deleted_cte)
+                    .cte(archived_cte)
+                    .to_owned();
+                let cancelled_task_uuids: Vec<Uuid> = TaskUuidResult::find_by_statement(
+                    builder.build(&in_flight_stmt.with(with_ctes)),
+                )
+                .all(txn)
+                .await?
+                .into_iter()
+                .map(|t| t.uuid)
+                .collect();
 
-                Ok(cancelled_count)
+                let suite_id = suite.id;
+                Ok((suite_id, cancelled_task_uuids))
             })
         })
         .await?;
 
-    // TODO: notify assigned/executing agents that this suite was cancelled (and, for
-    // Force, push per-agent TasksCancelled built from `_running_signals` above), then
-    // drop the suite's in-memory task buffer in the dispatcher.
+    // TODO: once agents run suites, stop the jobs on `_suite_id` (`Force` kills
+    // them, `Graceful` lets them drain) and send each agent `SuiteCancelled`, plus
+    // `TasksCancelled` for `_cancelled_task_uuids`.
 
     Ok(())
 }

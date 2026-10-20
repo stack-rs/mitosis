@@ -17,7 +17,7 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v5
 
       - name: Setup mdBook
         uses: peaceiris/actions-mdbook@v2
@@ -28,8 +28,13 @@ jobs:
       - name: Pull latest version
         run: |
           TARGET_FILE="guide/src/guide/installation.md"
-          MITO_RELEASE=$(curl curl --silent -m 10 --connect-timeout 5 "https://api.github.com/repos/stack-rs/mitosis/releases/latest")
-          VERSION=$(echo "$MITO_RELEASE" | grep -oP '"tag_name":\s*"[^"]*-v?\K[0-9]+\.[0-9]+\.[0-9]+')
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            # The GitHub release for this tag is created later by release.yml, so read the version from the tag
+            VERSION=$(echo "$GITHUB_REF_NAME" | grep -oP 'v?\K[0-9]+\.[0-9]+\.[0-9]+')
+          else
+            MITO_RELEASE=$(curl --silent -m 10 --connect-timeout 5 "https://api.github.com/repos/stack-rs/mitosis/releases/latest")
+            VERSION=$(echo "$MITO_RELEASE" | grep -oP '"tag_name":\s*"[^"]*-v?\K[0-9]+\.[0-9]+\.[0-9]+')
+          fi
           echo "Latest version: $VERSION"
           TEMP_FILE=$(mktemp)
           awk -v new_version="mito-v$VERSION" '{ gsub(/mito-v[0-9]+\.[0-9]+\.[0-9]+/, new_version); print }' "$TARGET_FILE" >"$TEMP_FILE"
@@ -42,8 +47,8 @@ jobs:
         working-directory: ./guide
 
       - name: Deploy
-        uses: peaceiris/actions-gh-pages@v3
-        if: ${{ github.ref == 'refs/heads/main' }}
+        uses: peaceiris/actions-gh-pages@v4
+        if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/mito-v') }}
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./guide/book

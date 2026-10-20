@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.9](https://github.com/stack-rs/mitosis/compare/mito-v0.6.8...mito-v0.6.9) - 2026-10-20
+
+### Bug Fixes
+
+- *(worker)* Correct db query in batch cancellation - ([00dc2e1](https://github.com/stack-rs/mitosis/commit/00dc2e103782c7e798fea4d421cd0c0b8b7de075))
+
+### Miscellaneous Tasks
+
+- *(release)* Tidy release-plz config and workflows - ([f41a356](https://github.com/stack-rs/mitosis/commit/f41a356057d05c50bac67490d47a562f800a9112))
+
+
 ## [0.6.8](https://github.com/stack-rs/mitosis/compare/mito-v0.6.7...mito-v0.6.8) - 2026-03-04
 
 ### Features

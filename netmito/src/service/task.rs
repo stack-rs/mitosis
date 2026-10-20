@@ -97,28 +97,31 @@ async fn internal_submit_task(
                         None => {
                             // No suite: resolve the user-specified group, verify the caller's
                             // membership, and bump its task counter in one statement.
-                            let mut upd = Group::Entity::update_many()
+                            // No row back means either the group doesn't exist or the
+                            // caller isn't in it; both return 404 so users won't know
+                            // about the existence of a group they are not a member of.
+                            // Membership must stay a subquery, not a join: both table has a
+                            // `id` column and sea-orm will create a unqualified `RETURNING id`,
+                            // which Postgres rejects as ambiguous.
+                            let member_of = Query::select()
+                                .column(UserGroup::Column::GroupId)
+                                .from(UserGroup::Entity)
+                                .and_where(Expr::col(UserGroup::Column::UserId).eq(creator_id))
+                                // TODO: when there is 'exec' access level, enforce access check here.
+                                //
+                                // .and_where(
+                                //     Expr::col(UserGroup::Column::Role)
+                                //         .gte(UserGroupRole::Write),
+                                // )
+                                .to_owned();
+                            let group = Group::Entity::update_many()
                                 .col_expr(
                                     Group::Column::TaskCount,
                                     Expr::col((Group::Entity, Group::Column::TaskCount)).add(1),
                                 )
                                 .col_expr(Group::Column::UpdatedAt, Expr::value(now))
                                 .filter(Group::Column::GroupName.eq(&group_name))
-                                .filter(
-                                    Expr::col((UserGroup::Entity, UserGroup::Column::UserId))
-                                        .eq(creator_id),
-                                )
-                                // TODO: when there is 'exec' access level, enforce access check here.
-                                //
-                                // .filter(
-                                //     Expr::col((UserGroup::Entity, UserGroup::Column::Role))
-                                //         .gte(UserGroupRole::Write),
-                                // )
-                                .filter(Expr::col((Group::Entity, Group::Column::Id)).eq(
-                                    Expr::col((UserGroup::Entity, UserGroup::Column::GroupId)),
-                                ));
-                            upd.query().from(UserGroup::Entity);
-                            let group = upd
+                                .filter(Group::Column::Id.in_subquery(member_of))
                                 .exec_with_returning(txn)
                                 .await?
                                 .into_iter()

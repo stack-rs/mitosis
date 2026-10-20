@@ -97,12 +97,12 @@ async fn internal_submit_task(
                         None => {
                             // No suite: resolve the user-specified group, verify the caller's
                             // membership, and bump its task counter in one statement.
-                            // Membership goes through a subquery rather than a
-                            // joined `FROM user_group`: sea-orm emits an
-                            // unqualified `RETURNING "id", …`, which Postgres
-                            // rejects as ambiguous the moment a second table
-                            // with an `id` column is in scope. Every suite-less
-                            // `POST /tasks` 500s without this.
+                            // No row back means either the group doesn't exist or the
+                            // caller isn't in it; both return 404 so users won't know
+                            // about the existence of a group they are not a member of.
+                            // Membership must stay a subquery, not a join: both table has a
+                            // `id` column and sea-orm will create a unqualified `RETURNING id`,
+                            // which Postgres rejects as ambiguous.
                             let member_of = Query::select()
                                 .column(UserGroup::Column::GroupId)
                                 .from(UserGroup::Entity)

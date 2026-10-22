@@ -6,7 +6,7 @@ use std::{
     str::FromStr,
 };
 
-pub use heartbeat::{HeartbeatOp, HeartbeatQueue};
+pub use heartbeat::{HeartbeatOp, WorkerHeartbeatQueue};
 pub use queue::{TaskDispatcher, TaskDispatcherOp};
 
 use sea_orm::{
@@ -517,7 +517,7 @@ pub async fn fetch_task(
     pool: &InfraPool,
 ) -> crate::error::Result<Option<WorkerTaskResp>> {
     loop {
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = crossfire::spsc::unbounded_async::<Option<i64>>();
         if pool
             .worker_task_queue_tx
             .send(TaskDispatcherOp::FetchTask(worker_id, tx))
@@ -526,6 +526,7 @@ pub async fn fetch_task(
             break Err(Error::Custom("send fetch task failed".to_string()));
         } else {
             match rx
+                .recv()
                 .await
                 .map_err(|e| Error::Custom(format!("recv fetch task failed: {e:?}")))?
             {

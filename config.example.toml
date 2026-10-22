@@ -2,6 +2,9 @@
 [coordinator]
 bind = "127.0.0.1:5000"
 db_url = "postgres://db_user:db_pass@localhost/db_name"
+# db_max_connections is not set. Default to 32. Raise it if requests queue for
+# a connection; sqlx's own default of 10 is too small for a busy coordinator.
+# db_min_connections is not set. Default to 8
 s3_url = "http://127.0.0.1:9000"
 s3_access_key = "mitosis_access"
 s3_secret_key = "mitosis_secret"

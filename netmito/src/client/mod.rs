@@ -820,6 +820,12 @@ impl MitoClient {
         self.http_client.create_task_suite(args.into()).await
     }
 
+    pub async fn suites_change(&mut self, args: ChangeSuiteArgs) -> crate::error::Result<()> {
+        self.http_client
+            .change_task_suite(args.uuid, args.into())
+            .await
+    }
+
     pub async fn suites_query(
         &mut self,
         args: QuerySuitesArgs,
@@ -1879,8 +1885,21 @@ impl MitoClient {
                                         output_task_info(&task);
                                     }
                                 } else {
+                                    // Bare uuids, except that a suite task says
+                                    // so: without it the terse listing is the
+                                    // one place a suite task is
+                                    // indistinguishable from a loose one.
                                     for task in resp.tasks {
-                                        tracing::info!("{}", task.uuid);
+                                        match task.suite_uuid {
+                                            Some(suite_uuid) => {
+                                                tracing::info!(
+                                                    "{}, suite {}",
+                                                    task.uuid,
+                                                    suite_uuid
+                                                )
+                                            }
+                                            None => tracing::info!("{}", task.uuid),
+                                        }
                                     }
                                 }
                             }
@@ -2051,9 +2070,17 @@ impl MitoClient {
                 },
             },
             ClientCommand::Suites(args) => match args.command {
-                SuitesCommands::Create(args) => match self.suites_create(args).await {
+                SuitesCommands::Create(args) => match self.suites_create(*args).await {
                     Ok(resp) => {
                         tracing::info!("Suite created with uuid {}", resp.uuid);
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                    }
+                },
+                SuitesCommands::Change(args) => match self.suites_change(*args).await {
+                    Ok(_) => {
+                        tracing::info!("Suite changed successfully");
                     }
                     Err(e) => {
                         tracing::error!("{}", e);

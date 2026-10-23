@@ -15,7 +15,7 @@ use crate::{
     schema::*,
     service::{
         self,
-        auth::{admin_auth_middleware, AuthAdminUser},
+        auth::{admin_middleware, auth_middleware, roles::USER, AuthAdminUser},
         name_validator,
     },
 };
@@ -50,9 +50,11 @@ pub fn admin_router(st: InfraPool, cancel_token: CancellationToken) -> Router<In
             "/shutdown",
             post(admin_shutdown_coordinator).with_state(cancel_token),
         )
+        // The last layer added runs first: auth attaches the user, then the admin check reads it.
+        .route_layer(middleware::from_fn(admin_middleware))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
-            admin_auth_middleware,
+            auth_middleware::<USER>,
         ))
         .with_state(st)
 }

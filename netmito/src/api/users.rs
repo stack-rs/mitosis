@@ -13,7 +13,7 @@ use crate::{
     schema::*,
     service::{
         self,
-        auth::{user_auth_middleware, AuthUser, AuthUserWithName},
+        auth::{auth_middleware, roles::USER, AuthUser},
     },
 };
 
@@ -23,7 +23,7 @@ pub fn users_router(st: InfraPool) -> Router<InfraPool> {
         .route("/groups", get(query_groups))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
-            user_auth_middleware,
+            auth_middleware::<USER>,
         ))
         .with_state(st)
 }
@@ -52,7 +52,7 @@ pub async fn user_login(
     Ok(Json(UserLoginResp { token }))
 }
 
-pub async fn user_auth(Extension(u): Extension<AuthUserWithName>) -> String {
+pub async fn user_auth(Extension(u): Extension<AuthUser>) -> String {
     u.username
 }
 

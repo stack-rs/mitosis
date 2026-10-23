@@ -15,6 +15,8 @@ pub struct WorkerTaskResp {
     pub id: i64,
     pub uuid: Uuid,
     pub upstream_task_uuid: Option<Uuid>,
+    /// The task's group, where its attachment resources are fetched from.
+    pub group_name: String,
     pub spec: ExecSpec,
     pub exec_options: Option<TaskExecOptions>,
 }

@@ -7,6 +7,36 @@ use time::OffsetDateTime;
 
 use crate::error::{ApiError, DecodeTokenError};
 
+/// Which kind of caller a token was issued to. Serialized as its number; a token
+/// without a role does not decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+#[repr(u8)]
+pub enum TokenRole {
+    User = 1,
+    Worker = 2,
+    Agent = 3,
+}
+
+impl From<TokenRole> for u8 {
+    fn from(role: TokenRole) -> Self {
+        role as u8
+    }
+}
+
+impl TryFrom<u8> for TokenRole {
+    type Error = String;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::User),
+            2 => Ok(Self::Worker),
+            3 => Ok(Self::Agent),
+            _ => Err(format!("invalid token role {value}")),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TokenClaims<'a> {
     /// username
@@ -20,6 +50,7 @@ pub struct TokenClaims<'a> {
     pub exp: Option<OffsetDateTime>,
     /// random number
     pub sign: i64,
+    pub role: TokenRole,
 }
 
 pub fn generate_token<T>(username: T, sign: i64) -> crate::error::Result<String>
@@ -35,6 +66,7 @@ where
         sub: Cow::from(username.as_ref()),
         exp: Some(OffsetDateTime::now_utc() + token_ttl.token_expires_in),
         sign,
+        role: TokenRole::User,
     };
 
     let encoding_key = crate::config::ENCODING_KEY
@@ -69,6 +101,7 @@ where
         sub: Cow::from(username.as_ref()),
         exp,
         sign,
+        role: TokenRole::Worker,
     };
 
     let encoding_key = crate::config::ENCODING_KEY
@@ -134,6 +167,7 @@ MCowBQYDK2VwAyEAa+75592cq25dhxP5a9zZMvLn+7yXyq6cUj2xmjB2PW4=\n\
             sub: Cow::from("test_user"),
             exp,
             sign: 42,
+            role: TokenRole::User,
         };
         encode_token(&claims, &test_encoding_key()).expect("token should encode")
     }

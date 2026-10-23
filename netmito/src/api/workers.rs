@@ -9,14 +9,15 @@ use uuid::Uuid;
 
 use crate::{
     config::{InfraPool, REDIS_CONNECTION_INFO},
-    entity::content::ArtifactContentType,
     error::{ApiError, ApiResult, Error},
     schema::*,
     service::{
         self,
         auth::{
-            token::generate_worker_token, user_auth_middleware, worker_auth_middleware, AuthUser,
-            AuthWorker,
+            auth_middleware,
+            roles::{USER, WORKER},
+            token::generate_worker_token,
+            AuthUser, AuthWorker,
         },
     },
 };
@@ -25,19 +26,10 @@ pub fn workers_router(st: InfraPool) -> Router<InfraPool> {
     let worker_auth_router = Router::new()
         .route("/", delete(worker_unregister))
         .route("/heartbeat", post(heartbeat))
-        .route("/tasks", post(worker_report_task).get(worker_fetch_task))
-        .route("/tasks/{uuid}", get(worker_query_task))
-        .route(
-            "/tasks/{uuid}/artifacts/{content_type}",
-            get(download_artifact),
-        )
-        .route(
-            "/tasks/{uuid}/attachments/{*key}",
-            get(worker_download_attachment),
-        )
+        .route("/tasks", get(worker_fetch_task))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
-            worker_auth_middleware,
+            auth_middleware::<WORKER>,
         ))
         .with_state(st.clone());
     let user_auth_router = Router::new()
@@ -58,7 +50,7 @@ pub fn workers_router(st: InfraPool) -> Router<InfraPool> {
         .route("/shutdown/list", post(user_shutdown_workers_by_uuids))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
-            user_auth_middleware,
+            auth_middleware::<USER>,
         ))
         .with_state(st.clone());
     Router::new()
@@ -143,75 +135,6 @@ pub async fn worker_fetch_task(
             Err(ApiError::InternalServerError)
         }
     }
-}
-
-pub async fn worker_report_task(
-    Extension(w): Extension<AuthWorker>,
-    State(pool): State<InfraPool>,
-    Json(ReportTaskReq { id, op }): Json<ReportTaskReq>,
-) -> ApiResult<Json<ReportTaskResp>> {
-    match service::worker::report_task(w.id, w.uuid, id, op, &pool).await {
-        Ok(url) => Ok(Json(ReportTaskResp { url })),
-        Err(Error::ApiError(e)) => Err(e),
-        Err(e) => {
-            tracing::error!("{}", e);
-            Err(ApiError::InternalServerError)
-        }
-    }
-}
-
-pub async fn download_artifact(
-    Extension(_): Extension<AuthWorker>,
-    State(pool): State<InfraPool>,
-    Path((uuid, content_type)): Path<(Uuid, ArtifactContentType)>,
-) -> Result<Json<RemoteResourceDownloadResp>, ApiError> {
-    let artifact = service::s3::download_artifact_by_uuid(&pool, uuid, content_type)
-        .await
-        .map_err(|e| match e {
-            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
-            crate::error::Error::ApiError(e) => e,
-            _ => {
-                tracing::error!("{}", e);
-                ApiError::InternalServerError
-            }
-        })?;
-    Ok(Json(artifact))
-}
-
-pub async fn worker_download_attachment(
-    Extension(_): Extension<AuthWorker>,
-    State(pool): State<InfraPool>,
-    Path((uuid, key)): Path<(Uuid, String)>,
-) -> Result<Json<RemoteResourceDownloadResp>, ApiError> {
-    let attachment = service::s3::worker_download_attachment(&pool, uuid, key)
-        .await
-        .map_err(|e| match e {
-            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
-            crate::error::Error::ApiError(e) => e,
-            _ => {
-                tracing::error!("{}", e);
-                ApiError::InternalServerError
-            }
-        })?;
-    Ok(Json(attachment))
-}
-
-pub async fn worker_query_task(
-    Extension(_): Extension<AuthWorker>,
-    State(pool): State<InfraPool>,
-    Path(uuid): Path<Uuid>,
-) -> Result<Json<TaskQueryResp>, ApiError> {
-    let task = service::task::get_task_by_uuid(&pool, uuid)
-        .await
-        .map_err(|e| match e {
-            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
-            crate::error::Error::ApiError(e) => e,
-            _ => {
-                tracing::error!("{}", e);
-                ApiError::InternalServerError
-            }
-        })?;
-    Ok(Json(task))
 }
 
 pub async fn user_query_worker(

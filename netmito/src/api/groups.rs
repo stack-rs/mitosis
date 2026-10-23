@@ -12,22 +12,31 @@ use crate::{
     schema::*,
     service::{
         self,
-        auth::{user_auth_middleware, AuthUser},
+        auth::{
+            auth_middleware,
+            roles::{USER, WORKER},
+            AuthIdentity, AuthUser,
+        },
     },
 };
 
 pub fn groups_router(st: InfraPool) -> Router<InfraPool> {
-    Router::new()
+    let shared_router = Router::new()
+        .route(
+            "/{group_name}/download/attachments/{*key}",
+            get(download_attachment),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            st.clone(),
+            auth_middleware::<{ USER | WORKER }>,
+        ));
+    let user_router = Router::new()
         .route("/", post(create_group))
         .route("/{group_name}", get(get_group))
         .route("/{group_name}/users/remove", post(remove_user_group))
         .route(
             "/{group_name}/users",
             put(update_user_group).delete(remove_user_group_params),
-        )
-        .route(
-            "/{group_name}/download/attachments/{*key}",
-            get(download_attachment),
         )
         .route(
             "/{group_name}/attachments/{*key}",
@@ -53,8 +62,11 @@ pub fn groups_router(st: InfraPool) -> Router<InfraPool> {
         )
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
-            user_auth_middleware,
-        ))
+            auth_middleware::<USER>,
+        ));
+    Router::new()
+        .merge(shared_router)
+        .merge(user_router)
         .with_state(st)
 }
 
@@ -172,20 +184,26 @@ pub async fn upload_attachment(
 }
 
 pub async fn download_attachment(
-    Extension(u): Extension<AuthUser>,
+    Extension(p): Extension<AuthIdentity>,
     State(pool): State<InfraPool>,
     Path((group_name, key)): Path<(String, String)>,
 ) -> Result<Json<RemoteResourceDownloadResp>, ApiError> {
-    let attachment = service::s3::user_get_attachment(&pool, u.id, group_name, key)
-        .await
-        .map_err(|e| match e {
-            crate::error::Error::AuthError(err) => ApiError::AuthError(err),
-            crate::error::Error::ApiError(e) => e,
-            _ => {
-                tracing::error!("{}", e);
-                ApiError::InternalServerError
-            }
-        })?;
+    let attachment = match p {
+        AuthIdentity::User(u) => {
+            service::s3::user_get_attachment(&pool, u.id, group_name, key).await
+        }
+        AuthIdentity::Worker(w) => {
+            service::s3::worker_get_attachment(&pool, w.uuid, group_name, key).await
+        }
+    }
+    .map_err(|e| match e {
+        crate::error::Error::AuthError(err) => ApiError::AuthError(err),
+        crate::error::Error::ApiError(e) => e,
+        _ => {
+            tracing::error!("{}", e);
+            ApiError::InternalServerError
+        }
+    })?;
     Ok(Json(attachment))
 }
 

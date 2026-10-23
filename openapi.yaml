@@ -7,7 +7,9 @@ info:
 
     ## Authentication
     Most endpoints require JWT bearer token authentication. Get a token by calling `/login` with 
-    valid credentials.
+    valid credentials. Each token carries a `role` claim (1 = user, 2 = worker, 3 = agent), and
+    each endpoint accepts only the roles listed in its `security`; a token without a role is
+    rejected.
 
     ## API Structure
     - `/auth` - User authentication status
@@ -492,12 +494,15 @@ paths:
   /groups/{group_name}/download/attachments/{key}:
     get:
       summary: Download attachment
-      description: Get download URL for an attachment
+      description: |
+        Get download URL for an attachment. A user must be a member of the group; a
+        worker must be running a task of the group.
       operationId: downloadAttachment
       tags:
         - Groups
       security:
         - bearerAuth: []
+        - workerAuth: []
       parameters:
         - name: group_name
           in: path
@@ -1043,118 +1048,6 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
-    post:
-      summary: Report task status
-      description: Worker reports task execution status
-      operationId: reportTask
-      tags:
-        - Workers
-      security:
-        - workerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ReportTaskReq"
-      responses:
-        "200":
-          description: Status reported successfully
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ReportTaskResp"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-
-  /workers/tasks/{uuid}:
-    get:
-      summary: Get task details for worker
-      description: Worker queries task details
-      operationId: getTaskForWorker
-      tags:
-        - Workers
-      security:
-        - workerAuth: []
-      parameters:
-        - name: uuid
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Task details
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/WorkerTaskResp"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-
-  /workers/tasks/{uuid}/artifacts/{content_type}:
-    get:
-      summary: Download task artifact for worker
-      description: Worker downloads task artifacts
-      operationId: downloadTaskArtifactForWorker
-      tags:
-        - Workers
-      security:
-        - workerAuth: []
-      parameters:
-        - name: uuid
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-        - name: content_type
-          in: path
-          required: true
-          schema:
-            $ref: "#/components/schemas/ArtifactContentType"
-      responses:
-        "302":
-          description: Redirect to download URL
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-
-  /workers/tasks/{uuid}/attachments/{key}:
-    get:
-      summary: Download attachment for worker
-      description: Worker downloads group attachments needed for task
-      operationId: downloadAttachmentForWorker
-      tags:
-        - Workers
-      security:
-        - workerAuth: []
-      parameters:
-        - name: uuid
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-        - name: key
-          in: path
-          required: true
-          schema:
-            type: string
-          style: simple
-          explode: false
-      responses:
-        "302":
-          description: Redirect to download URL
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-
   /tasks:
     post:
       summary: Submit task
@@ -1407,6 +1300,31 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /tasks/report:
+    post:
+      summary: Report task status
+      description: Worker reports task execution status
+      operationId: reportTask
+      tags:
+        - Tasks
+      security:
+        - workerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportTaskReq"
+      responses:
+        "200":
+          description: Status reported successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportTaskResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /tasks/{uuid}:
     get:
       summary: Get task information
@@ -1416,6 +1334,7 @@ paths:
         - Tasks
       security:
         - bearerAuth: []
+        - workerAuth: []
       parameters:
         - name: uuid
           in: path
@@ -1605,6 +1524,7 @@ paths:
         - Tasks
       security:
         - bearerAuth: []
+        - workerAuth: []
       parameters:
         - name: uuid
           in: path
@@ -3643,6 +3563,7 @@ components:
       required:
         - id
         - uuid
+        - group_name
         - timeout
         - spec
       properties:
@@ -3654,6 +3575,9 @@ components:
           type: string
           format: uuid
           description: Task UUID
+        group_name:
+          type: string
+          description: The task's group, where its attachment resources are fetched from
         timeout:
           type: string
           description: Task timeout duration

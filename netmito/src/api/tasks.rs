@@ -13,22 +13,35 @@ use crate::{
     schema::*,
     service::{
         self,
-        auth::{user_auth_middleware, AuthUser},
+        auth::{
+            auth_middleware,
+            roles::{USER, WORKER},
+            AuthIdentity, AuthUser, AuthWorker,
+        },
     },
 };
 
 pub fn tasks_router(st: InfraPool) -> Router<InfraPool> {
-    Router::new()
-        .route("/", post(submit_task))
-        .route(
-            "/{uuid}",
-            get(query_task).put(change_task).delete(cancel_task),
-        )
-        .route("/{uuid}/labels", put(change_task_labels))
+    let shared_router = Router::new()
+        .route("/{uuid}", get(query_task))
         .route(
             "/{uuid}/download/artifacts/{content_type}",
             get(download_artifact),
         )
+        .route_layer(middleware::from_fn_with_state(
+            st.clone(),
+            auth_middleware::<{ USER | WORKER }>,
+        ));
+    let worker_router = Router::new()
+        .route("/report", post(report_task))
+        .route_layer(middleware::from_fn_with_state(
+            st.clone(),
+            auth_middleware::<WORKER>,
+        ));
+    let user_router = Router::new()
+        .route("/", post(submit_task))
+        .route("/{uuid}", put(change_task).delete(cancel_task))
+        .route("/{uuid}/labels", put(change_task_labels))
         .route("/{uuid}/artifacts/{content_type}", delete(delete_artifact))
         .route("/{uuid}/artifacts", post(upload_artifact))
         .route("/query", post(query_tasks))
@@ -50,8 +63,12 @@ pub fn tasks_router(st: InfraPool) -> Router<InfraPool> {
         .route("/submit", post(batch_submit_tasks))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
-            user_auth_middleware,
-        ))
+            auth_middleware::<USER>,
+        ));
+    Router::new()
+        .merge(shared_router)
+        .merge(worker_router)
+        .merge(user_router)
         .with_state(st)
 }
 
@@ -130,7 +147,7 @@ pub async fn cancel_task(
 }
 
 pub async fn query_task(
-    Extension(_): Extension<AuthUser>,
+    Extension(_): Extension<AuthIdentity>,
     State(pool): State<InfraPool>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<TaskQueryResp>, ApiError> {
@@ -145,6 +162,21 @@ pub async fn query_task(
             }
         })?;
     Ok(Json(task))
+}
+
+pub async fn report_task(
+    Extension(w): Extension<AuthWorker>,
+    State(pool): State<InfraPool>,
+    Json(ReportTaskReq { id, op }): Json<ReportTaskReq>,
+) -> Result<Json<ReportTaskResp>, ApiError> {
+    match service::worker::report_task(w.id, w.uuid, id, op, &pool).await {
+        Ok(url) => Ok(Json(ReportTaskResp { url })),
+        Err(crate::error::Error::ApiError(e)) => Err(e),
+        Err(e) => {
+            tracing::error!("{}", e);
+            Err(ApiError::InternalServerError)
+        }
+    }
 }
 
 pub async fn query_tasks(
@@ -222,7 +254,7 @@ pub async fn upload_artifact(
 }
 
 pub async fn download_artifact(
-    Extension(_): Extension<AuthUser>,
+    Extension(_): Extension<AuthIdentity>,
     State(pool): State<InfraPool>,
     Path((uuid, content_type)): Path<(Uuid, ArtifactContentType)>,
 ) -> Result<Json<RemoteResourceDownloadResp>, ApiError> {

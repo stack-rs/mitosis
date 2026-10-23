@@ -32,7 +32,7 @@ use crate::{
     config::{InfraPool, REDIS_CONNECTION_INFO},
     error::ApiError,
     schema::RedisConnectionInfo,
-    service::auth::{user_auth_middleware, user_auth_with_name_middleware, AuthUser},
+    service::auth::{auth_middleware, roles::USER, AuthUser},
 };
 
 pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
@@ -42,7 +42,7 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
             "/auth",
             get(users::user_auth).layer(middleware::from_fn_with_state(
                 st.clone(),
-                user_auth_with_name_middleware,
+                auth_middleware::<USER>,
             )),
         )
         .route(
@@ -54,21 +54,21 @@ pub fn router(st: InfraPool, cancel_token: CancellationToken) -> Router {
             "/refresh",
             post(users::refresh_token).layer(middleware::from_fn_with_state(
                 st.clone(),
-                user_auth_middleware,
+                auth_middleware::<USER>,
             )),
         )
         .route(
             "/revoke",
             post(users::revoke).layer(middleware::from_fn_with_state(
                 st.clone(),
-                user_auth_middleware,
+                auth_middleware::<USER>,
             )),
         )
         .route(
             "/redis",
             get(query_redis_connection_info).layer(middleware::from_fn_with_state(
                 st.clone(),
-                user_auth_middleware,
+                auth_middleware::<USER>,
             )),
         )
         .nest("/users", users::users_router(st.clone()))

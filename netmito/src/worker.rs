@@ -137,7 +137,7 @@ impl TaskExecutor {
                             }
                         }
                         self.task_url
-                            .set_path(format!("workers/tasks/{uuid}").as_str());
+                            .set_path(format!("tasks/{uuid}").as_str());
                         let resp = self
                             .task_client
                             .get(self.task_url.as_str())
@@ -176,8 +176,7 @@ impl TaskExecutor {
                         break;
                     }
                 }
-                self.task_url
-                    .set_path(format!("workers/tasks/{uuid}").as_str());
+                self.task_url.set_path(format!("tasks/{uuid}").as_str());
                 let resp = self
                     .task_client
                     .get(self.task_url.as_str())
@@ -617,14 +616,14 @@ async fn execute_task(
                 let content_serde_val = serde_json::to_value(content_type)?;
                 let content_serde_str = content_serde_val.as_str().unwrap_or("result");
                 task_executor.task_url.set_path(&format!(
-                    "workers/tasks/{uuid}/artifacts/{content_serde_str}"
+                    "tasks/{uuid}/download/artifacts/{content_serde_str}"
                 ));
             }
             RemoteResource::Attachment { key } => {
-                let uuid = task.uuid;
-                task_executor
-                    .task_url
-                    .set_path(&format!("workers/tasks/{uuid}/attachments/{key}"));
+                task_executor.task_url.set_path(&format!(
+                    "groups/{}/download/attachments/{key}",
+                    task.group_name
+                ));
             }
         };
         let resp = loop {
@@ -1273,7 +1272,7 @@ async fn process_task_result(
                     content_length,
                 },
             };
-            task_executor.task_url.set_path("workers/tasks");
+            task_executor.task_url.set_path("tasks/report");
             let resp = loop {
                 let resp = task_executor
                     .task_client
@@ -1480,7 +1479,7 @@ async fn report_task(
     task_executor: &mut TaskExecutor,
     req: ReportTaskReq,
 ) -> crate::error::Result<()> {
-    task_executor.task_url.set_path("workers/tasks");
+    task_executor.task_url.set_path("tasks/report");
     loop {
         let resp = task_executor
             .task_client

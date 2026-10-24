@@ -28,20 +28,18 @@ use token::{generate_token, verify_token, TokenClaims, TokenRole};
 // refactor if necessary.
 // TODO: check if we allow non-expiry lifetime
 
-/// Role bits for [`auth_middleware`]'s `ROLES`.
+/// Role bits for [`auth_middleware`]'s `ROLES`, so one endpoint can accept several roles by using
+/// something like `USER | WORKER`. These are bit flags, not [`TokenRole`] discriminants;
+/// each bit is derived from its discriminant (which starts at 1).
 pub mod roles {
     use super::token::TokenRole;
 
-    pub const USER: u8 = 1 << 0;
-    pub const WORKER: u8 = 1 << 1;
-    pub const AGENT: u8 = 1 << 2;
+    pub const USER: u8 = 1 << (TokenRole::User as u8 - 1);
+    pub const WORKER: u8 = 1 << (TokenRole::Worker as u8 - 1);
+    pub const AGENT: u8 = 1 << (TokenRole::Agent as u8 - 1);
 
     pub(super) fn bit_mask_of(role: TokenRole) -> u8 {
-        match role {
-            TokenRole::User => USER,
-            TokenRole::Worker => WORKER,
-            TokenRole::Agent => AGENT,
-        }
+        1 << (role as u8 - 1)
     }
 }
 

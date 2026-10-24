@@ -16,7 +16,7 @@ use crate::{
     },
     service::{
         self,
-        auth::{user_auth_middleware, AuthUser},
+        auth::{auth_middleware, roles::USER, AuthUser},
     },
 };
 
@@ -29,7 +29,7 @@ pub fn suites_router(st: InfraPool) -> Router<InfraPool> {
         .route("/{uuid}/agents/override", post(override_agents_for_suite))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
-            user_auth_middleware,
+            auth_middleware::<USER>,
         ))
         .with_state(st)
 }

@@ -8,7 +8,7 @@ use reqwest::{header::CONTENT_LENGTH, Response};
 use sea_orm::{
     prelude::*,
     sea_query::{Expr, Query},
-    FromQueryResult, Set, TransactionTrait,
+    FromQueryResult, QuerySelect, Set, TransactionTrait,
 };
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
@@ -28,7 +28,10 @@ use crate::{
     error::AuthError,
 };
 use crate::{
-    entity::{content::AttachmentContentType, state::GroupState},
+    entity::{
+        content::AttachmentContentType,
+        state::{GroupState, TaskState},
+    },
     error::Error,
     schema::{AttachmentQueryInfo, AttachmentsQueryReq, TasksQueryReq},
 };
@@ -550,65 +553,31 @@ pub async fn user_upload_artifact(
     group_upload_artifact(pool, task, content_type, content_length).await
 }
 
-#[derive(FromQueryResult)]
-struct GroupInfo {
-    id: i64,
-    group_name: String,
-}
-
-pub async fn worker_download_attachment(
+/// A worker may read a group's attachments only while it runs one of that group's tasks.
+pub async fn worker_get_attachment(
     pool: &InfraPool,
-    uuid: Uuid,
+    worker_uuid: Uuid,
+    group_name: String,
     key: String,
 ) -> Result<RemoteResourceDownloadResp, crate::error::Error> {
-    let builder = pool.db.get_database_backend();
-    let active_group_name_stmt = Query::select()
-        .column((Group::Entity, Group::Column::Id))
-        .column((Group::Entity, Group::Column::GroupName))
-        .from(Group::Entity)
-        .join(
-            sea_orm::JoinType::Join,
-            ActiveTask::Entity,
-            Expr::col((ActiveTask::Entity, ActiveTask::Column::GroupId))
-                .eq(Expr::col((Group::Entity, Group::Column::Id))),
-        )
-        .and_where(Expr::col((ActiveTask::Entity, ActiveTask::Column::Uuid)).eq(uuid))
-        .limit(1)
-        .to_owned();
-    let GroupInfo {
-        id: group_id,
-        group_name,
-    } = match GroupInfo::find_by_statement(builder.build(&active_group_name_stmt))
+    let group_id = Group::Entity::find()
+        .filter(Group::Column::GroupName.eq(group_name.clone()))
         .one(&pool.db)
         .await?
-    {
-        Some(g) => g,
-        None => {
-            let archived_group_name_stmt = Query::select()
-                .column((Group::Entity, Group::Column::GroupName))
-                .from(Group::Entity)
-                .join(
-                    sea_orm::JoinType::Join,
-                    ArchivedTask::Entity,
-                    Expr::col((ArchivedTask::Entity, ArchivedTask::Column::GroupId))
-                        .eq(Expr::col((Group::Entity, Group::Column::Id))),
-                )
-                .and_where(Expr::col((ArchivedTask::Entity, ArchivedTask::Column::Uuid)).eq(uuid))
-                .limit(1)
-                .to_owned();
-            match GroupInfo::find_by_statement(builder.build(&archived_group_name_stmt))
-                .one(&pool.db)
-                .await?
-            {
-                Some(g) => g,
-                None => {
-                    return Err(
-                        crate::error::ApiError::NotFound(format!("Task with uuid {uuid}")).into(),
-                    )
-                }
-            }
-        }
-    };
+        .ok_or(crate::error::ApiError::NotFound(format!(
+            "Attachment of group {group_name} and key {key}"
+        )))?
+        .id;
+    ActiveTask::Entity::find()
+        .select_only()
+        .column(ActiveTask::Column::Id)
+        .filter(ActiveTask::Column::GroupId.eq(group_id))
+        .filter(ActiveTask::Column::RunnerUuid.eq(worker_uuid))
+        .filter(ActiveTask::Column::State.eq(TaskState::Running))
+        .into_tuple::<i64>()
+        .one(&pool.db)
+        .await?
+        .ok_or(AuthError::PermissionDenied)?;
     let attachment = Attachment::Entity::find()
         .filter(Attachment::Column::GroupId.eq(group_id))
         .filter(Attachment::Column::Key.eq(key.clone()))

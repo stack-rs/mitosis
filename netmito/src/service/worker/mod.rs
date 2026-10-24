@@ -553,10 +553,21 @@ pub async fn fetch_task(
                         let spec: ExecSpec = serde_json::from_value(task.spec)?;
                         let exec_options: Option<TaskExecOptions> =
                             task.exec_options.map(serde_json::from_value).transpose()?;
+                        let group_name = Group::Entity::find_by_id(task.group_id)
+                            .select_only()
+                            .column(Group::Column::GroupName)
+                            .into_tuple::<String>()
+                            .one(&pool.db)
+                            .await?
+                            .ok_or(Error::Custom(format!(
+                                "group of task {} not found",
+                                task.uuid
+                            )))?;
                         let task_resp = WorkerTaskResp {
                             id: task.id,
                             uuid: task.uuid,
                             upstream_task_uuid: task.upstream_task_uuid,
+                            group_name,
                             spec,
                             exec_options,
                         };

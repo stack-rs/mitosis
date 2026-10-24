@@ -22,21 +22,33 @@ use crate::{
     error::{ApiError, AuthError},
     schema::{UserChangePasswordReq, UserLoginReq},
 };
-use token::{generate_token, verify_token};
+use token::{generate_token, verify_token, TokenClaims, TokenRole};
 
 // TODO: should check if the structure and logic is high cohesive and low coupling enough, and
 // refactor if necessary.
 // TODO: check if we allow non-expiry lifetime
 
-#[derive(Debug, Clone)]
-pub struct AuthUser {
-    pub id: i64,
+/// Role bits for [`auth_middleware`]'s `ROLES`, so one endpoint can accept several roles by using
+/// something like `USER | WORKER`. These are bit flags, not [`TokenRole`] discriminants;
+/// each bit is derived from its discriminant (which starts at 1).
+pub mod roles {
+    use super::token::TokenRole;
+
+    pub const USER: u8 = 1 << (TokenRole::User as u8 - 1);
+    pub const WORKER: u8 = 1 << (TokenRole::Worker as u8 - 1);
+    pub const AGENT: u8 = 1 << (TokenRole::Agent as u8 - 1);
+
+    pub(super) fn bit_mask_of(role: TokenRole) -> u8 {
+        1 << (role as u8 - 1)
+    }
 }
 
 #[derive(Debug, Clone)]
-pub struct AuthUserWithName {
+pub struct AuthUser {
     pub id: i64,
     pub username: String,
+    /// Mitosis system admin (`users.admin`)
+    pub admin: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +60,13 @@ pub struct AuthAdminUser {
 pub struct AuthWorker {
     pub id: i64,
     pub uuid: Uuid,
+}
+
+/// The caller of a route open to more than one role.
+#[derive(Debug, Clone)]
+pub enum AuthIdentity {
+    User(AuthUser),
+    Worker(AuthWorker),
 }
 
 fn generate_auth_signature() -> i64 {
@@ -301,40 +320,70 @@ pub async fn admin_change_password(
     Ok(())
 }
 
-pub async fn user_auth_middleware(
+/// Accept the token roles set in `ROLES` (a union of [`roles`] bits) and attach the
+/// caller to the request: always as [`AuthIdentity`], and also as the role's own type
+/// (`AuthUser`, `AuthWorker`) for handlers that serve a single role.
+pub async fn auth_middleware<const ROLES: u8>(
     State(pool): State<InfraPool>,
     TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
     mut req: Request<Body>,
     next: Next,
 ) -> Result<impl IntoResponse, ApiError> {
-    let auth_user = user_auth(&pool.db, &bearer).await?;
-    req.extensions_mut().insert(AuthUser { id: auth_user.id });
+    let claims = verify_token(bearer.token()).map_err(|_| AuthError::InvalidToken)?;
+    if ROLES & roles::bit_mask_of(claims.role) == 0 {
+        return Err(AuthError::PermissionDenied.into());
+    }
+    let identity = match claims.role {
+        TokenRole::User => {
+            let user = user_auth(&pool.db, &claims).await?;
+            let auth_user = AuthUser {
+                id: user.id,
+                username: user.username,
+                admin: user.admin,
+            };
+            req.extensions_mut().insert(auth_user.clone());
+            AuthIdentity::User(auth_user)
+        }
+        TokenRole::Worker => {
+            let auth_worker = worker_auth(&pool.db, &claims).await?;
+            req.extensions_mut().insert(auth_worker.clone());
+            AuthIdentity::Worker(auth_worker)
+        }
+        // No agent tokens are issued yet.
+        TokenRole::Agent => return Err(AuthError::InvalidToken.into()),
+    };
+    req.extensions_mut().insert(identity);
     Ok(next.run(req).await)
 }
 
-pub async fn user_auth_with_name_middleware(
-    State(pool): State<InfraPool>,
-    TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
+/// Admit only system admins. Must run inside `auth_middleware::<USER>`, which attaches
+/// the `AuthUser` this reads.
+pub async fn admin_middleware(
     mut req: Request<Body>,
     next: Next,
 ) -> Result<impl IntoResponse, ApiError> {
-    let auth_user = user_auth(&pool.db, &bearer).await?;
-    req.extensions_mut().insert(AuthUserWithName {
-        id: auth_user.id,
-        username: auth_user.username,
-    });
+    let user = req
+        .extensions()
+        .get::<AuthUser>()
+        .ok_or(ApiError::InternalServerError)?;
+    if !user.admin {
+        return Err(AuthError::PermissionDenied.into());
+    }
+    let admin_user = AuthAdminUser { id: user.id };
+    req.extensions_mut().insert(admin_user);
     Ok(next.run(req).await)
 }
 
-async fn user_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<User::Model, AuthError> {
-    let token = bearer.token();
-    let claims = verify_token(token).map_err(|_| AuthError::InvalidToken)?;
+async fn user_auth(
+    db: &DatabaseConnection,
+    claims: &TokenClaims<'_>,
+) -> Result<User::Model, AuthError> {
     if claims.exp.is_none() {
         return Err(AuthError::InvalidToken);
     }
 
     let user = User::Entity::find()
-        .filter(User::Column::Username.eq(claims.sub))
+        .filter(User::Column::Username.eq(claims.sub.as_ref()))
         .one(db)
         .await
         .map_err(|_| AuthError::WrongCredentials)?
@@ -349,57 +398,10 @@ async fn user_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<User::Mod
     }
 }
 
-pub async fn admin_auth_middleware(
-    State(pool): State<InfraPool>,
-    TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
-    mut req: Request<Body>,
-    next: Next,
-) -> Result<impl IntoResponse, ApiError> {
-    let admin_user = admin_auth(&pool.db, &bearer).await?;
-    req.extensions_mut().insert(admin_user);
-    Ok(next.run(req).await)
-}
-
-async fn admin_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<AuthAdminUser, AuthError> {
-    let token = bearer.token();
-    let claims = verify_token(token).map_err(|_| AuthError::InvalidToken)?;
-    if claims.exp.is_none() {
-        return Err(AuthError::InvalidToken);
-    }
-
-    let user = User::Entity::find()
-        .filter(User::Column::Username.eq(claims.sub))
-        .one(db)
-        .await
-        .map_err(|_| AuthError::WrongCredentials)?
-        .ok_or(AuthError::WrongCredentials)?;
-    if user.admin {
-        if user.state != UserState::Active {
-            Err(AuthError::PermissionDenied)
-        } else if user.auth_signature != Some(claims.sign) {
-            Err(AuthError::WrongCredentials)
-        } else {
-            Ok(AuthAdminUser { id: user.id })
-        }
-    } else {
-        Err(AuthError::PermissionDenied)
-    }
-}
-
-pub async fn worker_auth_middleware(
-    State(pool): State<InfraPool>,
-    TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
-    mut req: Request<Body>,
-    next: Next,
-) -> Result<impl IntoResponse, ApiError> {
-    let auth_worker = worker_auth(&pool.db, &bearer).await?;
-    req.extensions_mut().insert(auth_worker);
-    Ok(next.run(req).await)
-}
-
-async fn worker_auth(db: &DatabaseConnection, bearer: &Bearer) -> Result<AuthWorker, AuthError> {
-    let token = bearer.token();
-    let claims = verify_token(token).map_err(|_| AuthError::InvalidToken)?;
+async fn worker_auth(
+    db: &DatabaseConnection,
+    claims: &TokenClaims<'_>,
+) -> Result<AuthWorker, AuthError> {
     let uuid = Uuid::parse_str(&claims.sub).map_err(|_| AuthError::InvalidToken)?;
 
     let worker = Worker::Entity::find()

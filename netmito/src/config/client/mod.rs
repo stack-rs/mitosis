@@ -158,9 +158,9 @@ fn parse_artifact_content_type(
     }
 }
 
-/// Parse a hook's `ExecSpec` from a JSON object, the same shape `POST /suites`
-/// takes: `{"args":["sh","-c","./setup.sh"],"terminal_output":true}`. Only
-/// `args` is required.
+/// Parse a hook `ExecSpec` from a JSON object. The object has the same shape that `POST /suites`
+/// accepts, for example `{"args":["sh","-c","./setup.sh"],"terminal_output":true}`.
+/// Only `args` is necessary.
 fn parse_exec_spec(
     s: &str,
 ) -> Result<ExecSpec, Box<dyn std::error::Error + Send + Sync + 'static>> {

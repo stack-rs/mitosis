@@ -48,8 +48,8 @@ pub(crate) fn check_exec_spec(spec: &ExecSpec) -> crate::error::Result<()> {
 #[derive(Clone, Copy)]
 enum Submitter {
     User,
-    /// A running task spawning a downstream child, identified by the parent's
-    /// uuid and the group the parent itself lives in.
+    /// A running task that submits a downstream task. It has the UUID and the group of the parent
+    /// task.
     Task {
         upstream_task_uuid: Uuid,
         parent_group_id: i64,
@@ -97,18 +97,19 @@ async fn internal_submit_task(
         .transaction::<_, (ActiveTasks::Model, Option<TaskSuites::Model>), crate::error::Error>(
             |txn| {
                 Box::pin(async move {
-                    // Resolve the designated suite, if any. How it is authorized
-                    // depends on the submitter: a user reaches a suite through their
-                    // own group memberships, while a task spawning a child may target
-                    // any suite owned by the group the parent task itself lives in.
+                    // Find the suite of the request, if there is one. The authorization depends on
+                    // the submitter. A user can use a suite of a group that the user is a member
+                    // of. A running task that submits a downstream task can use any suite of the
+                    // group of the parent task.
                     //
-                    // The parent's creator is deliberately not re-checked, so a long-running suite
-                    // keeps spawning work after that user leaves the group.
+                    // The server does not check the creator of the parent task again, and this is
+                    // intentional. Thus, a suite that runs for a long time can continue to submit
+                    // tasks after that user leaves the group.
                     let suite = match (suite_uuid, submitter) {
                         (None, _) => None,
                         (Some(suite_uuid), Submitter::User) => {
-                            // Resolve the suite and the caller's membership in its
-                            // owning group in one join.
+                            // Find the suite and the membership of the caller in the group of the
+                            // suite with one join.
                             let builder = txn.get_database_backend();
                             let suite_stmt = Query::select()
                                 .columns([
@@ -175,8 +176,8 @@ async fn internal_submit_task(
                                 .one(txn)
                                 .await?
                                 .ok_or_else(|| {
-                                    // A suite owned by another group is reported the
-                                    // same way as one that does not exist.
+                                    // For a suite of a different group, the error is the same as
+                                    // for a suite that does not exist.
                                     Error::ApiError(crate::error::ApiError::NotFound(format!(
                                         "Suite with uuid {} in the parent task's group",
                                         suite_uuid
@@ -185,10 +186,10 @@ async fn internal_submit_task(
                         ),
                     };
 
-                    // A first, unlocked look, so a suite that is plainly closed to
-                    // new work is rejected with its actual state named. The
-                    // binding check is the `WHERE` on the counter bump below —
-                    // this one is only the better error message.
+                    // First, do a check without a lock. It rejects a suite that does not accept new
+                    // tasks, and puts the actual state in the error message. The `WHERE` clause on
+                    // the counter update below is the real check. This check only gives a better
+                    // error message.
                     if let Some(suite) = &suite {
                         if !suite.state.can_accept_tasks() {
                             return Err(Error::ApiError(crate::error::ApiError::InvalidRequest(
@@ -200,11 +201,10 @@ async fn internal_submit_task(
                         }
                     }
 
-                    // The owning group, when it is already pinned by something other
-                    // than `group_name`: a designated suite owns the task, and a
-                    // task-spawned child always stays in its parent's group. `None`
-                    // is the plain user path, where the group is resolved from
-                    // `group_name` and the caller's membership.
+                    // The group of the task, if a value other than `group_name` sets it. A suite in
+                    // the request sets the group of the task, and a downstream task always stays in
+                    // the group of its parent. `None` is the usual user path: the server finds the
+                    // group from `group_name` and the membership of the caller.
                     let pinned_group_id = match (&suite, submitter) {
                         (Some(suite), _) => Some(suite.group_id),
                         (
@@ -216,7 +216,7 @@ async fn internal_submit_task(
                         (None, Submitter::User) => None,
                     };
 
-                    // Bump the owning group's task counter atomically.
+                    // Increase the task counter of the group in one atomic statement.
                     let (group_id, task_id) = match pinned_group_id {
                         Some(pinned_group_id) => {
                             let group = Group::Entity::update_many()
@@ -231,12 +231,12 @@ async fn internal_submit_task(
                                 .into_iter()
                                 .next()
                                 .ok_or_else(|| {
-                                    // The row must exist: both the suite and the
-                                    // parent task hold an FK to it.
+                                    // The row must exist, because the suite and the parent task
+                                    // both have a foreign key to it.
                                     tracing::error!("Owning group {} not found", pinned_group_id);
                                     Error::ApiError(crate::error::ApiError::InternalServerError)
                                 })?;
-                            // The request's group_name must match
+                            // The `group_name` of the request must be the same group.
                             if group.group_name != group_name {
                                 let owner = match &suite {
                                     Some(suite) => {
@@ -260,19 +260,20 @@ async fn internal_submit_task(
                             (group.id, group.task_count)
                         }
                         None => {
-                            // Resolve the user-specified group, verify the caller's
-                            // membership, and bump its task counter in one statement.
-                            // No row back means either the group doesn't exist or the
-                            // caller isn't in it; both return 404 so users won't know
-                            // about the existence of a group they are not a member of.
-                            // Membership must stay a subquery, not a join: both table has a
-                            // `id` column and sea-orm will create a unqualified `RETURNING id`,
-                            // which Postgres rejects as ambiguous.
+                            // Find the group of the request, make sure that the caller is a member,
+                            // and increase the task counter of the group, all in one statement. If
+                            // no row comes back, the group does not exist or the caller is not a
+                            // member. The two cases return 404, so that a user cannot find out if a
+                            // group exists when the user is not a member.
+                            // The membership check must be a subquery, not a join. The two tables
+                            // have an `id` column, and sea-orm makes an unqualified `RETURNING id`.
+                            // PostgreSQL rejects it as ambiguous.
                             let member_of = Query::select()
                                 .column(UserGroup::Column::GroupId)
                                 .from(UserGroup::Entity)
                                 .and_where(Expr::col(UserGroup::Column::UserId).eq(creator_id))
-                                // TODO: when there is 'exec' access level, enforce access check here.
+                                // TODO: when there is an 'exec' access level, do the access check
+                                // here.
                                 //
                                 // .and_where(
                                 //     Expr::col(UserGroup::Column::Role)
@@ -301,17 +302,16 @@ async fn internal_submit_task(
                         }
                     };
 
-                    // One statement, so both increments are evaluated server-side
-                    // on the row this `UPDATE` itself locked. Read the counters
-                    // first and write literals back and two concurrent submits
-                    // both see `total = n` and both write `n + 1`: the suite
-                    // undercounts, `decrement_incomplete_tasks` reaches zero with
-                    // tasks still `Ready`, and the surplus is stranded in a
-                    // `Complete` suite that hands out nothing.
+                    // Use one statement, so that the database calculates the two increases on the
+                    // row that this `UPDATE` locks. If the code reads the counters first and writes
+                    // the values back, two submits at the same time both read `total = n` and both
+                    // write `n + 1`. Then the counter of the suite is too low, and
+                    // `decrement_incomplete_tasks` gets to zero while tasks are still `Ready`.
+                    // These tasks then stay in a `Complete` suite that gives out no tasks.
                     //
-                    // The state predicate carries the accepts-tasks check, so no
-                    // row is bumped after a cancellation that committed since the
-                    // read above.
+                    // The condition on the state does the check that the suite accepts tasks. Thus,
+                    // the statement does not update the row if a cancel committed after the read
+                    // above.
                     let suite = match suite {
                         None => None,
                         Some(suite) => Some(
@@ -344,7 +344,7 @@ async fn internal_submit_task(
                                 .into_iter()
                                 .next()
                                 .ok_or_else(|| {
-                                    // Cancelled between the read above and here.
+                                    // A cancel committed after the read above.
                                     Error::ApiError(crate::error::ApiError::InvalidRequest(
                                         format!("Suite {} stopped accepting new tasks", suite.uuid),
                                     ))
@@ -375,18 +375,17 @@ async fn internal_submit_task(
                     };
                     let task = task.insert(txn).await?;
 
-                    // Queued here, inside the transaction, and never after it
-                    // commits. The queue is emptied by `served`, which removes
-                    // what a claim locked — so a task pushed before its commit
-                    // is always pushed before any `served` that could take it
-                    // back out, because no claim can lock a row it cannot yet
-                    // see. Push after the commit instead and a claim landing in
-                    // between wins the race: it takes the task, `served` finds
-                    // nothing in the queue to remove, and the push then puts an
-                    // already-running task back on the suite's backlog, where
-                    // nothing will ever remove it again.
-                    // TODO: once suites have a ready queue, push a `Ready` suite task
-                    // onto it here with `queues.push_ready(suite.id, [(task.id, task.priority)])`.
+                    // Push the task to the queue here, in the transaction, and not after the
+                    // commit. `served` empties the queue: it removes the tasks that a claim locked.
+                    // A claim cannot lock a row before the row is committed. Thus, a task that is
+                    // pushed before its commit is always pushed before a `served` call that can
+                    // remove it. If the push occurs after the commit, a claim can come between the
+                    // commit and the push. The claim takes the task, and `served` finds nothing to
+                    // remove. Then the push adds a running task to the backlog of the suite, and no
+                    // process removes it.
+                    //
+                    // TODO: when suites have a ready queue, push a `Ready` suite task to it here
+                    // with `queues.push_ready(suite.id, [(task.id, task.priority)])`.
 
                     Ok((task, suite))
                 })
@@ -457,12 +456,11 @@ pub async fn user_submit_task(
     internal_submit_task(pool, creator_id, Submitter::User, req).await
 }
 
-/// Submit the downstream child of a running task, on behalf of the worker or
-/// agent executing it.
+/// Submit a downstream task of a running task, for the worker or agent that runs the parent task.
 ///
-/// The child stays in the parent's group, and `req.suite_uuid` may name any
-/// suite that group owns — the parent's own suite, a sibling one, or `None` for
-/// a suite-less task dispatched to workers.
+/// The downstream task stays in the group of its parent. `req.suite_uuid` can be any suite of that
+/// group: the suite of the parent, a different suite, or `None` for a task without a suite that
+/// goes to workers.
 pub async fn worker_submit_pending_task(
     pool: &InfraPool,
     creator_id: i64,
@@ -496,11 +494,11 @@ pub async fn worker_trigger_pending_task(pool: &InfraPool, uuid: Uuid) -> crate:
     task.state = Set(TaskState::Ready);
     task.updated_at = Set(TimeDateTimeWithTimeZone::now_utc());
     let task = task.update(&pool.db).await?;
-    // A suite task never enters the worker queues — agents pull it from its
-    // suite. Wake the idle eligible agents instead.
+    // A suite task does not go into the worker queues. Agents get it from its suite. Thus, wake the
+    // idle agents that can run the suite.
     if let Some(_suite_id) = task.task_suite_id {
-        // TODO: once agents can be notified, call
-        // `notify_suite_available(pool, _suite_id)` here.
+        // TODO: when agents can get notifications, call `notify_suite_available(pool, _suite_id)`
+        // here.
         return Ok(());
     }
     // Batch add task to worker task queues
@@ -780,10 +778,9 @@ pub async fn user_cancel_task(
                     downstream_task_uuid: Set(task.downstream_task_uuid),
                     task_suite_id: Set(task.task_suite_id),
                 };
-                // A cancelled suite task never reaches an agent `Commit`, so
-                // this is the only chance to give the suite its count back. It
-                // goes first so the suite row is taken before the task rows —
-                // the order every writer of the pair uses.
+                // A cancelled suite task does not get to an agent `Commit`. Thus, this is the only
+                // point where the suite can get its count back. This step comes first, so that the
+                // suite row is locked before the task rows. All writers use this order.
                 if let Some(suite_id) = suite_id {
                     crate::service::suite::decrement_incomplete_tasks(txn, suite_id, 1, now)
                         .await?;
@@ -796,8 +793,7 @@ pub async fn user_cancel_task(
         .await?;
     let _ = remove_task(task_id, pool)
         .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
-    // TODO: once suites have a ready queue, remove a cancelled suite task from it
-    // as well.
+    // TODO: when suites have a ready queue, also remove a cancelled suite task from it.
     Ok(())
 }
 
@@ -846,8 +842,7 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             Expr::col((ActiveTasks::Entity, ActiveTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
         )
-        // Left join: a task without a suite is the common case, and those
-        // rows have to survive it.
+        // Use a left join: most tasks do not have a suite, and the query must keep these rows.
         .join(
             sea_orm::JoinType::LeftJoin,
             TaskSuites::Entity,
@@ -909,8 +904,7 @@ pub async fn get_task_by_uuid(pool: &InfraPool, uuid: Uuid) -> crate::error::Res
             Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
         )
-        // Left join: a task without a suite is the common case, and those
-        // rows have to survive it.
+        // Use a left join: most tasks do not have a suite, and the query must keep these rows.
         .join(
             sea_orm::JoinType::LeftJoin,
             TaskSuites::Entity,
@@ -971,15 +965,15 @@ struct UserGroupRoleQueryRes {
     role: UserGroupRole,
 }
 
-/// The suite a query is restricted to, resolved together with the group that
-/// owns it so the two can be checked against each other.
+/// The suite that limits a query, together with the group of the suite, so that the code can
+/// compare the two.
 #[derive(FromQueryResult)]
 struct SuiteIdWithGroup {
     id: i64,
     group_name: String,
 }
 
-/// Returns the id of the suite the query names, for [`apply_task_filters`].
+/// Returns the id of the suite in the query, for [`apply_task_filters`].
 pub(crate) async fn check_task_list_query(
     user_id: i64,
     pool: &InfraPool,
@@ -1014,13 +1008,13 @@ pub(crate) async fn check_task_list_query(
             )));
         }
     }
-    // A suite belongs to exactly one group, and submitting to it pins the task
-    // to that same group, so the suite names the group rather than narrowing
-    // it: it fills in a group the caller left out, and contradicts one they got
-    // wrong. Resolved through the caller's own memberships, so a suite in a
-    // group they are not in, one that does not exist, and one that disagrees
-    // with `group_name` are all the same answer — and that answer never names
-    // the owning group, which would otherwise leak out of a bare uuid.
+    // A suite is in exactly one group, and a task submitted to the suite gets that group. Thus, the
+    // suite identifies the group, and does not make the group filter smaller. If the caller gives
+    // no group, the server uses the group of the suite. If the caller gives a different group, the
+    // query fails. The server finds the suite through the memberships of the caller. Thus, the
+    // answer is the same for a suite in a group that the caller is not in, a suite that does not
+    // exist, and a suite that is not in `group_name`. The answer does not show the group of the
+    // suite, because a UUID alone must not show it.
     let suite_id = match query.suite_uuid {
         None => None,
         Some(suite_uuid) => {
@@ -1051,16 +1045,16 @@ pub(crate) async fn check_task_list_query(
                 .one(&pool.db)
                 .await?
                 .ok_or_else(|| {
-                    // This fires when there is no query result, i.e. the suite does not exist or
-                    // the user does not have access to it
+                    // This occurs when the query has no result: the suite does not exist, or the
+                    // user cannot access it.
                     Error::ApiError(crate::error::ApiError::NotFound(format!(
                         "User doesn't have permission or suite with uuid {suite_uuid}"
                     )))
                 })?;
             match query.group_name {
                 Some(ref group_name) if *group_name != suite.group_name => {
-                    // This fires then the user's specified group_name does not match
-                    // the actual owner group of the suite.
+                    // This occurs when the `group_name` of the request is not the group of the
+                    // suite.
                     return Err(Error::ApiError(crate::error::ApiError::NotFound(format!(
                         "User doesn't have permission or suite with uuid {suite_uuid}"
                     ))));
@@ -1160,9 +1154,9 @@ pub(crate) fn apply_task_filters(
     query: &TasksQueryReq,
     suite_id: Option<i64>,
 ) -> crate::error::Result<()> {
-    // The id rather than `query.suite_uuid`: `check_task_list_query` had to read
-    // the row anyway to authorize it, and the archive keeps the same column, so
-    // neither statement needs the suite table joined.
+    // Use the id, not `query.suite_uuid`. `check_task_list_query` read the row for the
+    // authorization, and the archive has the same column. Thus, the two statements do not need a
+    // join on the suite table.
     if let Some(suite_id) = suite_id {
         active_stmt.and_where(
             Expr::col((ActiveTasks::Entity, ActiveTasks::Column::TaskSuiteId)).eq(suite_id),
@@ -1421,8 +1415,7 @@ pub async fn query_tasks_by_filter(
             Expr::col((ActiveTasks::Entity, ActiveTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
         )
-        // Left join: a task without a suite is the common case, and those
-        // rows have to survive it.
+        // Use a left join: most tasks do not have a suite, and the query must keep these rows.
         .join(
             sea_orm::JoinType::LeftJoin,
             TaskSuites::Entity,
@@ -1487,8 +1480,7 @@ pub async fn query_tasks_by_filter(
             Expr::col((ArchivedTasks::Entity, ArchivedTasks::Column::GroupId))
                 .eq(Expr::col((Group::Entity, Group::Column::Id))),
         )
-        // Left join: a task without a suite is the common case, and those
-        // rows have to survive it.
+        // Use a left join: most tasks do not have a suite, and the query must keep these rows.
         .join(
             sea_orm::JoinType::LeftJoin,
             TaskSuites::Entity,
@@ -1540,11 +1532,11 @@ struct IdResult {
     task_suite_id: Option<i64>,
 }
 
-/// Tick `incomplete_tasks` down once per cancelled task, for every suite a
-/// batch cancel touched.
+/// Decrease `incomplete_tasks` by one for each cancelled task, for each suite that a batch cancel
+/// changed.
 ///
-/// The rows come straight from the archive's `RETURNING`, so this counts what
-/// was actually cancelled rather than what was asked for.
+/// The rows come directly from the `RETURNING` of the archive. Thus, the count is the number of
+/// tasks that the cancel really removed, not the number in the request.
 async fn decrement_incomplete_tasks_by_suite<C: ConnectionTrait>(
     txn: &C,
     suite_ids: impl IntoIterator<Item = Option<i64>>,
@@ -1554,11 +1546,10 @@ async fn decrement_incomplete_tasks_by_suite<C: ConnectionTrait>(
     for suite_id in suite_ids.into_iter().flatten() {
         *per_suite.entry(suite_id).or_default() += 1;
     }
-    // Sorted, not iterated straight off the map: each decrement writes its
-    // suite row and holds that lock to commit, so two cancels over overlapping
-    // suites in opposite orders deadlock. The `locked` CTE of each batch cancel
-    // has normally taken these rows already, which makes this a backstop — it
-    // still matters for the straggler suite that CTE cannot cover.
+    // Sort the suites, and do not use the map order. Each decrease writes its suite row and keeps
+    // the lock until the commit. If two cancels change the same suites in opposite order, they
+    // deadlock. Usually the `locked` CTE of each batch cancel already locked these rows, so this
+    // sort is a second safety step. It is still necessary for a suite that the CTE cannot lock.
     let mut per_suite: Vec<(i64, i32)> = per_suite.into_iter().collect();
     per_suite.sort_unstable_by_key(|(suite_id, _)| *suite_id);
     for (suite_id, count) in per_suite {
@@ -1644,18 +1635,17 @@ pub async fn cancel_tasks_by_filter(
 
     // Build the complete CTE statement before the transaction to avoid lifetime issues
 
-    // The suite rows this cancel will decrement. Every other writer of the pair
-    // takes the suite row before the task rows, and this is how a batch cancel
-    // joins them — on its own it learns its suites from the archive's `RETURNING`,
-    // far too late to lock anything.
+    // The suite rows that this cancel will decrease. All other writers lock the suite row before
+    // the task rows, and a batch cancel uses this CTE to do the same. Without it, the cancel finds
+    // its suites only from the `RETURNING` of the archive, and that is too late to lock them.
     //
-    // In the same statement as the delete, so one snapshot covers both: the filter
-    // selects the same tasks in each CTE, and a task submitted in between is
-    // invisible to either.
+    // This CTE is in the same statement as the delete, so one snapshot applies to the two. The
+    // filter selects the same tasks in each CTE, and the CTEs do not see a task that is submitted
+    // between them.
     //
-    // `ORDER BY id` is load-bearing. Postgres puts `LockRows` above the sort, so
-    // rows are locked in id order; any scan is therefore a prefix of ascending
-    // ids, and overlapping cancels cannot take two rows in opposite orders.
+    // `ORDER BY id` is necessary. PostgreSQL puts `LockRows` above the sort, so it locks the rows
+    // in id order. Thus, each scan locks rows in ascending id order, and two cancels cannot lock
+    // two rows in opposite order.
     let locked_suites = Query::select()
         .column(TaskSuites::Column::Id)
         .from(TaskSuites::Entity)
@@ -1682,10 +1672,9 @@ pub async fn cancel_tasks_by_filter(
     let delete_stmt = DeleteStatement::new()
         .from_table(ActiveTasks::Entity)
         .and_where(Expr::col(ActiveTasks::Column::Id).in_subquery(task_id_subquery))
-        // This predicate is the guarantee, not a nicety: a task is deleted only if
-        // its suite came out of `locked`, and producing that row is what locked it.
-        // So the suite row is always taken before the task row, whatever plan the
-        // subquery gets.
+        // This condition is the guarantee, not an extra check. The statement deletes a task only if
+        // its suite is in `locked`, and `locked` locks each row that it produces. Thus, the suite
+        // row is always locked before the task row, for all query plans of the subquery.
         .and_where(
             Expr::col(ActiveTasks::Column::TaskSuiteId)
                 .is_null()
@@ -1770,8 +1759,8 @@ pub async fn cancel_tasks_by_filter(
                         ArchivedTasks::Column::Result,
                         ArchivedTasks::Column::UpstreamTaskUuid,
                         ArchivedTasks::Column::DownstreamTaskUuid,
-                        // Without this the archived copy of a suite task loses
-                        // its suite, and the count below has nothing to key on.
+                        // Without this column, the archived copy of a suite task does not have its
+                        // suite, and the count below cannot group the tasks by suite.
                         ArchivedTasks::Column::TaskSuiteId,
                     ])
                     .to_owned();
@@ -1803,8 +1792,7 @@ pub async fn cancel_tasks_by_filter(
         let _ = remove_task(*task_id, pool)
             .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
     }
-    // TODO: once suites have a ready queue, remove the cancelled suite tasks
-    // from it as well.
+    // TODO: when suites have a ready queue, also remove the cancelled suite tasks from it.
 
     Ok(TasksCancelByFilterResp {
         cancelled_count: task_ids.len() as u64,
@@ -1880,18 +1868,18 @@ pub async fn cancel_tasks_by_uuids(
 
         // Build CTE for DELETE RETURNING + INSERT SELECT to avoid parameter limits
         // Convert the SELECT statement into a subquery for the DELETE
-        // The suite rows this cancel will decrement. Every other writer of the pair
-        // takes the suite row before the task rows, and this is how a batch cancel
-        // joins them — on its own it learns its suites from the archive's `RETURNING`,
-        // far too late to lock anything.
+        // The suite rows that this cancel will decrease. All other writers lock the suite row
+        // before the task rows, and a batch cancel uses this CTE to do the same. Without it, the
+        // cancel finds its suites only from the `RETURNING` of the archive, and that is too late to
+        // lock them.
         //
-        // In the same statement as the delete, so one snapshot covers both: the filter
-        // selects the same tasks in each CTE, and a task submitted in between is
-        // invisible to either.
+        // This CTE is in the same statement as the delete, so one snapshot applies to the two. The
+        // filter selects the same tasks in each CTE, and the CTEs do not see a task that is
+        // submitted between them.
         //
-        // `ORDER BY id` is load-bearing. Postgres puts `LockRows` above the sort, so
-        // rows are locked in id order; any scan is therefore a prefix of ascending
-        // ids, and overlapping cancels cannot take two rows in opposite orders.
+        // `ORDER BY id` is necessary. PostgreSQL puts `LockRows` above the sort, so it locks the
+        // rows in id order. Thus, each scan locks rows in ascending id order, and two cancels
+        // cannot lock two rows in opposite order.
         let locked_suites = Query::select()
             .column(TaskSuites::Column::Id)
             .from(TaskSuites::Entity)
@@ -1918,10 +1906,10 @@ pub async fn cancel_tasks_by_uuids(
         let delete_stmt = DeleteStatement::new()
             .from_table(ActiveTasks::Entity)
             .and_where(Expr::col(ActiveTasks::Column::Id).in_subquery(id_subquery))
-            // This predicate is the guarantee, not a nicety: a task is deleted only if
-            // its suite came out of `locked`, and producing that row is what locked it.
-            // So the suite row is always taken before the task row, whatever plan the
-            // subquery gets.
+            // This condition is the guarantee, not an extra check. The statement deletes a task
+            // only if its suite is in `locked`, and `locked` locks each row that it produces. Thus,
+            // the suite row is always locked before the task row, for all query plans of the
+            // subquery.
             .and_where(
                 Expr::col(ActiveTasks::Column::TaskSuiteId)
                     .is_null()
@@ -2004,9 +1992,8 @@ pub async fn cancel_tasks_by_uuids(
                             ArchivedTasks::Column::Result,
                             ArchivedTasks::Column::UpstreamTaskUuid,
                             ArchivedTasks::Column::DownstreamTaskUuid,
-                            // Without this the archived copy of a suite task
-                            // loses its suite, and the count below has nothing
-                            // to key on.
+                            // Without this column, the archived copy of a suite task does not have
+                            // its suite, and the count below cannot group the tasks by suite.
                             ArchivedTasks::Column::TaskSuiteId,
                         ])
                         .to_owned();
@@ -2045,8 +2032,7 @@ pub async fn cancel_tasks_by_uuids(
         let _ = remove_task(*task_id, pool)
             .inspect_err(|e| tracing::warn!("Failed to remove task {}: {:?}", task_id, e));
     }
-    // TODO: once suites have a ready queue, remove the cancelled suite tasks
-    // from it as well.
+    // TODO: when suites have a ready queue, also remove the cancelled suite tasks from it.
 
     // Determine which UUIDs failed (not found or no permission)
     let failed_uuids: Vec<Uuid> = req

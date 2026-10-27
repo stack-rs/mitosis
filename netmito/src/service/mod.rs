@@ -1,24 +1,24 @@
 //! # Lock order: suite before task
 //!
-//! A transaction that writes both a `task_suites` row and `active_tasks` rows
-//! must write the suite row first.
+//! A transaction that writes a `task_suites` row and `active_tasks` rows must write the suite
+//! row first.
 //!
-//! Row locks taken by an `UPDATE` or `DELETE` live until the transaction
-//! commits, not until the statement ends — so single-statement writes do not
-//! make ordering someone else's problem. A transaction accumulates its locks,
-//! and two of them taking the same pair in opposite orders deadlock, after a
-//! full `deadlock_timeout` of waiting first.
+//! An `UPDATE` or `DELETE` keeps its row locks until the transaction commits, not until the
+//! statement ends. Thus, a write in one statement does not solve the order problem. A
+//! transaction keeps all of its locks. If two transactions lock the same two rows in opposite
+//! order, they deadlock. Postgres finds the deadlock only after `deadlock_timeout`.
 //!
-//! Two shapes satisfy it:
+//! There are two correct ways to keep this order:
 //!
-//! - The suite id is known up front, as on every commit and single-task
-//!   cancel: write the suite row first and let the rest follow.
-//! - The suite ids are only derivable from the task rows, as on a batch
-//!   cancel: lock them in the same statement that removes the tasks, and gate
-//!   the removal on the lock, so no task is taken before its suite is.
+//! - The suite id is known before the write, for example on each commit and on a single-task
+//!   cancel. Write the suite row first, then the task rows.
+//! - The suite ids come only from the task rows, for example on a batch cancel. Lock the suites
+//!   in the same statement that removes the tasks, and remove a task only after its suite is
+//!   locked.
 //!
-//! Touching task rows without writing a suite row is exempt: `claim_candidates`
-//! holds `FOR UPDATE SKIP LOCKED` on tasks alone, and nothing waits on it.
+//! This rule does not apply to a transaction that locks task rows and does not write a suite
+//! row. `claim_candidates` locks only task rows with `FOR UPDATE SKIP LOCKED`, and no
+//! transaction waits for these locks.
 
 pub mod auth;
 pub mod group;

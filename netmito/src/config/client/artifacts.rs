@@ -88,8 +88,8 @@ pub struct DownloadArtifactsByFilterArgs {
     /// The name of the group the tasks belong to
     #[arg(short, long)]
     pub group: Option<String>,
-    /// The UUID of the task suite the tasks belong to. Names the group on its
-    /// own, so `--group` is only needed to double-check it
+    /// The UUID of the task suite that the tasks belong to. The suite also identifies the group.
+    /// If you also give `--group`, it must be the group of the suite
     #[arg(long = "suite")]
     pub suite_uuid: Option<Uuid>,
     /// The tags of the tasks
@@ -199,8 +199,8 @@ pub struct DeleteArtifactsByFilterArgs {
     /// The name of the group the tasks belong to
     #[arg(short, long)]
     pub group: Option<String>,
-    /// The UUID of the task suite the tasks belong to. Names the group on its
-    /// own, so `--group` is only needed to double-check it
+    /// The UUID of the task suite that the tasks belong to. The suite also identifies the group.
+    /// If you also give `--group`, it must be the group of the suite
     #[arg(long = "suite")]
     pub suite_uuid: Option<Uuid>,
     /// The tags of the tasks

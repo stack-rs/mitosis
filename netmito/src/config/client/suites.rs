@@ -23,9 +23,10 @@ pub struct SuitesArgs {
 #[derive(Subcommand, Serialize, Debug, Deserialize, Clone)]
 pub enum SuitesCommands {
     /// Create a new task suite
-    // Boxed: the three optional hook specs make this variant far larger than the rest.
+    // Put the arguments in a box: the three optional hook specs make this variant much larger
+    // than the other variants.
     Create(Box<CreateSuiteArgs>),
-    /// Change a suite's properties. Takes effect on the jobs started after it
+    /// Change the properties of a suite. The change applies to the jobs that start after it
     Change(Box<ChangeSuiteArgs>),
     /// Query task suites subject to a filter
     Query(QuerySuitesArgs),
@@ -65,22 +66,24 @@ pub struct CreateSuiteArgs {
     /// Number of tasks each worker prefetches locally
     #[arg(long, default_value_t = 16)]
     pub prefetch: u32,
-    /// Provision hook, as a JSON exec spec: '{"args":["sh","-c","./setup.sh"],"terminal_output":true}'.
-    /// Runs once before any task; a non-zero exit fails the job and its tasks never start
+    /// The provision hook, as a JSON exec spec, for example
+    /// '{"args":["sh","-c","./setup.sh"],"terminal_output":true}'. It runs one time before the
+    /// tasks. If it exits with a non-zero code, the job fails and its tasks do not start
     #[arg(long, value_parser = parse_exec_spec)]
     pub provision: Option<ExecSpec>,
-    /// Cleanup hook, same JSON shape. Runs once after the tasks drain, even when the job already failed
+    /// The cleanup hook, with the same JSON shape. It runs one time after the last task of the
+    /// job ends. It also runs if the job failed
     #[arg(long, value_parser = parse_exec_spec)]
     pub cleanup: Option<ExecSpec>,
-    /// Background hook, same JSON shape. Runs alongside the tasks and is expected to outlive them
+    /// The background hook, with the same JSON shape. It runs at the same time as the tasks, and
+    /// usually continues to run until the job ends
     #[arg(long, value_parser = parse_exec_spec)]
     pub background: Option<ExecSpec>,
 }
 
 impl From<CreateSuiteArgs> for CreateTaskSuiteReq {
     fn from(args: CreateSuiteArgs) -> Self {
-        // A suite with no hook at all keeps `exec_hooks` absent rather than
-        // carrying three nulls.
+        // If no hook is given, keep `exec_hooks` absent. Do not send an object with three nulls.
         let exec_hooks = match (args.provision, args.cleanup, args.background) {
             (None, None, None) => None,
             (provision, cleanup, background) => Some(ExecHooks {
@@ -106,61 +109,61 @@ impl From<CreateSuiteArgs> for CreateTaskSuiteReq {
     }
 }
 
-/// Every field is left alone unless named. Each nullable one has a `--clear-*`
-/// partner that conflicts with its value flag, so setting and clearing at once
-/// is a parse error rather than a rejected request.
+/// A field does not change if you do not give its flag. Each nullable field has a `--clear-*`
+/// flag that conflicts with its value flag. If you set and clear the same field, clap shows a
+/// parse error, and the client does not send the request.
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
 pub struct ChangeSuiteArgs {
     /// The UUID of the suite
     pub uuid: Uuid,
-    /// New human-readable name for the suite
+    /// The new name of the suite
     #[arg(short, long, conflicts_with = "clear_name")]
     pub name: Option<String>,
-    /// Remove the suite's name
+    /// Remove the name of the suite
     #[arg(long)]
     pub clear_name: bool,
-    /// New description for the suite
+    /// The new description of the suite
     #[arg(short, long, conflicts_with = "clear_description")]
     pub description: Option<String>,
-    /// Remove the suite's description
+    /// Remove the description of the suite
     #[arg(long)]
     pub clear_description: bool,
-    /// Replacement tags for agent matching (e.g. gpu,linux)
+    /// The new tags that an agent must have to run the suite (for example, gpu,linux)
     #[arg(short, long, num_args = 1.., value_delimiter = ',', conflicts_with = "clear_tags")]
     pub tags: Option<Vec<String>>,
-    /// Drop every tag. An untagged suite matches every agent its group can write to
+    /// Remove all tags. A suite with no tags matches all agents that its group can write to
     #[arg(long)]
     pub clear_tags: bool,
-    /// Replacement labels for querying/filtering
+    /// The new labels, which you can use to query and filter suites
     #[arg(short, long, num_args = 1.., value_delimiter = ',', conflicts_with = "clear_labels")]
     pub labels: Option<Vec<String>>,
-    /// Drop every label
+    /// Remove all labels
     #[arg(long)]
     pub clear_labels: bool,
-    /// Suite scheduling priority (higher = more important)
+    /// The scheduling priority of the suite. A higher value is more important
     #[arg(short, long)]
     pub priority: Option<i32>,
-    /// Number of workers each agent spawns for this suite. Must specify prefetch
-    /// setting alongside
+    /// The number of workers that each agent starts for this suite. You must also give
+    /// `--prefetch`
     #[arg(short, long, requires = "prefetch")]
     pub workers: Option<u32>,
-    /// Number of tasks each worker prefetches locally. Must specify worker count
-    /// settings alongside
+    /// The number of tasks that each worker gets before it needs them. You must also give
+    /// `--workers`
     #[arg(long, requires = "workers")]
     pub prefetch: Option<u32>,
-    /// Replacement provision hook, as a JSON exec spec
+    /// The new provision hook, as a JSON exec spec
     #[arg(long, value_parser = parse_exec_spec, conflicts_with = "clear_provision")]
     pub provision: Option<ExecSpec>,
     /// Remove the provision hook
     #[arg(long)]
     pub clear_provision: bool,
-    /// Replacement cleanup hook, same JSON shape
+    /// The new cleanup hook, with the same JSON shape
     #[arg(long, value_parser = parse_exec_spec, conflicts_with = "clear_cleanup")]
     pub cleanup: Option<ExecSpec>,
     /// Remove the cleanup hook
     #[arg(long)]
     pub clear_cleanup: bool,
-    /// Replacement background hook, same JSON shape
+    /// The new background hook, with the same JSON shape
     #[arg(long, value_parser = parse_exec_spec, conflicts_with = "clear_background")]
     pub background: Option<ExecSpec>,
     /// Remove the background hook
@@ -168,8 +171,8 @@ pub struct ChangeSuiteArgs {
     pub clear_background: bool,
 }
 
-/// A value flag and its `--clear-*` partner, as the one op they describe.
-/// clap rules out the both-given case, so a value wins if one ever arrives.
+/// Convert a value flag and its `--clear-*` flag into one `UpdateOp`. clap does not accept the
+/// two flags together. If the two flags arrive, the value is used.
 fn update_op<T>(value: Option<T>, clear: bool) -> Option<UpdateOp<T>> {
     match (value, clear) {
         (Some(value), _) => Some(UpdateOp::SetTo(value)),
@@ -180,8 +183,8 @@ fn update_op<T>(value: Option<T>, clear: bool) -> Option<UpdateOp<T>> {
 
 impl From<ChangeSuiteArgs> for ChangeTaskSuiteReq {
     fn from(args: ChangeSuiteArgs) -> Self {
-        // An array column has no null, so its cleared state is the empty set —
-        // the flag pair is uniform at the CLI even where the request is not.
+        // An array column cannot be null, so its cleared value is an empty set. The CLI uses the
+        // same flag pair for all fields, but the request is different for these two fields.
         let tags = match (args.tags, args.clear_tags) {
             (Some(tags), _) => Some(tags.into_iter().collect()),
             (None, true) => Some(HashSet::new()),
@@ -192,9 +195,9 @@ impl From<ChangeSuiteArgs> for ChangeTaskSuiteReq {
             (None, true) => Some(HashSet::new()),
             (None, false) => None,
         };
-        // The plan is replaced wholesale, so it is stated in full or not at all:
-        // clap requires the two flags together, and neither half may default over
-        // what the suite already had.
+        // The request replaces the full plan, so it must contain the full plan or no plan. clap
+        // requires the two flags together. A missing flag must not get a default value that
+        // replaces the current value of the suite.
         let worker_schedule = match (args.workers, args.prefetch) {
             (Some(worker_count), Some(prefetch)) => Some(WorkerSchedulePlan::FixedWorkers {
                 worker_count,

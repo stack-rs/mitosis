@@ -642,9 +642,8 @@ pub async fn report_task(
             if user.state != UserState::Active {
                 return Err(AuthError::PermissionDenied.into());
             }
-            // Verify worker has permission to access this group. The child's own
-            // group and suite are pinned to the parent's by the submit path,
-            // which also rejects a mismatched `req.group_name`.
+            // Make sure that the worker can access this group. The submit path gives the
+            // downstream task the group of its parent, and rejects a different `req.group_name`.
             GroupWorker::Entity::find()
                 .filter(GroupWorker::Column::WorkerId.eq(worker_id))
                 .filter(GroupWorker::Column::GroupId.eq(task.group_id))
@@ -714,12 +713,11 @@ pub async fn report_task(
                 ..Default::default()
             };
             let suite_id = task.task_suite_id;
-            // The suite's counter goes down in the same transaction that
-            // archives the task. Split across two, a failure in between leaves
-            // `incomplete_tasks` permanently too high, and a suite that never
-            // reaches zero never completes. It goes down *first* so this takes
-            // the suite row before the task rows, the order every writer of the
-            // pair uses.
+            // Decrease the suite counter in the same transaction that archives the task.
+            // With two transactions, a failure between them keeps `incomplete_tasks` too
+            // high permanently. Then the counter never gets to zero, and the suite never
+            // completes. Decrease the counter first. This locks the suite row before the
+            // task rows, which is the lock order that all writers use.
             let (worker_id, worker_state) = pool
                 .db
                 .transaction::<_, (i64, WorkerState), Error>(|txn| {

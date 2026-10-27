@@ -1647,15 +1647,14 @@ paths:
     put:
       summary: Change task suite
       description: >-
-        Change a suite's properties. Every field is optional and an omitted one is
-        left unchanged; an empty request is rejected. Nullable fields (name,
-        description and each hook) take an update op rather than a bare value, so
-        clearing one is expressible. A Cancelled suite is frozen and rejects every
-        change, including a rename. The change applies to the jobs started after
-        it: an agent mid-job keeps the worker count and hooks it started with, and
-        one that no longer tag-matches still finishes the job it holds. The caller
-        must have the Write or Admin role in the suite's group; a non-member and an
-        unknown uuid are indistinguishable and both return 404.
+        Change the properties of a suite. All fields are optional, and an absent field
+        does not change. The server rejects an empty request. A nullable field (name,
+        description and each hook) takes an update op, not a plain value, so that you can
+        clear it. You cannot change a Cancelled suite, and this includes its name. The
+        change applies to the jobs that start after it, because a job copies the worker
+        schedule and the hooks when it starts. The caller must have the Write or Admin
+        role in the group of the suite. If the caller is not a member, or the UUID does
+        not exist, the server returns 404 for the two cases.
       operationId: changeTaskSuite
       tags:
         - Suites
@@ -3325,10 +3324,11 @@ components:
           format: uuid
           nullable: true
           description: >-
-            Filter by the task suite. A suite names its own group, so it fills in
-            group_name when that is omitted and must agree with it otherwise. A
-            suite that does not exist, is in a group the caller is not in, or
-            disagrees with group_name is a 404, not an empty result.
+            Show only the tasks of this suite. The suite also identifies the group. If
+            group_name is absent, the server uses the group of the suite. If group_name is
+            present, it must be the group of the suite. The server returns 404, not an
+            empty result, for a suite that does not exist, a suite in a group that the
+            caller is not in, and a suite that is not in group_name.
           example: 789e0123-e89b-12d3-a456-426614174222
         tags:
           type: array
@@ -3415,7 +3415,7 @@ components:
           type: string
           format: uuid
           nullable: true
-          description: The task suite that owns this task, if any
+          description: The task suite of this task, if the task is in a suite
         task_id:
           type: integer
           format: int64
@@ -3500,7 +3500,7 @@ components:
           type: string
           format: uuid
           nullable: true
-          description: The task suite that owns this task, if any
+          description: The task suite of this task, if the task is in a suite
         task_id:
           type: integer
           format: int64
@@ -3744,10 +3744,11 @@ components:
           format: uuid
           nullable: true
           description: >-
-            Filter by the task suite. A suite names its own group, so it fills in
-            group_name when that is omitted and must agree with it otherwise. A
-            suite that does not exist, is in a group the caller is not in, or
-            disagrees with group_name is a 404, not an empty result.
+            Show only the tasks of this suite. The suite also identifies the group. If
+            group_name is absent, the server uses the group of the suite. If group_name is
+            present, it must be the group of the suite. The server returns 404, not an
+            empty result, for a suite that does not exist, a suite in a group that the
+            caller is not in, and a suite that is not in group_name.
           example: 789e0123-e89b-12d3-a456-426614174222
         tags:
           type: array
@@ -3944,10 +3945,11 @@ components:
           format: uuid
           nullable: true
           description: >-
-            Filter by the task suite. A suite names its own group, so it fills in
-            group_name when that is omitted and must agree with it otherwise. A
-            suite that does not exist, is in a group the caller is not in, or
-            disagrees with group_name is a 404, not an empty result.
+            Show only the tasks of this suite. The suite also identifies the group. If
+            group_name is absent, the server uses the group of the suite. If group_name is
+            present, it must be the group of the suite. The server returns 404, not an
+            empty result, for a suite that does not exist, a suite in a group that the
+            caller is not in, and a suite that is not in group_name.
           example: 789e0123-e89b-12d3-a456-426614174222
         tags:
           type: array
@@ -4132,10 +4134,11 @@ components:
           format: uuid
           nullable: true
           description: >-
-            Filter by the task suite. A suite names its own group, so it fills in
-            group_name when that is omitted and must agree with it otherwise. A
-            suite that does not exist, is in a group the caller is not in, or
-            disagrees with group_name is a 404, not an empty result.
+            Show only the tasks of this suite. The suite also identifies the group. If
+            group_name is absent, the server uses the group of the suite. If group_name is
+            present, it must be the group of the suite. The server returns 404, not an
+            empty result, for a suite that does not exist, a suite in a group that the
+            caller is not in, and a suite that is not in group_name.
           example: 789e0123-e89b-12d3-a456-426614174222
         tags:
           type: array
@@ -4465,8 +4468,8 @@ components:
     UpdateOpString:
       type: object
       description: >-
-        A change to a nullable string field. `set_to` writes the value, `set_null`
-        clears it; omitting the field from the request leaves it unchanged.
+        A change to a nullable string field. `set_to` writes the value, and `set_null`
+        clears it. If the request does not contain the field, the field does not change.
       required:
         - op
       properties:
@@ -4477,7 +4480,7 @@ components:
             - set_null
         value:
           type: string
-          description: Required when op is set_to, absent otherwise
+          description: Necessary when op is set_to. Absent for the other ops
       example:
         op: set_to
         value: nightly-eval
@@ -4485,8 +4488,8 @@ components:
     UpdateOpExecSpec:
       type: object
       description: >-
-        A change to one lifecycle hook. `set_to` installs the spec, `set_null`
-        removes the hook; omitting the field leaves that hook as it was.
+        A change to one lifecycle hook. `set_to` sets the spec, and `set_null` removes the
+        hook. If the request does not contain the field, the hook does not change.
       required:
         - op
       properties:
@@ -4497,13 +4500,14 @@ components:
             - set_null
         value:
           type: object
-          description: Execution spec, required when op is set_to
+          description: The execution spec. Necessary when op is set_to
 
     ExecHooksUpdate:
       type: object
       description: >-
-        Per-hook changes. Each hook is set, cleared, or — omitted — left alone;
-        clearing all three stores no hooks at all.
+        The changes to the hooks, one for each hook. You can set a hook, clear a hook, or
+        leave a hook out to keep it. If you clear all three hooks, the suite stores no
+        hooks.
       properties:
         provision:
           $ref: "#/components/schemas/UpdateOpExecSpec"
@@ -4514,7 +4518,7 @@ components:
 
     ChangeTaskSuiteReq:
       type: object
-      description: At least one field must be present, or the request is rejected as empty
+      description: At least one field must be present. The server rejects an empty request
       properties:
         name:
           $ref: "#/components/schemas/UpdateOpString"
@@ -4525,8 +4529,9 @@ components:
           items:
             type: string
           description: >-
-            Replacement tags for agent matching. An empty array matches every
-            agent the suite's group can write to, since matching is containment
+            The new tags that an agent must have to run the suite. An empty array matches
+            all agents that the group of the suite can write to, because the match is a
+            containment check
           example:
             - linux
             - cuda:11
@@ -4534,7 +4539,7 @@ components:
           type: array
           items:
             type: string
-          description: Replacement labels for querying/filtering
+          description: The new labels, which you can use to query and filter suites
         priority:
           type: integer
           format: int32
@@ -4543,8 +4548,8 @@ components:
           allOf:
             - $ref: "#/components/schemas/WorkerSchedulePlan"
           description: >-
-            Replaces the plan wholesale; a patch could not express switching to
-            another scheduling policy
+            Replaces the full plan. A partial change cannot change the plan to a different
+            scheduling policy
         exec_hooks:
           $ref: "#/components/schemas/ExecHooksUpdate"
 

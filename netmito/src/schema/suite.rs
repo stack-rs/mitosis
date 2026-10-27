@@ -43,12 +43,12 @@ pub struct CreateTaskSuiteResp {
     pub uuid: Uuid,
 }
 
-/// A change to a field whose column is nullable. The field itself is wrapped in
-/// an `Option`, where absent means "leave alone" — so the two variants are the
-/// only things a caller can ask for, and neither can be confused with silence.
+/// A change to a field that has a nullable column. The request puts the field in an `Option`,
+/// and an absent field does not change.
+/// A present field has one of these two values: set a new value, or set the column to null.
 ///
-/// Fields backed by a `NOT NULL` column keep a plain `Option`: they have no null
-/// to set, and their cleared state is a value (an empty array, say).
+/// A field that has a `NOT NULL` column uses a plain `Option`. This column cannot be null, so its
+/// 'cleared' value is a value of its type, for example an empty array.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", content = "value", rename_all = "snake_case")]
 pub enum UpdateOp<T> {
@@ -57,7 +57,7 @@ pub enum UpdateOp<T> {
 }
 
 impl<T> UpdateOp<T> {
-    /// The value this op stores.
+    /// Returns the value to store. `SetNull` returns `None`.
     pub fn into_value(self) -> Option<T> {
         match self {
             Self::SetTo(value) => Some(value),
@@ -66,13 +66,13 @@ impl<T> UpdateOp<T> {
     }
 }
 
-/// Per-hook changes to a suite's `exec_hooks`. Each hook is set, cleared, or —
-/// absent — left as it was; the alternative, replacing the whole object, would
-/// drop the hooks a caller merely failed to mention. Clearing all three stores
-/// no hooks at all, the shape creation leaves behind for a suite with none.
+/// The changes to the `exec_hooks` of a suite, one for each hook. You can set a hook, clear a
+/// hook, or leave a hook out to keep it. The request does not replace the full object, because
+/// that would remove each hook that the request does not mention. If you clear all three hooks,
+/// the suite stores NULL, the same as a suite that you create without hooks.
 ///
-/// The merge itself is done in SQL, over the column's own value, so two
-/// concurrent patches cannot lose each other's edit.
+/// The database merges the changes into the current value of the column. Because of this, two
+/// changes at the same time cannot overwrite each other.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecHooksUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,28 +89,26 @@ impl ExecHooksUpdate {
     }
 }
 
-/// Request to change a suite's properties. Every field is absent-means-unchanged,
-/// and an empty request is rejected rather than treated as a no-op.
+/// A request to change the properties of a suite. An absent field means no change.
+/// The server rejects an empty request.
 ///
-/// A change reaches the jobs started after it, never the ones already running:
-/// slot counts and hooks are snapshotted when a job starts, and an agent that
-/// stops matching the new tags still finishes what it holds.
+/// The change applies to the jobs that start after it, because a job copies the worker schedule
+/// and the hooks when it starts.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChangeTaskSuiteReq {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<UpdateOp<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<UpdateOp<String>>,
-    /// Tags for agent matching. An empty set matches every agent the suite's
-    /// group can write to, since matching is array containment.
+    /// The tags that an agent must have to run the suite. An empty set matches all agents that
+    /// the group of the suite can write to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<HashSet<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<HashSet<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
-    /// Replaces the plan wholesale — a patch could not express switching to
-    /// another scheduling policy.
+    /// Replaces the full plan. A partial change cannot change the plan to a different scheduling policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_schedule: Option<WorkerSchedulePlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -128,8 +126,8 @@ impl ChangeTaskSuiteReq {
             && self.exec_hooks.as_ref().map_or(true, |h| h.is_empty())
     }
 
-    /// Whether the change touches what the scheduler reads: who may run the
-    /// suite, and where it sits in the pick order.
+    /// Returns true if the change can change the result of the scheduler: which agents can run the
+    /// suite, or the position of the suite in the pick order.
     pub fn affects_scheduling(&self) -> bool {
         self.tags.is_some() || self.priority.is_some()
     }

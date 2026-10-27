@@ -1885,10 +1885,8 @@ impl MitoClient {
                                         output_task_info(&task);
                                     }
                                 } else {
-                                    // Bare uuids, except that a suite task says
-                                    // so: without it the terse listing is the
-                                    // one place a suite task is
-                                    // indistinguishable from a loose one.
+                                    // Without --verbose, the output shows only the task UUID.
+                                    // For a task in a suite, it also shows the suite UUID.
                                     for task in resp.tasks {
                                         match task.suite_uuid {
                                             Some(suite_uuid) => {

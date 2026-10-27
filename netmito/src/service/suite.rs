@@ -36,28 +36,27 @@ struct TaskUuidResult {
     uuid: Uuid,
 }
 
-/// Hand `count` finished tasks back to a suite: tick `incomplete_tasks` down,
-/// and complete the suite if that empties an already-`Closed` one.
+/// Decrease `incomplete_tasks` of a suite by `count`, because `count` of its tasks are finished.
+/// If this makes the counter of a `Closed` suite zero, the suite becomes `Complete`.
 ///
-/// Every path that takes an active task out of a suite ends here. A path that
-/// archives a suite task without calling this parks the
-/// suite short of `Complete` and leaves agents cycling over work that is no
-/// longer there.
+/// Each path that removes an active task from a suite must call this function. If a path archives
+/// a suite task and does not call it, the suite cannot become `Complete`. Agents then continue to
+/// look for tasks that do not exist.
 ///
-/// The subtraction is deliberately unguarded. Every caller has just removed
-/// exactly `count` rows from `active_tasks`, and each of those rows added one to
-/// the counter when it was submitted, so the arithmetic cannot legitimately go
-/// below zero. Clamping it would only turn a bug elsewhere into a suite that
-/// looks fine; a negative counter is reported instead, loudly.
+/// The subtraction has no lower limit, and this is intentional. Each caller removed exactly `count`
+/// rows from `active_tasks` immediately before the call. Each of these rows increased the counter
+/// by one when it was submitted. Thus, the counter cannot correctly go below zero. A lower limit
+/// would hide a bug in a different part of the code. Instead, the function logs an error for a
+/// negative counter.
 ///
-/// Draining an `Open` suite does not complete it: it stays `Open` until it has
-/// also been quiet for `suite_auto_close_timeout`, which is what lets the agent
-/// hold its job — and its provisioned environment — open for a late arrival.
-/// [`sweep_inactive_suites`] settles it afterwards. A `Closed` suite has no such
-/// window to wait out, so it is completed here.
+/// When an `Open` suite has no more tasks, it does not become `Complete` here. It stays `Open`
+/// until it also gets no new task for `suite_auto_close_timeout`. During this time, the agent can
+/// keep its job and its provisioned environment for a task that arrives late. Then
+/// [`sweep_inactive_suites`] changes the state of the suite. A `Closed` suite does not wait, so
+/// this function makes it `Complete` immediately.
 ///
-/// The suite row must be taken before any task row, either by this call or by
-/// the caller before it — see the lock-order note on [`crate::service`].
+/// The suite row must be locked before all task rows, by this call or by the caller before it.
+/// Refer to the lock-order note on [`crate::service`].
 pub(crate) async fn decrement_incomplete_tasks<C: ConnectionTrait>(
     db: &C,
     suite_id: i64,
@@ -78,8 +77,8 @@ pub(crate) async fn decrement_incomplete_tasks<C: ConnectionTrait>(
         .exec_with_returning(db)
         .await?;
 
-    // Nothing here can repair it, and swallowing it would leave a suite that
-    // never completes and never gets claimed, with no trace of why.
+    // This function cannot repair a negative counter. It does not set the counter to zero, so
+    // that the bug is easier to find.
     for suite in updated.iter().filter(|s| s.incomplete_tasks < 0) {
         tracing::error!(
             suite_id = suite.id,
@@ -89,10 +88,10 @@ pub(crate) async fn decrement_incomplete_tasks<C: ConnectionTrait>(
         );
     }
 
-    // Conditional on the state and the count, which is what makes a second
-    // statement safe without a transaction around the pair: a submission racing
-    // it either lands first and leaves a non-zero count, or lands after and sets
-    // `Open` itself.
+    // This statement has conditions on the state and on the counter. Because of this, it is safe
+    // as a second statement without a transaction around the two statements. A submit that occurs
+    // at the same time either comes first and makes the counter more than zero, or comes after and
+    // sets the state to `Open` itself.
     TaskSuites::Entity::update_many()
         .col_expr(
             TaskSuites::Column::State,
@@ -109,12 +108,12 @@ pub(crate) async fn decrement_incomplete_tasks<C: ConnectionTrait>(
     Ok(())
 }
 
-/// The largest worker count a plan may ask an agent for.
+/// The maximum number of workers that a plan can request from an agent.
 const MAX_WORKER_COUNT: u32 = 256;
 
-/// Reject a plan no agent should be handed. Shared with the change path so an
-/// edit cannot reach a state creation refuses.
-// TODO: this should finally be adjusted to some more flexible definitions
+/// Make sure that the parameters of a plan are in the permitted range. The create path and the
+/// change path both use this function.
+// TODO: change this check when the plan has a more flexible definition.
 fn validate_worker_schedule(plan: &WorkerSchedulePlan) -> Result<()> {
     match plan {
         WorkerSchedulePlan::FixedWorkers { worker_count, .. } => {
@@ -128,7 +127,7 @@ fn validate_worker_schedule(plan: &WorkerSchedulePlan) -> Result<()> {
     Ok(())
 }
 
-/// Hooks run through the same executor as tasks, so their specs face the same check.
+/// Hooks use the same executor as tasks, so their specs get the same check as task specs.
 fn validate_exec_hooks(hooks: &ExecHooks) -> Result<()> {
     for spec in [&hooks.provision, &hooks.cleanup, &hooks.background]
         .into_iter()
@@ -223,9 +222,8 @@ pub async fn user_create_task_suite(
 
 /// Validate a suite query and resolve/authorize its target group.
 ///
-/// Rejects empty-but-present filter sets, defaults `group_name` to the caller's
-/// username when omitted, and requires the caller to have at least `Read` in the
-/// resolved group.
+/// The function rejects a filter set that is present and empty. If `group_name` is absent, it
+/// uses the username of the caller. The caller must have at least `Read` in the group.
 pub(crate) async fn check_task_suites_query(
     user_id: i64,
     pool: &InfraPool,
@@ -314,13 +312,12 @@ pub(crate) async fn check_task_suites_query(
     Ok(())
 }
 
-/// Change a suite's properties. Requires Write in the suite's group.
+/// Change the properties of a suite. The caller must have `Write` in the group of the suite.
 ///
-/// A `Cancelled` suite is frozen — effectively archived, so even a rename is
-/// rejected. Every other state is editable.
+/// You cannot change a `Cancelled` suite. You can change a suite in all other states.
 ///
-/// The change reaches the *next* job. Slot counts and hooks are snapshotted when
-/// a job starts, and an agent that stops tag-matching continue to run the job.
+/// The change applies to the jobs that start after it, because a job copies the worker schedule
+/// and the hooks when it starts.
 pub async fn user_change_task_suite(
     user_id: i64,
     pool: &InfraPool,
@@ -335,8 +332,7 @@ pub async fn user_change_task_suite(
     if let Some(plan) = &req.worker_schedule {
         validate_worker_schedule(plan)?;
     }
-    // Only the incoming specs need checking: the hooks left alone were checked
-    // when they were written.
+    // Check only the new specs. The server checked the other hooks when it wrote them.
     if let Some(update) = &req.exec_hooks {
         for op in [&update.provision, &update.cleanup, &update.background]
             .into_iter()
@@ -347,6 +343,9 @@ pub async fn user_change_task_suite(
             }
         }
     }
+    // If the change has new tags or a new priority, tell the agents that the suite is available.
+    // New tags can let an idle agent run this suite. A new priority can change which suite an idle
+    // agent selects or preempt an active agent.
     let _needs_notify = req.affects_scheduling();
     let now = TimeDateTimeWithTimeZone::now_utc();
 
@@ -364,9 +363,9 @@ pub async fn user_change_task_suite(
                     };
                 let suite_id = suite.id;
 
-                // `authorize_suite` takes no lock, so this only names the state
-                // in the error; the `WHERE` below is what rejects a suite
-                // cancelled in the meantime.
+                // `authorize_suite` does not lock the row, so this check only puts the state in
+                // the error message. The `WHERE` clause below rejects a suite that a different
+                // request cancels after this check.
                 if suite.state == TaskSuiteState::Cancelled {
                     return Err(Error::ApiError(ApiError::InvalidRequest(format!(
                         "Cannot change a {} suite",
@@ -396,16 +395,14 @@ pub async fn user_change_task_suite(
                 if let Some(plan) = req.worker_schedule {
                     change.worker_schedule = Set(serde_json::to_value(plan)?);
                 }
-                // The hooks are a patch onto what the suite already carries,
-                // and merging them in Rust would mean reading the row first —
-                // two statements, no lock between them, and two concurrent
-                // patches silently losing one edit. The column is written as an
-                // expression over its own current value instead, so the merge
-                // happens inside the `UPDATE` and there is nothing to read.
+                // The request can set, clear or keep each hook, so the new value depends on the
+                // current value. If the code reads the row and merges in Rust, two changes at the
+                // same time can overwrite the hooks of each other. Thus, the column gets an SQL
+                // expression of its current value, and the merge occurs in the `UPDATE`.
                 let hooks_expr = match req.exec_hooks {
                     Some(update) => {
-                        // A NULL column merges as `{}`, so a first hook lands on
-                        // a suite that has none.
+                        // A suite with no hooks stores NULL. Use `{}` for NULL, so that the
+                        // first hook can be added.
                         let mut hooks = Expr::cust_with_expr(
                             "coalesce($1, '{}'::jsonb)",
                             Expr::col(TaskSuites::Column::ExecHooks),
@@ -416,10 +413,11 @@ pub async fn user_change_task_suite(
                             ("background", update.background),
                         ] {
                             hooks = match op {
-                                // `||` replaces this one key and leaves the rest.
-                                // Each step parenthesises itself: `-` binds
-                                // tighter than `||`, so an unwrapped chain would
-                                // read as `x || (obj - 'cleanup')`.
+                                // `||` sets this key and keeps the other keys. `-` removes it.
+                                //
+                                // Each step has parentheses, because `-` has a higher precedence
+                                // than `||`. Without parentheses, PostgreSQL reads the chain as
+                                // `x || (obj - 'cleanup')`.
                                 Some(UpdateOp::SetTo(spec)) => Expr::cust_with_exprs(
                                     "($1 || jsonb_build_object($2::text, $3::jsonb))",
                                     [
@@ -435,15 +433,13 @@ pub async fn user_change_task_suite(
                                 None => hooks,
                             };
                         }
-                        // Every hook gone is no hooks at all — the shape `create`
-                        // stores, rather than an object of three nulls.
+                        // If no hook stays, store NULL, not an empty object.
                         Some(Expr::cust_with_expr("nullif($1, '{}'::jsonb)", hooks))
                     }
                     None => None,
                 };
 
-                // `exec_hooks` is not part of `change`, so it is assigned here
-                // rather than twice: two assignments to one column is an error.
+                // `exec_hooks` is not in `change`, so this statement sets it only one time.
                 let mut stmt = TaskSuites::Entity::update_many()
                     .set(change)
                     .filter(TaskSuites::Column::Id.eq(suite_id))
@@ -462,9 +458,8 @@ pub async fn user_change_task_suite(
         })
         .await?;
 
-    // Eligibility and the pick order are read from the row on every query, so a
-    // change leaves nothing to rebuild — the agents it lets in just have to hear
-    // that the suite is there.
+    // Each query reads the eligibility and the pick order from the row, so there is nothing to
+    // rebuild. A notified agent does a new fetch and gets the latest values.
     // TODO: once agents can be notified, `if _needs_notify` call
     // `notify_suite_available(pool, _suite_id)` here.
     Ok(())
@@ -657,11 +652,11 @@ struct AgentUuidResult {
     uuid: Uuid,
 }
 
-/// Get a single suite's details, including the uuids of agents allowed to execute this suite.
-/// The caller must have at least `Read` in the suite's group.
+/// Get the details of one suite, with the UUIDs of the agents that can run it. The caller must
+/// have at least `Read` in the group of the suite.
 ///
-/// Currently we only report agents that are UserIncluded to the suite. In the future we
-/// shall read the in-memory list for actual tag matching results.
+/// At this time, the result shows only the agents that a user included in the suite.
+/// TODO: read the in-memory list to show the agents that match the tags.
 pub async fn user_get_task_suite_by_uuid(
     user_id: i64,
     pool: &InfraPool,
@@ -805,9 +800,8 @@ pub async fn user_close_task_suite(user_id: i64, pool: &InfraPool, suite_uuid: U
                         Err(ResolveError::Fatal(e)) => return Err(e),
                     };
 
-                // `authorize_suite` takes no lock, so this only names the state
-                // in the error; the `WHERE` below is what actually rejects a
-                // second close.
+                // `authorize_suite` does not lock the row, so this check only puts the state in
+                // the error message. The `WHERE` clause below rejects a second close.
                 if suite.state != TaskSuiteState::Open {
                     return Err(Error::ApiError(ApiError::InvalidRequest(format!(
                         "Cannot transition from {} to Closed",
@@ -838,13 +832,16 @@ pub async fn user_close_task_suite(user_id: i64, pool: &InfraPool, suite_uuid: U
     Ok(())
 }
 
-/// Cancel a suite (`* → Cancelled`, terminal). Archives every non-terminal task
-/// of the suite as `Cancelled`. Requires Write/Admin in the suite's group.
+/// Cancel a suite (`* → Cancelled`). `Cancelled` is a terminal state. The function archives all
+/// tasks of the suite that are not in a terminal state, with the state `Cancelled`. The caller
+/// must have `Write` or `Admin` in the group of the suite.
 ///
-/// `op` (`Graceful`/`Force`) currently has no differentiated effect: its only
-/// distinction is how running agents/jobs tear down and get notified, which lives
-/// in the agent layer that is not ported yet. The parameter is accepted now so the
-/// API stays stable; wire its behavior in with the agent work (see the seams below).
+/// `op` sets what occurs to the jobs that run the suite:
+/// - `Graceful`: the server tells each agent that the suite is cancelled, and which of its tasks
+///   are cancelled. The agent stops taking tasks, runs the cleanup hook, and ends the job as
+///   `Completed`.
+/// - `Force`: the server marks the jobs `Killed` immediately, and the cleanup hook does not run.
+///   The server tells the agents to stop.
 pub async fn user_cancel_task_suite(
     user_id: i64,
     pool: &InfraPool,
@@ -874,17 +871,16 @@ pub async fn user_cancel_task_suite(
                     ))));
                 }
 
-                // The suite is cancelled *before* its tasks are archived, not
-                // after. This statement locks the suite row, and every submit
-                // bumps that same row under a `state <> Cancelled` predicate — so
-                // once this commits, a concurrent submit either got in ahead of
-                // the delete below or is rejected outright. Write the suite last
-                // instead and a submit landing between the delete and the write
-                // leaves a live task in a cancelled suite that nothing will ever
-                // claim, with `incomplete_tasks` already zeroed.
+                // Cancel the suite *before* the archive of its tasks, not after. This statement
+                // locks the suite row. Each submit updates the same row with the condition
+                // `state <> Cancelled`. Thus, after this commit, a submit at the same time either
+                // came before the delete below, or the server rejects it. If the code writes the
+                // suite last, a submit between the delete and the write can add a task to a
+                // cancelled suite. No agent will claim that task, and `incomplete_tasks` is
+                // already zero.
                 //
-                // Zero is exact for the same reason: the delete below takes every
-                // active row of the suite, and nothing can add another.
+                // For the same reason, zero is the correct counter value. The delete below
+                // removes all active rows of the suite, and no request can add a new row.
                 let fenced = TaskSuites::Entity::update_many()
                     .col_expr(
                         TaskSuites::Column::State,
@@ -910,15 +906,14 @@ pub async fn user_cancel_task_suite(
                 })
                 .inspect_err(|e| tracing::error!("{}", e))?;
 
-                // Avoid returning the rows so that we won't trigger psql's too many
-                // argument error when archiving many tasks.
+                // Do not return the rows to Rust. With many tasks, the rows cause the PostgreSQL
+                // error for too many arguments in the archive statement.
                 //
-                // `Cancelled` rows are taken deliberately: that state means an
-                // agent reported `Cancel` and has not yet sent the `Commit` that
-                // would archive the task. Leaving them behind stalls them in
-                // `active_tasks` forever — the `Commit` is about to be refused by
-                // a terminal job, no other agent can claim a non-`Ready` task, and
-                // nothing reclaims that state.
+                // The delete also removes `Cancelled` rows, and this is intentional. This state
+                // means that an agent reported `Cancel`, but did not send the `Commit` that
+                // archives the task. If these rows stay, they stay in `active_tasks` permanently.
+                // The terminal job will reject the `Commit`, no other agent can claim a task that
+                // is not `Ready`, and no process recovers this state.
                 let delete_stmt = DeleteStatement::new()
                     .from_table(ActiveTasks::Entity)
                     .and_where(Expr::col(ActiveTasks::Column::TaskSuiteId).eq(suite.id))
@@ -932,9 +927,9 @@ pub async fn user_cancel_task_suite(
                     .table_name(Alias::new("deleted"))
                     .to_owned();
 
-                // The archived copy: every column read out of `deleted` by name,
-                // with `updated_at`, `state` and `result` overwritten by three
-                // values bound once for the whole statement.
+                // The archived copy. It reads each column from `deleted` by name, and replaces
+                // `updated_at`, `state` and `result` with three values. The statement binds each of
+                // these values one time.
                 let select_from_deleted = Query::select()
                     .expr(Expr::col(Alias::new("id")))
                     .expr(Expr::col(Alias::new("creator_id")))
@@ -977,28 +972,25 @@ pub async fn user_cancel_task_suite(
                         ArchivedTasks::Column::Result,
                         ArchivedTasks::Column::UpstreamTaskUuid,
                         ArchivedTasks::Column::DownstreamTaskUuid,
-                        // Without this the archived copy of a suite task loses
-                        // its suite.
                         ArchivedTasks::Column::TaskSuiteId,
                     ])
                     .to_owned();
-                // Infallible here: the column list and the select have the same
-                // arity, which is a property of this code, not of the request.
+                // This cannot fail: the column list and the select have the same number of
+                // columns. This is a property of the code, not of the request.
                 insert_stmt.select_from(select_from_deleted).unwrap();
                 let archived_cte = CommonTableExpression::new()
                     .query(insert_stmt)
                     .table_name(Alias::new("archived"))
                     .to_owned();
 
-                // The in-flight subset is the only one an agent is holding right
-                // now. Those agents are told which task uuids vanished, so they
-                // stop rather than reporting against rows we just archived.
+                // Agents hold only the tasks in this subset. The server tells these agents the
+                // UUIDs of the removed tasks. The agents then stop, and do not report on rows
+                // that this statement archived.
                 //
-                // This reads `deleted`, not `archived`, because it needs each
-                // task's state as it stood *before* the archive rewrote it to
-                // `Cancelled`. `archived` is never referenced, and does not have
-                // to be: Postgres runs a data-modifying CTE exactly once and to
-                // completion whether or not the primary query reads its output.
+                // This reads `deleted`, not `archived`, because it needs the state of each task
+                // *before* the archive changed it to `Cancelled`. The query does not use
+                // `archived`, and it does not have to: PostgreSQL runs a data-modifying CTE one
+                // time and completely, also when the main query does not read its output.
                 let in_flight_stmt = Query::select()
                     .expr(Expr::col(Alias::new("uuid")))
                     .from(Alias::new("deleted"))
@@ -1028,9 +1020,9 @@ pub async fn user_cancel_task_suite(
         })
         .await?;
 
-    // TODO: once agents run suites, stop the jobs on `_suite_id` (`Force` kills
-    // them, `Graceful` lets them drain) and send each agent `SuiteCancelled`, plus
-    // `TasksCancelled` for `_cancelled_task_uuids`.
+    // TODO: when agents run suites, stop the jobs of `_suite_id`. `Force` kills the jobs, and
+    // `Graceful` lets them finish their current work. Send `SuiteCancelled` to each agent, and
+    // send `TasksCancelled` for `_cancelled_task_uuids`.
 
     Ok(())
 }

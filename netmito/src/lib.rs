@@ -4,6 +4,7 @@ pub mod config;
 pub mod coordinator;
 pub mod entity;
 pub mod error;
+pub mod executor;
 pub mod manager;
 pub mod migration;
 pub mod schema;

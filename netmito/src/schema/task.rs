@@ -100,6 +100,8 @@ pub struct TaskQueryInfo {
     pub uuid: Uuid,
     pub creator_username: String,
     pub group_name: String,
+    /// The suite of this task, if the task is in a suite. The `group_name` above must own this suite.
+    pub suite_uuid: Option<Uuid>,
     pub task_id: i64,
     pub tags: Vec<String>,
     pub labels: Vec<String>,
@@ -120,6 +122,7 @@ pub struct ParsedTaskQueryInfo {
     pub uuid: Uuid,
     pub creator_username: String,
     pub group_name: String,
+    pub suite_uuid: Option<Uuid>,
     pub task_id: i64,
     pub tags: Vec<String>,
     pub labels: Vec<String>,
@@ -142,6 +145,10 @@ pub struct ParsedTaskQueryInfo {
 pub struct TasksQueryReq {
     pub creator_usernames: Option<HashSet<String>>,
     pub group_name: Option<String>,
+    /// Show only the tasks of this suite. The suite also identifies the group. If `group_name`
+    /// is absent, the server uses the group of the suite. If `group_name` is a different group,
+    /// the server returns 404, the same as for a suite that does not exist.
+    pub suite_uuid: Option<Uuid>,
     pub tags: Option<HashSet<String>>,
     pub labels: Option<HashSet<String>>,
     pub states: Option<HashSet<TaskState>>,
@@ -160,6 +167,7 @@ pub struct TasksQueryReq {
 pub struct TasksCancelByFilterReq {
     pub creator_usernames: Option<HashSet<String>>,
     pub group_name: Option<String>,
+    pub suite_uuid: Option<Uuid>,
     pub tags: Option<HashSet<String>>,
     pub labels: Option<HashSet<String>>,
     pub states: Option<HashSet<TaskState>>,

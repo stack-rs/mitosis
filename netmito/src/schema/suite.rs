@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::entity::state::TaskSuiteState;
 
-use super::exec::ExecHooks;
+use super::exec::{ExecHooks, ExecSpec};
 
 /// Request to create a new task suite
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +41,96 @@ pub struct CreateTaskSuiteReq {
 pub struct CreateTaskSuiteResp {
     /// Unique UUID for this suite
     pub uuid: Uuid,
+}
+
+/// A change to a field that has a nullable column. The request puts the field in an `Option`,
+/// and an absent field does not change.
+/// A present field has one of these two values: set a new value, or set the column to null.
+///
+/// A field that has a `NOT NULL` column uses a plain `Option`. This column cannot be null, so its
+/// 'cleared' value is a value of its type, for example an empty array.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", content = "value", rename_all = "snake_case")]
+pub enum UpdateOp<T> {
+    SetTo(T),
+    SetNull,
+}
+
+impl<T> UpdateOp<T> {
+    /// Returns the value to store. `SetNull` returns `None`.
+    pub fn into_value(self) -> Option<T> {
+        match self {
+            Self::SetTo(value) => Some(value),
+            Self::SetNull => None,
+        }
+    }
+}
+
+/// The changes to the `exec_hooks` of a suite, one for each hook. You can set a hook, clear a
+/// hook, or leave a hook out to keep it. The request does not replace the full object, because
+/// that would remove each hook that the request does not mention. If you clear all three hooks,
+/// the suite stores NULL, the same as a suite that you create without hooks.
+///
+/// The database merges the changes into the current value of the column. Because of this, two
+/// changes at the same time cannot overwrite each other.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExecHooksUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<UpdateOp<ExecSpec>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<UpdateOp<ExecSpec>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<UpdateOp<ExecSpec>>,
+}
+
+impl ExecHooksUpdate {
+    pub fn is_empty(&self) -> bool {
+        self.provision.is_none() && self.cleanup.is_none() && self.background.is_none()
+    }
+}
+
+/// A request to change the properties of a suite. An absent field means no change.
+/// The server rejects an empty request.
+///
+/// The change applies to the jobs that start after it, because a job copies the worker schedule
+/// and the hooks when it starts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChangeTaskSuiteReq {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<UpdateOp<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<UpdateOp<String>>,
+    /// The tags that an agent must have to run the suite. An empty set matches all agents that
+    /// the group of the suite can write to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<HashSet<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<HashSet<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    /// Replaces the full plan. A partial change cannot change the plan to a different scheduling policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_schedule: Option<WorkerSchedulePlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_hooks: Option<ExecHooksUpdate>,
+}
+
+impl ChangeTaskSuiteReq {
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none()
+            && self.description.is_none()
+            && self.tags.is_none()
+            && self.labels.is_none()
+            && self.priority.is_none()
+            && self.worker_schedule.is_none()
+            && self.exec_hooks.as_ref().map_or(true, |h| h.is_empty())
+    }
+
+    /// Returns true if the change can change the result of the scheduler: which agents can run the
+    /// suite, or the position of the suite in the pick order.
+    pub fn affects_scheduling(&self) -> bool {
+        self.tags.is_some() || self.priority.is_some()
+    }
 }
 
 /// Worker scheduling policy for the suite

@@ -41,7 +41,7 @@ use sea_orm::sea_query::{Alias, PgFunc, Query};
 use sea_orm::{prelude::*, FromQueryResult, QueryOrder, QuerySelect, Set, TransactionTrait};
 use uuid::Uuid;
 
-use crate::config::InfraPool;
+use crate::config::{InfraPool, REDIS_CONNECTION_INFO};
 use crate::entity::{
     active_tasks as ActiveTasks, agents as Agent, group_agent as GroupAgent, groups as Group,
     machines as Machines,
@@ -299,6 +299,8 @@ pub async fn user_register_agent(
         token,
         notification_counter,
         reused,
+        // Agents use the Redis account of the workers: both runners use the same task state keys.
+        redis_url: REDIS_CONNECTION_INFO.get().map(|info| info.worker_url()),
     })
 }
 

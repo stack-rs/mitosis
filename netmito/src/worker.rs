@@ -8,7 +8,9 @@ use tracing_subscriber::layer::SubscriberExt;
 
 use crate::config::TracingGuard;
 use crate::error::RequestError;
-use crate::executor::{Executor, RESOURCE_FETCH_BUDGET, SINGLE_DOWNLOAD_BUDGET, UPLOAD_BUDGET};
+use crate::executor::{
+    ExecKind, Executor, RESOURCE_FETCH_BUDGET, SINGLE_DOWNLOAD_BUDGET, UPLOAD_BUDGET,
+};
 use crate::schema::*;
 use crate::service::auth::get_and_prompt_username;
 use crate::{
@@ -121,13 +123,14 @@ impl MitoWorker {
             let resp: RegisterWorkerResp = resp.json().await.map_err(RequestError::from)?;
             let mut cache_path =
                 dirs::cache_dir().ok_or(Error::Custom("Cache dir not found".to_string()))?;
+            crate::executor::warn_unreachable_ancestors(&cache_path).await;
             cache_path.push("mitosis");
+            crate::executor::ensure_traversable_dir(&cache_path).await?;
             let log_dir = cache_path.join("worker");
             cache_path.push(resp.worker_id.to_string());
-            tokio::fs::create_dir_all(&cache_path).await?;
-            tokio::fs::create_dir_all(&cache_path.join("result")).await?;
-            tokio::fs::create_dir_all(&cache_path.join("exec")).await?;
-            tokio::fs::create_dir_all(&cache_path.join("resource")).await?;
+            // The executor makes the same tree again between tasks, with the same modes. Thus the
+            // first task also gets a working directory that does not use the umask.
+            crate::executor::reset_workspace(&cache_path).await?;
             tokio::fs::create_dir_all(&log_dir).await?;
             let guards = config.setup_tracing_subscriber::<&uuid::Uuid, _>(&resp.worker_id)?;
             // The worker's own subscriber is live now; stop shadowing it.
@@ -185,9 +188,12 @@ impl MitoWorker {
             task_credential: self.credential.clone(),
             http_url: self.config.coordinator_addr.clone(),
             task_cancel_token: self.cancel_token.clone(),
+            task_stop_token: CancellationToken::new(),
+            runner_cancel_token: self.cancel_token.clone(),
             coordinator_force_exit: self.coordinator_force_exit.clone(),
             polling_interval: self.config.polling_interval,
             task_cache_path: self.cache_path.clone(),
+            extra_envs: Vec::new(),
             task_redis_conn,
             task_redis_pubsub,
             resource_fetch_budget: RESOURCE_FETCH_BUDGET,
@@ -270,7 +276,10 @@ impl MitoWorker {
                         if resp.status().is_success() {
                             match resp.json::<Option<WorkerTaskResp>>().await {
                                 Ok(task) => match task {
-                                    Some(task) => match task_executor.execute(task).await {
+                                    Some(task) => match task_executor
+                                        .execute(ExecKind::Task { job: None }, task)
+                                        .await
+                                    {
                                         Ok(_) => {}
                                         Err(e) => {
                                             tracing::error!("Task execution failed: {}", e);

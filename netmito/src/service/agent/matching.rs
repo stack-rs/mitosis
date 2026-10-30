@@ -163,8 +163,11 @@ pub async fn agent_has_available_suite<C: ConnectionTrait>(
 /// The suite that this agent should run next: the highest priority first, then the oldest. `None`
 /// if no suite is available.
 ///
-/// The query excludes the suites in `blocked`. A filter after the query would be wrong: a blocked
-/// suite at the top would hide the next suite.
+/// The query excludes the suites in `blocked` ([`SuiteQueues::blocked_for`]: the suites reserved
+/// for their jobs). A filter after the query would be wrong: a blocked suite at the top would hide
+/// the next suite.
+///
+/// [`SuiteQueues::blocked_for`]: crate::service::agent::queue::SuiteQueues::blocked_for
 pub async fn best_available_suite_id<C: ConnectionTrait>(
     db: &C,
     agent_id: i64,

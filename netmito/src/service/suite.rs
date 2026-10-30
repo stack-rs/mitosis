@@ -1103,11 +1103,15 @@ pub async fn user_cancel_task_suite(
     let graceful = matches!(op, CancelTaskSuiteOp::Graceful);
     let running_agents = match op {
         CancelTaskSuiteOp::Force => {
-            pool.db
+            let killed = pool
+                .db
                 .transaction::<_, Vec<Uuid>, Error>(move |txn| {
                     Box::pin(async move { agent::job::kill_suite_jobs(txn, suite_id, now).await })
                 })
-                .await?
+                .await?;
+            // All the jobs of the suite ended, and the suite has no more tasks to give.
+            pool.suite_queues.close_suite(suite_id);
+            killed
         }
         CancelTaskSuiteOp::Graceful => agent::job::agents_running_suite(&pool.db, suite_id).await?,
     };

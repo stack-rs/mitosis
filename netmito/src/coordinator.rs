@@ -9,7 +9,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use crate::api::router;
 use crate::config::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 use crate::migration::{Migrator, MigratorTrait};
-use crate::service::agent::{heartbeat::AgentHeartbeatQueue, restore_agents};
+use crate::service::agent::{heartbeat::AgentHeartbeatQueue, queue, restore_agents};
 use crate::service::s3::setup_buckets;
 use crate::service::suite::sweep_inactive_suites;
 use crate::service::worker::{restore_workers, TaskDispatcher, WorkerHeartbeatQueue};
@@ -31,6 +31,8 @@ pub struct MitoCoordinator {
     pub log_dir: PathBuf,
     /// How long a suite can stay without a new task before the sweep moves it out of `Open`.
     pub suite_auto_close_timeout: Duration,
+    /// The interval of the check of the in-memory suite queues against the database.
+    pub suite_queue_reconcile_interval: Duration,
 }
 
 impl MitoCoordinator {
@@ -148,6 +150,7 @@ impl MitoCoordinator {
         );
         let ws_router = config.build_ws_router(cancel_token.clone(), ws_router_rx);
         let suite_auto_close_timeout = config.suite_auto_close_timeout;
+        let suite_queue_reconcile_interval = config.suite_queue_reconcile_interval;
 
         // Setup s3 storage
         // List all buckets and create if not exist
@@ -179,6 +182,7 @@ impl MitoCoordinator {
             cancel_token,
             log_dir,
             suite_auto_close_timeout,
+            suite_queue_reconcile_interval,
         })
     }
 
@@ -192,23 +196,28 @@ impl MitoCoordinator {
             mut ws_router,
             cancel_token,
             suite_auto_close_timeout,
+            suite_queue_reconcile_interval,
             ..
         } = self;
 
         // Create TaskTracker to manage background tasks
         let task_tracker = TaskTracker::new();
 
-        // Suite housekeeping: move the idle suites out of `Open`.
+        // Suite housekeeping: move the idle suites out of `Open`, and remove from the in-memory
+        // queues the tasks that are not ready.
         {
             let pool = infra_pool.clone();
             let cancel = cancel_token.clone();
             let mut sweep = tokio::time::interval(suite_sweep_period(suite_auto_close_timeout));
+            let mut reconcile = tokio::time::interval(suite_queue_reconcile_interval);
             // A late tick is not done at once after the work that delayed it. There is no need to
             // catch up.
             sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             task_tracker.spawn(async move {
-                // The first tick is immediate: it moves the suites that became idle while the
-                // coordinator was down.
+                // The first ticks are immediate. The first sweep moves the suites that became idle
+                // while the coordinator was down. The first reconcile removes nothing, because a
+                // task goes only after two reconciles.
                 loop {
                     tokio::select! {
                         biased;
@@ -216,6 +225,11 @@ impl MitoCoordinator {
                         _ = sweep.tick() => {
                             if let Err(e) = sweep_inactive_suites(&pool.db, suite_auto_close_timeout).await {
                                 tracing::error!("Failed to sweep inactive suites: {e}");
+                            }
+                        }
+                        _ = reconcile.tick() => {
+                            if let Err(e) = queue::reconcile(&pool).await {
+                                tracing::error!("Failed to reconcile the suite queues: {e}");
                             }
                         }
                     }
@@ -244,6 +258,9 @@ impl MitoCoordinator {
         });
 
         restore_workers(&infra_pool).await?;
+        // The jobs of agents continue through a coordinator restart. Add them to the suite queues
+        // before the first submit.
+        queue::restore(&infra_pool).await?;
         restore_agents(&infra_pool).await?;
         let app = router(infra_pool, cancel_token.clone());
         let addr = crate::config::SERVER_CONFIG

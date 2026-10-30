@@ -7,6 +7,11 @@
 //! LOCKED`, agents at the same time step over the rows that the others locked. Thus two agents
 //! cannot claim the same task, and no agent waits.
 //!
+//! [`SuiteQueues`] gives the queued ids of the suite to try first, and refuses the claim while the
+//! suite is reserved for other jobs. The claim transaction decides what the agent gets.
+//!
+//! [`SuiteQueues`]: crate::service::agent::queue::SuiteQueues
+//!
 //! ## Reports
 //!
 //! Agents send the same [`ReportTaskOp`] as workers on `POST /tasks/report`, with the job handle.
@@ -32,30 +37,9 @@ use crate::{
         task_suites as TaskSuites, StoredTaskModel,
     },
     error::{ApiError, Error, Result},
-    schema::{
-        ExecSpec, FetchTasksResp, ReportTaskOp, TaskExecOptions, WorkerSchedulePlan, WorkerTaskResp,
-    },
-    service::{agent::job, agent::matching, s3::group_upload_artifact},
+    schema::{ExecSpec, FetchTasksResp, ReportTaskOp, TaskExecOptions, WorkerTaskResp},
+    service::{agent::job, agent::matching, agent::queue, s3::group_upload_artifact},
 };
-
-/// The maximum number of tasks in one claim, so that a large `worker_count` cannot lock too many
-/// rows.
-const MAX_FETCH_BATCH: u32 = 256;
-
-/// The maximum number of tasks that one job can hold: the tasks that its workers run, and with
-/// `prefetch`, one more task for each worker. Then a worker that becomes free gets its next task
-/// without a round trip.
-pub fn task_budget(schedule: &WorkerSchedulePlan) -> u32 {
-    match schedule {
-        WorkerSchedulePlan::FixedWorkers {
-            worker_count,
-            prefetch,
-            ..
-        } => ((*worker_count).max(1))
-            .saturating_mul(1 + u32::from(*prefetch))
-            .min(MAX_FETCH_BATCH),
-    }
-}
 
 /// Claim the ready tasks of a suite, up to the free room of the job of this agent.
 ///
@@ -92,11 +76,24 @@ pub async fn agent_fetch_tasks(
     // now, a wrong `true` costs only one more fetch.
     let hold_job_open = matches!(suite.state, TaskSuiteState::Open);
 
-    let budget = task_budget(
-        &serde_json::from_value(suite.worker_schedule).inspect_err(|e| {
+    let budget = queue::task_budget(&serde_json::from_value(suite.worker_schedule).inspect_err(
+        |e| {
             tracing::error!("Stored worker schedule is unreadable: {e}");
-        })?,
-    );
+        },
+    )?);
+
+    // While the suite is reserved for other jobs, this agent gets no task. `hold_job_open` does not
+    // change, thus an agent that holds its job fetches again later.
+    let Some(hinted) = pool.suite_queues.take(suite_id, agent_id, budget) else {
+        tracing::debug!("Suite is reserved for its jobs; gave no task");
+        pool.suite_queues.served(suite_id, agent_id, 0, &[]);
+        return Ok(FetchTasksResp {
+            tasks: Vec::new(),
+            hold_job_open,
+        });
+    };
+    let hinted_count = hinted.len();
+
     let group_name = Group::Entity::find_by_id(suite.group_id)
         .one(&pool.db)
         .await?
@@ -117,18 +114,22 @@ pub async fn agent_fetch_tasks(
                 if room == 0 {
                     return Ok(Vec::new());
                 }
-                let candidates = ActiveTasks::Entity::find()
-                    .filter(ActiveTasks::Column::TaskSuiteId.eq(suite_id))
-                    .filter(ActiveTasks::Column::State.eq(TaskState::Ready))
-                    .order_by_desc(ActiveTasks::Column::Priority)
-                    .order_by_asc(ActiveTasks::Column::Id)
-                    .limit(room)
-                    .lock_with_behavior(
-                        sea_orm::sea_query::LockType::Update,
-                        sea_orm::sea_query::LockBehavior::SkipLocked,
-                    )
-                    .all(txn)
-                    .await?;
+                // Try the queued ids first. They are only a hint: the claim skips an id that is
+                // not `Ready` anymore. Then the query in priority order fills the remaining room.
+                let mut candidates = if hinted.is_empty() {
+                    Vec::new()
+                } else {
+                    claim_candidates(txn, suite_id, Some(hinted), room).await?
+                };
+                if (candidates.len() as u64) < room {
+                    let want = room - candidates.len() as u64;
+                    let claimed: Vec<i64> = candidates.iter().map(|t| t.id).collect();
+                    for task in claim_candidates(txn, suite_id, None, want).await? {
+                        if !claimed.contains(&task.id) {
+                            candidates.push(task);
+                        }
+                    }
+                }
                 if candidates.is_empty() {
                     return Ok(Vec::new());
                 }
@@ -146,6 +147,10 @@ pub async fn agent_fetch_tasks(
             })
         })
         .await?;
+
+    let claimed_ids: Vec<i64> = claimed.iter().map(|task| task.id).collect();
+    pool.suite_queues
+        .served(suite_id, agent_id, hinted_count, &claimed_ids);
 
     let mut tasks = Vec::with_capacity(claimed.len());
     for task in claimed {
@@ -174,6 +179,32 @@ pub async fn agent_fetch_tasks(
         tasks,
         hold_job_open,
     })
+}
+
+/// Lock up to `limit` ready tasks of a suite `FOR UPDATE SKIP LOCKED`, in priority order. With
+/// `ids`, only from these tasks.
+async fn claim_candidates<C: ConnectionTrait>(
+    txn: &C,
+    suite_id: i64,
+    ids: Option<Vec<i64>>,
+    limit: u64,
+) -> Result<Vec<ActiveTasks::Model>> {
+    let mut query = ActiveTasks::Entity::find()
+        .filter(ActiveTasks::Column::TaskSuiteId.eq(suite_id))
+        .filter(ActiveTasks::Column::State.eq(TaskState::Ready));
+    if let Some(ids) = ids {
+        query = query.filter(ActiveTasks::Column::Id.is_in(ids));
+    }
+    Ok(query
+        .order_by_desc(ActiveTasks::Column::Priority)
+        .order_by_asc(ActiveTasks::Column::Id)
+        .limit(limit)
+        .lock_with_behavior(
+            sea_orm::sea_query::LockType::Update,
+            sea_orm::sea_query::LockBehavior::SkipLocked,
+        )
+        .all(txn)
+        .await?)
 }
 
 /// Apply a report of the agent to a task that it claimed.
@@ -279,6 +310,10 @@ pub async fn agent_report_task(
                     })
                 })
                 .await?;
+
+            if let Some(suite_id) = suite_id {
+                pool.suite_queues.finished(suite_id, agent_id);
+            }
 
             // An earlier `Submit` made a `Pending` downstream task. The parent committed, thus the
             // downstream task becomes `Ready`.

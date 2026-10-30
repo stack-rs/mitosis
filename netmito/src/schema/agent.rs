@@ -418,6 +418,10 @@ pub enum AgentNotification {
     /// Stop the job on `suite_uuid`. The agent stays up and picks a suite
     /// again. An agent that runs a different suite ignores the event.
     StopJob { suite_uuid: Uuid, graceful: bool },
+    /// The job of the agent on `suite_uuid` has ready tasks. Fetch now, and do not wait for the
+    /// next poll. For a short time, the suite is reserved for the notified jobs. An agent that runs
+    /// a different suite ignores the event.
+    TasksAvailable { suite_uuid: Uuid },
 }
 
 impl AgentNotification {
@@ -427,7 +431,13 @@ impl AgentNotification {
     /// state over HTTP, thus a second copy gives it nothing. A burst of
     /// submissions also must not push older events out of the buffer.
     pub fn coalesces_with(&self, other: &Self) -> bool {
-        matches!((self, other), (Self::SuiteAvailable, Self::SuiteAvailable))
+        match (self, other) {
+            (Self::SuiteAvailable, Self::SuiteAvailable) => true,
+            (Self::TasksAvailable { suite_uuid: a }, Self::TasksAvailable { suite_uuid: b }) => {
+                a == b
+            }
+            _ => false,
+        }
     }
 }
 

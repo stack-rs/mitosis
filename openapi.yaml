@@ -5526,6 +5526,7 @@ components:
             - suite_cancelled
             - tasks_cancelled
             - stop_job
+            - tasks_available
       description: |
         A message from the coordinator that tells an agent to do something:
         - shutdown: shut down; with `graceful`, finish the current work first
@@ -5539,6 +5540,8 @@ components:
         - tasks_cancelled: stop the tasks of `task_uuids` if they run
         - stop_job: stop the job on `suite_uuid` and pick a suite again; with
           `graceful`, finish the running tasks and run the cleanup hook first
+        - tasks_available: the job on `suite_uuid` has ready tasks; fetch now.
+          For a short time, the suite is reserved for the notified jobs
 
     WsNotificationEvent:
       type: object

@@ -59,6 +59,9 @@ pub struct RegisterAgentResp {
     pub notification_counter: u64,
     /// True if the machine was already known and its agent row is used again.
     pub reused: bool,
+    /// The Redis URL for the execution states of tasks. `None` if the coordinator has no Redis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redis_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3740,6 +3740,7 @@ components:
         - WatchTimeout
         - UserCancellation
         - SubmitNewTaskFailed
+        - StoppedByAgent
       description: |
         Task failure reason:
         - FetchResourceTimeout: Timeout downloading resources
@@ -3750,6 +3751,7 @@ components:
         - WatchTimeout: Watched task timeout
         - UserCancellation: Task cancelled by user
         - SubmitNewTaskFailed: Failed to submit new task
+        - StoppedByAgent: The agent stopped the process (a background hook when the tasks of its job end)
 
     TasksQueryReq:
       type: object
@@ -4885,7 +4887,10 @@ components:
           description: Hook run after the suite completes
         background:
           type: object
-          description: Hook run alongside workers
+          description: >-
+            Hook run alongside workers. The agent stops it with SIGTERM when the
+            tasks of the job end. The hook must then exit with 0, or its record is
+            Failed.
 
     CreateTaskSuiteReq:
       type: object
@@ -5391,6 +5396,12 @@ components:
         reused:
           type: boolean
           description: True if the machine was already known and its agent record is used again
+        redis_url:
+          type: string
+          nullable: true
+          description: >-
+            The Redis URL for the execution states of tasks. Not present if the
+            coordinator has no Redis.
 
     AgentInfo:
       type: object

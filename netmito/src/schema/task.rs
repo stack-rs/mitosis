@@ -105,6 +105,8 @@ pub enum TaskResultMessage {
     // May record the user name who cancels the task.
     UserCancellation,
     SubmitNewTaskFailed,
+    /// The agent stopped the process, for example a background hook when the tasks of the job end.
+    StoppedByAgent,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromQueryResult, Clone)]

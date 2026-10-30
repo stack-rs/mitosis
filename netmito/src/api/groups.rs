@@ -8,13 +8,13 @@ use axum_extra::extract::Query;
 
 use crate::{
     config::InfraPool,
-    error::{ApiError, ApiResult, AuthError},
+    error::{ApiError, ApiResult},
     schema::*,
     service::{
         self,
         auth::{
             auth_middleware,
-            roles::{USER, WORKER},
+            roles::{AGENT, USER, WORKER},
             AuthIdentity, AuthUser,
         },
     },
@@ -28,7 +28,7 @@ pub fn groups_router(st: InfraPool) -> Router<InfraPool> {
         )
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
-            auth_middleware::<{ USER | WORKER }>,
+            auth_middleware::<{ USER | WORKER | AGENT }>,
         ));
     let user_router = Router::new()
         .route("/", post(create_group))
@@ -195,9 +195,9 @@ pub async fn download_attachment(
         AuthIdentity::Worker(w) => {
             service::s3::worker_get_attachment(&pool, w.uuid, group_name, key).await
         }
-        // TODO: let an agent read the attachments of a group whose suite it runs a job for.
-        // Do this when agents run jobs. Before that, no job rows exist and the check always fails.
-        AuthIdentity::Agent(_) => Err(AuthError::PermissionDenied.into()),
+        AuthIdentity::Agent(a) => {
+            service::s3::agent_get_attachment(&pool, a.id, group_name, key).await
+        }
     }
     .map_err(|e| match e {
         crate::error::Error::AuthError(err) => ApiError::AuthError(err),

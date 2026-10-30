@@ -24,6 +24,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use crate::{
     error::Error,
     service::agent::heartbeat::{AgentHeartbeatOp, AgentHeartbeatQueue},
+    service::agent::queue::SuiteQueues,
     service::worker::{HeartbeatOp, TaskDispatcher, TaskDispatcherOp, WorkerHeartbeatQueue},
     ws::{AgentWsRouter, RouterOp},
 };
@@ -75,6 +76,18 @@ pub struct CoordinatorConfig {
     /// proxies can close a notification socket that has no traffic.
     #[serde(with = "humantime_serde", default = "default_ws_keepalive_interval")]
     pub(crate) ws_keepalive_interval: std::time::Duration,
+    /// How long a suite can stay without a new task before the coordinator moves it out of
+    /// `Open`. It is also how long an agent keeps a job without tasks open for more work. A larger
+    /// value gives fewer provision hooks and more idle time of the machines.
+    #[serde(with = "humantime_serde", default = "default_suite_auto_close_timeout")]
+    pub(crate) suite_auto_close_timeout: std::time::Duration,
+    /// The interval of the check of the in-memory suite queues against the database. A queued task
+    /// that two checks in sequence do not find as ready goes out of the queue.
+    #[serde(
+        with = "humantime_serde",
+        default = "default_suite_queue_reconcile_interval"
+    )]
+    pub(crate) suite_queue_reconcile_interval: std::time::Duration,
     pub(crate) log_path: Option<RelativePathBuf>,
     pub(crate) file_log: bool,
 }
@@ -85,6 +98,14 @@ fn default_db_max_connections() -> u32 {
 
 fn default_ws_keepalive_interval() -> std::time::Duration {
     std::time::Duration::from_secs(30)
+}
+
+fn default_suite_auto_close_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(60)
+}
+
+fn default_suite_queue_reconcile_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(60)
 }
 
 fn default_db_min_connections() -> u32 {
@@ -188,6 +209,16 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub ws_keepalive_interval: Option<String>,
+    /// How long a suite can stay without a new task before it moves out of Open, and how long an
+    /// agent keeps a job without tasks. Default 60 seconds
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub suite_auto_close_timeout: Option<String>,
+    /// The interval of the check of the in-memory suite queues against the database. Default 60
+    /// seconds
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub suite_queue_reconcile_interval: Option<String>,
     /// The log file path. If not specified, then the default rolling log file path would be used.
     /// If specified, then the log file would be exactly at the path specified.
     #[arg(long)]
@@ -232,6 +263,8 @@ impl Default for CoordinatorConfig {
             access_token_expires_in: std::time::Duration::from_secs(60 * 60 * 24 * 7),
             heartbeat_timeout: std::time::Duration::from_secs(600),
             ws_keepalive_interval: default_ws_keepalive_interval(),
+            suite_auto_close_timeout: default_suite_auto_close_timeout(),
+            suite_queue_reconcile_interval: default_suite_queue_reconcile_interval(),
             log_path: None,
             file_log: false,
         }
@@ -388,6 +421,7 @@ impl CoordinatorConfig {
             worker_heartbeat_queue_tx,
             agent_heartbeat_queue_tx,
             ws_router_tx,
+            suite_queues: SuiteQueues::new(),
             boot_uuid: uuid::Uuid::new_v4(),
             ws_keepalive_interval: self.ws_keepalive_interval,
         })
@@ -510,6 +544,8 @@ pub struct InfraPool {
     pub worker_heartbeat_queue_tx: MTx<HeartbeatOp>,
     pub agent_heartbeat_queue_tx: MTx<AgentHeartbeatOp>,
     pub ws_router_tx: MTx<RouterOp>,
+    /// The dispatch state of the suites that have a job in flight.
+    pub suite_queues: SuiteQueues,
     /// Identifies this coordinator process. An agent compares it with the
     /// `boot_id` of a `CounterSync` to find out that the coordinator restarted.
     pub boot_uuid: uuid::Uuid,

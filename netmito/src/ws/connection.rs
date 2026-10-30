@@ -68,14 +68,19 @@ impl AgentSession {
         }
     }
 
-    fn push(&mut self, event: AgentNotification) -> WsNotificationEvent {
+    /// Buffer an event. `None` if an event in the buffer makes it unnecessary: then the router
+    /// does not send it.
+    fn push(&mut self, event: AgentNotification) -> Option<WsNotificationEvent> {
+        if self.buffer.iter().any(|e| e.event.coalesces_with(&event)) {
+            return None;
+        }
         self.counter = self.counter.saturating_add(1);
         let event = WsNotificationEvent {
             id: self.counter,
             event,
         };
         self.buffer.push_back(event.clone());
-        event
+        Some(event)
     }
 
     fn ack(&mut self, ack_id: u64) {
@@ -170,7 +175,9 @@ impl AgentWsRouter {
             }
             RouterOp::Notify { uuid, event } => {
                 let session = self.sessions.entry(uuid).or_insert_with(AgentSession::new);
-                let event = session.push(event);
+                let Some(event) = session.push(event) else {
+                    return;
+                };
                 if let Some(sender) = session.sender.as_ref() {
                     Self::push_to_socket(sender, &event, uuid);
                 }

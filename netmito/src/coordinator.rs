@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use argon2::password_hash::rand_core::OsRng;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -8,11 +9,17 @@ use tracing_subscriber::layer::SubscriberExt;
 use crate::api::router;
 use crate::config::{CoordinatorConfig, CoordinatorConfigCli, InfraPool};
 use crate::migration::{Migrator, MigratorTrait};
-use crate::service::agent::{heartbeat::AgentHeartbeatQueue, restore_agents};
+use crate::service::agent::{heartbeat::AgentHeartbeatQueue, queue, restore_agents};
 use crate::service::s3::setup_buckets;
+use crate::service::suite::sweep_inactive_suites;
 use crate::service::worker::{restore_workers, TaskDispatcher, WorkerHeartbeatQueue};
 use crate::signal::shutdown_signal;
 use crate::ws::AgentWsRouter;
+
+/// The period of the sweep of idle suites, for the configured idle window.
+fn suite_sweep_period(idle_window: Duration) -> Duration {
+    (idle_window / 2).max(Duration::from_secs(1))
+}
 
 pub struct MitoCoordinator {
     pub infra_pool: InfraPool,
@@ -22,6 +29,10 @@ pub struct MitoCoordinator {
     pub ws_router: AgentWsRouter,
     pub cancel_token: CancellationToken,
     pub log_dir: PathBuf,
+    /// How long a suite can stay without a new task before the sweep moves it out of `Open`.
+    pub suite_auto_close_timeout: Duration,
+    /// The interval of the check of the in-memory suite queues against the database.
+    pub suite_queue_reconcile_interval: Duration,
 }
 
 impl MitoCoordinator {
@@ -138,6 +149,8 @@ impl MitoCoordinator {
             agent_heartbeat_queue_rx,
         );
         let ws_router = config.build_ws_router(cancel_token.clone(), ws_router_rx);
+        let suite_auto_close_timeout = config.suite_auto_close_timeout;
+        let suite_queue_reconcile_interval = config.suite_queue_reconcile_interval;
 
         // Setup s3 storage
         // List all buckets and create if not exist
@@ -168,6 +181,8 @@ impl MitoCoordinator {
             ws_router,
             cancel_token,
             log_dir,
+            suite_auto_close_timeout,
+            suite_queue_reconcile_interval,
         })
     }
 
@@ -180,11 +195,48 @@ impl MitoCoordinator {
             mut agent_heartbeat_queue,
             mut ws_router,
             cancel_token,
+            suite_auto_close_timeout,
+            suite_queue_reconcile_interval,
             ..
         } = self;
 
         // Create TaskTracker to manage background tasks
         let task_tracker = TaskTracker::new();
+
+        // Suite housekeeping: move the idle suites out of `Open`, and remove from the in-memory
+        // queues the tasks that are not ready.
+        {
+            let pool = infra_pool.clone();
+            let cancel = cancel_token.clone();
+            let mut sweep = tokio::time::interval(suite_sweep_period(suite_auto_close_timeout));
+            let mut reconcile = tokio::time::interval(suite_queue_reconcile_interval);
+            // A late tick is not done at once after the work that delayed it. There is no need to
+            // catch up.
+            sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            task_tracker.spawn(async move {
+                // The first ticks are immediate. The first sweep moves the suites that became idle
+                // while the coordinator was down. The first reconcile removes nothing, because a
+                // task goes only after two reconciles.
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => break,
+                        _ = sweep.tick() => {
+                            if let Err(e) = sweep_inactive_suites(&pool.db, suite_auto_close_timeout).await {
+                                tracing::error!("Failed to sweep inactive suites: {e}");
+                            }
+                        }
+                        _ = reconcile.tick() => {
+                            if let Err(e) = queue::reconcile(&pool).await {
+                                tracing::error!("Failed to reconcile the suite queues: {e}");
+                            }
+                        }
+                    }
+                }
+                tracing::info!("Suite housekeeping stopped");
+            });
+        }
 
         // Spawn background tasks using TaskTracker
         task_tracker.spawn(async move {
@@ -206,6 +258,9 @@ impl MitoCoordinator {
         });
 
         restore_workers(&infra_pool).await?;
+        // The jobs of agents continue through a coordinator restart. Add them to the suite queues
+        // before the first submit.
+        queue::restore(&infra_pool).await?;
         restore_agents(&infra_pool).await?;
         let app = router(infra_pool, cancel_token.clone());
         let addr = crate::config::SERVER_CONFIG

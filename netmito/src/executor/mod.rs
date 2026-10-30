@@ -91,19 +91,15 @@ impl Executor {
                                 _ = tokio::time::sleep(self.polling_interval) => {},
                                 _ = tokio::time::sleep_until(timeout_until) => {
                                     tracing::debug!("Fetching resource timeout, commit this task as canceled");
-                                    let req = ReportTaskReq {
-                                        id: task.id,
-                                        op: ReportTaskOp::Cancel,
-                                    };
-                                    self.report_task(req).await?;
-                                    let req = ReportTaskReq {
-                                        id: task.id,
-                                        op: ReportTaskOp::Commit(TaskResultSpec {
+                                    self.report_task(task.id, ReportTaskOp::Cancel).await?;
+                                    self.report_task(
+                                        task.id,
+                                        ReportTaskOp::Commit(TaskResultSpec {
                                             exit_status: 0,
                                             msg: Some(TaskResultMessage::FetchResourceTimeout),
                                         }),
-                                    };
-                                    self.report_task(req).await?;
+                                    )
+                                    .await?;
                                     self
                                         .announce_task_state_ex(
                                             &task.uuid,
@@ -148,19 +144,15 @@ impl Executor {
                     res = download_file(&self.http_client, &download_resp, local_path, false) => {
                         if let Err(e) = res {
                             tracing::error!("Failed to download resource: {}", e);
-                            let req = ReportTaskReq {
-                                id: task.id,
-                                op: ReportTaskOp::Cancel,
-                            };
-                            self.report_task(req).await?;
-                            let req = ReportTaskReq {
-                                id: task.id,
-                                op: ReportTaskOp::Commit(TaskResultSpec {
+                            self.report_task(task.id, ReportTaskOp::Cancel).await?;
+                            self.report_task(
+                                task.id,
+                                ReportTaskOp::Commit(TaskResultSpec {
                                     exit_status: 0,
                                     msg: Some(TaskResultMessage::ResourceForbidden),
                                 }),
-                            };
-                            self.report_task(req).await?;
+                            )
+                            .await?;
                             self
                                 .announce_task_state(
                                     &task.uuid,
@@ -180,19 +172,15 @@ impl Executor {
                     _ = self.task_cancel_token.cancelled() => return Ok(()),
                     _ = tokio::time::sleep(self.single_download_budget) => {
                         tracing::debug!("Fetching resource timeout, commit this task as canceled");
-                        let req = ReportTaskReq {
-                            id: task.id,
-                            op: ReportTaskOp::Cancel,
-                        };
-                        self.report_task(req).await?;
-                        let req = ReportTaskReq {
-                            id: task.id,
-                            op: ReportTaskOp::Commit(TaskResultSpec {
+                        self.report_task(task.id, ReportTaskOp::Cancel).await?;
+                        self.report_task(
+                            task.id,
+                            ReportTaskOp::Commit(TaskResultSpec {
                                 exit_status: 0,
                                 msg: Some(TaskResultMessage::FetchResourceTimeout),
                             }),
-                        };
-                        self.report_task(req).await?;
+                        )
+                        .await?;
                         self
                             .announce_task_state_ex(
                                 &task.uuid,
@@ -207,19 +195,15 @@ impl Executor {
                     }
                     _ = tokio::time::sleep_until(timeout_until) => {
                         tracing::debug!("Fetching resource timeout, commit this task as canceled");
-                        let req = ReportTaskReq {
-                            id: task.id,
-                            op: ReportTaskOp::Cancel,
-                        };
-                        self.report_task(req).await?;
-                        let req = ReportTaskReq {
-                            id: task.id,
-                            op: ReportTaskOp::Commit(TaskResultSpec {
+                        self.report_task(task.id, ReportTaskOp::Cancel).await?;
+                        self.report_task(
+                            task.id,
+                            ReportTaskOp::Commit(TaskResultSpec {
                                 exit_status: 0,
                                 msg: Some(TaskResultMessage::FetchResourceTimeout),
                             }),
-                        };
-                        self.report_task(req).await?;
+                        )
+                        .await?;
                         self
                             .announce_task_state_ex(
                                 &task.uuid,
@@ -235,19 +219,15 @@ impl Executor {
                 }
             } else if resp.status() == StatusCode::NOT_FOUND {
                 tracing::debug!("Resource not found, commit this task as canceled");
-                let req = ReportTaskReq {
-                    id: task.id,
-                    op: ReportTaskOp::Cancel,
-                };
-                self.report_task(req).await?;
-                let req = ReportTaskReq {
-                    id: task.id,
-                    op: ReportTaskOp::Commit(TaskResultSpec {
+                self.report_task(task.id, ReportTaskOp::Cancel).await?;
+                self.report_task(
+                    task.id,
+                    ReportTaskOp::Commit(TaskResultSpec {
                         exit_status: 0,
                         msg: Some(TaskResultMessage::ResourceNotFound),
                     }),
-                };
-                self.report_task(req).await?;
+                )
+                .await?;
                 self.announce_task_state_ex(
                     &task.uuid,
                     TaskExecState::FetchResourceNotFound as i32,
@@ -261,19 +241,15 @@ impl Executor {
                 tracing::debug!(
                     "Resource is forbidden to be fetched, commit this task as canceled"
                 );
-                let req = ReportTaskReq {
-                    id: task.id,
-                    op: ReportTaskOp::Cancel,
-                };
-                self.report_task(req).await?;
-                let req = ReportTaskReq {
-                    id: task.id,
-                    op: ReportTaskOp::Commit(TaskResultSpec {
+                self.report_task(task.id, ReportTaskOp::Cancel).await?;
+                self.report_task(
+                    task.id,
+                    ReportTaskOp::Commit(TaskResultSpec {
                         exit_status: 0,
                         msg: Some(TaskResultMessage::ResourceForbidden),
                     }),
-                };
-                self.report_task(req).await?;
+                )
+                .await?;
                 self.announce_task_state_ex(
                     &task.uuid,
                     TaskExecState::FetchResourceForbidden as i32,
@@ -323,19 +299,15 @@ impl Executor {
                     _ = tokio::time::sleep_until(timeout_until) => {
                         tracing::debug!("Watching timeout, commit this task as canceled");
                         self.unsubscribe_task_exec_state(&watched_task_uuid).await;
-                        let req = ReportTaskReq {
-                            id: task.id,
-                            op: ReportTaskOp::Cancel,
-                        };
-                        self.report_task(req).await?;
-                        let req = ReportTaskReq {
-                            id: task.id,
-                            op: ReportTaskOp::Commit(TaskResultSpec {
+                        self.report_task(task.id, ReportTaskOp::Cancel).await?;
+                        self.report_task(
+                            task.id,
+                            ReportTaskOp::Commit(TaskResultSpec {
                                 exit_status: 0,
                                 msg: Some(TaskResultMessage::WatchTimeout),
                             }),
-                        };
-                        self.report_task(req).await?;
+                        )
+                        .await?;
                         self
                             .announce_task_state_ex(
                                 &task.uuid,
@@ -523,13 +495,6 @@ enum TaskResult {
 }
 
 impl TaskResult {
-    fn state(&self) -> (bool, ExitStatus) {
-        match self {
-            TaskResult::Finish(output) => (true, output.get_exit_status()),
-            TaskResult::Timeout(output) => (false, output.get_exit_status()),
-        }
-    }
-
     fn get_output(self) -> ProcessOutput {
         match self {
             TaskResult::Finish(output) => output,

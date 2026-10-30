@@ -9,14 +9,14 @@ use uuid::Uuid;
 use crate::{
     config::InfraPool,
     entity::content::ArtifactContentType,
-    error::ApiError,
+    error::{ApiError, AuthError},
     schema::*,
     service::{
         self,
         auth::{
             auth_middleware,
-            roles::{USER, WORKER},
-            AuthIdentity, AuthUser, AuthWorker,
+            roles::{AGENT, USER, WORKER},
+            AuthIdentity, AuthUser,
         },
     },
 };
@@ -30,13 +30,13 @@ pub fn tasks_router(st: InfraPool) -> Router<InfraPool> {
         )
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
-            auth_middleware::<{ USER | WORKER }>,
+            auth_middleware::<{ USER | WORKER | AGENT }>,
         ));
-    let worker_router = Router::new()
+    let runner_router = Router::new()
         .route("/report", post(report_task))
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
-            auth_middleware::<WORKER>,
+            auth_middleware::<{ WORKER | AGENT }>,
         ));
     let user_router = Router::new()
         .route("/", post(submit_task))
@@ -67,7 +67,7 @@ pub fn tasks_router(st: InfraPool) -> Router<InfraPool> {
         ));
     Router::new()
         .merge(shared_router)
-        .merge(worker_router)
+        .merge(runner_router)
         .merge(user_router)
         .with_state(st)
 }
@@ -164,12 +164,41 @@ pub async fn query_task(
     Ok(Json(task))
 }
 
+/// `POST /tasks/report`: a worker reports its task, an agent reports a task or a hook of its job.
 pub async fn report_task(
-    Extension(w): Extension<AuthWorker>,
+    Extension(p): Extension<AuthIdentity>,
     State(pool): State<InfraPool>,
-    Json(ReportTaskReq { id, op }): Json<ReportTaskReq>,
+    Json(ReportTaskReq { id, kind, job, op }): Json<ReportTaskReq>,
 ) -> Result<Json<ReportTaskResp>, ApiError> {
-    match service::worker::report_task(w.id, w.uuid, id, op, &pool).await {
+    let result = match (p, kind) {
+        (AuthIdentity::Worker(w), TaskKind::Task) => {
+            if job.is_some() {
+                return Err(ApiError::InvalidRequest(
+                    "A worker task has no job".to_string(),
+                ));
+            }
+            service::worker::report_task(w.id, w.uuid, id, op, &pool).await
+        }
+        (AuthIdentity::Worker(_), TaskKind::Hook) => {
+            return Err(ApiError::AuthError(AuthError::PermissionDenied));
+        }
+        (AuthIdentity::Agent(a), TaskKind::Task) => {
+            let Some(job) = job else {
+                return Err(ApiError::InvalidRequest(
+                    "An agent task report must give its job".to_string(),
+                ));
+            };
+            service::agent::task::agent_report_task(a.id, a.uuid, job, id, op, &pool).await
+        }
+        (AuthIdentity::Agent(a), TaskKind::Hook) => {
+            service::agent::hook::agent_report_hook(a.id, id, op, &pool).await
+        }
+        // The middleware of this route admits only workers and agents.
+        (AuthIdentity::User(_), _) => {
+            return Err(ApiError::AuthError(AuthError::PermissionDenied));
+        }
+    };
+    match result {
         Ok(url) => Ok(Json(ReportTaskResp { url })),
         Err(crate::error::Error::ApiError(e)) => Err(e),
         Err(e) => {

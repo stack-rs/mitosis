@@ -3740,6 +3740,7 @@ components:
         - WatchTimeout
         - UserCancellation
         - SubmitNewTaskFailed
+        - StoppedByAgent
       description: |
         Task failure reason:
         - FetchResourceTimeout: Timeout downloading resources
@@ -3750,6 +3751,7 @@ components:
         - WatchTimeout: Watched task timeout
         - UserCancellation: Task cancelled by user
         - SubmitNewTaskFailed: Failed to submit new task
+        - StoppedByAgent: The agent stopped the process (a background hook when the tasks of its job end)
 
     TasksQueryReq:
       type: object

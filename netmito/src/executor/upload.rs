@@ -16,19 +16,25 @@ use crate::entity::state::TaskExecState;
 use crate::error::{Error, ErrorMsg, RequestError};
 use crate::schema::*;
 
-use super::{Executor, ProcessOutput, TaskResult};
+use super::workspace::reset_workspace;
+use super::{ExecKind, Executor, ProcessOutput, TaskResult};
 
 impl Executor {
+    /// Returns the committed result, or `None` if the executor stopped before the commit.
     pub(super) async fn process_task_result(
         &mut self,
+        kind: ExecKind,
         id: i64,
         uuid: Uuid,
         output: TaskResult,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<Option<TaskResultSpec>> {
+        // A stopped process reports `Finish`: its end is the normal end that the agent asked for.
         let (is_finished, exit_status) = match &output {
             TaskResult::Finish(output) => (true, output.get_exit_status()),
             TaskResult::Timeout(output) => (false, output.get_exit_status()),
+            TaskResult::Stopped(output) => (true, output.get_exit_status()),
         };
+        let stopped = matches!(output, TaskResult::Stopped(_));
         let op = if is_finished {
             self.announce_task_state_ex(&uuid, TaskExecState::UploadFinishedResult as i32, 660)
                 .await;
@@ -38,13 +44,16 @@ impl Executor {
                 .await;
             ReportTaskOp::Cancel
         };
-        self.report_task(id, op).await?;
+        self.report_task(kind, id, op).await?;
         // A spawned task archives each output, and this task uploads each archive when it is ready.
         // The channel sends the content type and size of each archive.
         let (tx, rx) = crossfire::spsc::unbounded_async::<(ArtifactContentType, u64)>();
         let timeout_cancel_token = CancellationToken::new();
         let archive_timeout_cancel_token = timeout_cancel_token.clone();
-        let archive_cancel_token = self.task_cancel_token.clone();
+        // Use a child token. Thus a stop of the archive or of the upload stops only the archive, and
+        // the job of an agent continues.
+        let archive_cancel_token = self.task_cancel_token.child_token();
+        let stop_archive_token = archive_cancel_token.clone();
         let archive_cache_path = self.task_cache_path.clone();
         let archive_hd = tokio::spawn(async move {
             let result_dir = archive_cache_path.join("result");
@@ -226,15 +235,13 @@ impl Executor {
             // that no upload uses.
             let rx = rx;
             while let Ok((content_type, content_length)) = rx.recv().await {
-                let req = ReportTaskReq {
+                let req = kind.report_req(
                     id,
-                    kind: TaskKind::Task,
-                    job: None,
-                    op: ReportTaskOp::Upload {
+                    ReportTaskOp::Upload {
                         content_type,
                         content_length,
                     },
-                };
+                );
                 self.http_url.set_path("tasks/report");
                 let resp = loop {
                     let resp = self
@@ -258,7 +265,7 @@ impl Executor {
                                 );
                                 self.coordinator_force_exit
                                     .store(true, std::sync::atomic::Ordering::Release);
-                                self.task_cancel_token.cancel();
+                                self.runner_cancel_token.cancel();
                                 return Ok(());
                             } else if resp.status() == StatusCode::NOT_FOUND {
                                 tracing::debug!("Task not found, ignore and go on for next cycle");
@@ -278,7 +285,7 @@ impl Executor {
                                     .json()
                                     .await
                                     .unwrap_or_else(|e| ErrorMsg { msg: e.to_string() });
-                                self.task_cancel_token.cancel();
+                                stop_archive_token.cancel();
                                 return Err(Error::Custom(format!(
                                     "Request upload url failed with error: {}",
                                     resp.msg
@@ -299,7 +306,7 @@ impl Executor {
                                 }
                                 continue;
                             } else {
-                                self.task_cancel_token.cancel();
+                                stop_archive_token.cancel();
                                 return Err(RequestError::from(e).into());
                             }
                         }
@@ -368,19 +375,17 @@ impl Executor {
             crate::error::Result::Ok(())
         };
         let timeout_until = tokio::time::Instant::now() + self.upload_budget;
-        tokio::select! {
+        let result = tokio::select! {
             biased;
             _ = tokio::time::sleep_until(timeout_until) => {
                 tracing::warn!("Upload result timeout");
                 timeout_cancel_token.cancel();
-                self.report_task(
-                    id,
-                    ReportTaskOp::Commit(TaskResultSpec {
-                        exit_status: exit_status.into_raw(),
-                        msg: Some(TaskResultMessage::UploadResultTimeout),
-                    }),
-                )
-                .await?;
+                let result = TaskResultSpec {
+                    exit_status: exit_status.into_raw(),
+                    msg: Some(TaskResultMessage::UploadResultTimeout),
+                };
+                self.report_task(kind, id, ReportTaskOp::Commit(result.clone()))
+                    .await?;
                 self
                     .announce_task_state_ex(&uuid, TaskExecState::UploadResultTimeout as i32, 60)
                     .await;
@@ -388,6 +393,7 @@ impl Executor {
                     .announce_task_state_ex(&uuid, TaskExecState::TaskCommitted as i32, 60)
                     .await;
                 archive_hd.await??;
+                result
             }
             res = upload_artifact_fut => {
                 res?;
@@ -397,14 +403,16 @@ impl Executor {
                     self
                         .announce_task_state_ex(&uuid, TaskExecState::WorkerExited as i32, 60)
                         .await;
-                    return Ok(());
+                    return Ok(None);
                 }
                 self
                     .announce_task_state_ex(&uuid, TaskExecState::UploadResultFinished as i32, 60)
                     .await;
 
-                let new_task_scceed = self.submit_new_task_if_present(id).await;
-                let msg = if is_finished {
+                let new_task_scceed = self.submit_new_task_if_present(kind, id).await;
+                let msg = if stopped {
+                    Some(TaskResultMessage::StoppedByAgent)
+                } else if is_finished {
                     if new_task_scceed {
                         None
                     } else {
@@ -413,26 +421,21 @@ impl Executor {
                 } else {
                     Some(TaskResultMessage::ExecTimeout)
                 };
-                self.report_task(
-                    id,
-                    ReportTaskOp::Commit(TaskResultSpec {
-                        exit_status: exit_status.into_raw(),
-                        msg
-                    }),
-                )
-                .await?;
+                let result = TaskResultSpec {
+                    exit_status: exit_status.into_raw(),
+                    msg
+                };
+                self.report_task(kind, id, ReportTaskOp::Commit(result.clone()))
+                    .await?;
                 self
                     .announce_task_state_ex(&uuid, TaskExecState::TaskCommitted as i32, 60)
                     .await;
-
+                result
             }
-        }
+        };
 
         // Reset the cache directory for the next task.
-        tokio::fs::remove_dir_all(&self.task_cache_path).await?;
-        tokio::fs::create_dir_all(&self.task_cache_path).await?;
-        tokio::fs::create_dir_all(&self.task_cache_path.join("result")).await?;
-        tokio::fs::create_dir_all(&self.task_cache_path.join("exec")).await?;
-        Ok(())
+        reset_workspace(&self.task_cache_path).await?;
+        Ok(Some(result))
     }
 }

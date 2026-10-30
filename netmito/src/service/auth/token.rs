@@ -77,11 +77,13 @@ where
     encode_token(&claims, encoding_key)
 }
 
-/// Generate a worker token expiring after `lifetime`, or one that never expires if it is `None`.
-pub fn generate_worker_token<T>(
+/// Generate a worker or agent token expiring after `lifetime`, or one that never expires if it
+/// is `None`.
+pub fn generate_runner_token<T>(
     username: T,
     sign: i64,
     lifetime: Option<std::time::Duration>,
+    role: TokenRole,
 ) -> crate::error::Result<String>
 where
     T: AsRef<str>,
@@ -101,7 +103,7 @@ where
         sub: Cow::from(username.as_ref()),
         exp,
         sign,
-        role: TokenRole::Worker,
+        role,
     };
 
     let encoding_key = crate::config::ENCODING_KEY

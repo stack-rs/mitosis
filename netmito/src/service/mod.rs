@@ -20,6 +20,7 @@
 //! row. `claim_candidates` locks only task rows with `FOR UPDATE SKIP LOCKED`, and no
 //! transaction waits for these locks.
 
+pub mod agent;
 pub mod auth;
 pub mod group;
 pub mod s3;

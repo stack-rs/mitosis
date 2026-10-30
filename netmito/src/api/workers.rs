@@ -16,7 +16,7 @@ use crate::{
         auth::{
             auth_middleware,
             roles::{USER, WORKER},
-            token::generate_worker_token,
+            token::{generate_runner_token, TokenRole},
             AuthUser, AuthWorker,
         },
     },
@@ -78,8 +78,8 @@ pub async fn user_register_worker(
             ApiError::InternalServerError
         }
     })?;
-    let token =
-        generate_worker_token(uuid.clone().to_string(), 0, req.lifetime).map_err(|e| match e {
+    let token = generate_runner_token(uuid.clone().to_string(), 0, req.lifetime, TokenRole::Worker)
+        .map_err(|e| match e {
             crate::error::Error::AuthError(err) => ApiError::AuthError(err),
             crate::error::Error::ApiError(e) => e,
             _ => {

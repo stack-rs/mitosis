@@ -23,7 +23,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use crate::{
     error::Error,
+    service::agent::heartbeat::{AgentHeartbeatOp, AgentHeartbeatQueue},
     service::worker::{HeartbeatOp, TaskDispatcher, TaskDispatcherOp, WorkerHeartbeatQueue},
+    ws::{AgentWsRouter, RouterOp},
 };
 
 use super::TracingGuard;
@@ -69,12 +71,20 @@ pub struct CoordinatorConfig {
     pub(crate) access_token_expires_in: std::time::Duration,
     #[serde(with = "humantime_serde")]
     pub(crate) heartbeat_timeout: std::time::Duration,
+    /// The interval of WebSocket pings to a connected agent. Without them,
+    /// proxies can close a notification socket that has no traffic.
+    #[serde(with = "humantime_serde", default = "default_ws_keepalive_interval")]
+    pub(crate) ws_keepalive_interval: std::time::Duration,
     pub(crate) log_path: Option<RelativePathBuf>,
     pub(crate) file_log: bool,
 }
 
 fn default_db_max_connections() -> u32 {
     32
+}
+
+fn default_ws_keepalive_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(30)
 }
 
 fn default_db_min_connections() -> u32 {
@@ -174,6 +184,10 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub heartbeat_timeout: Option<String>,
+    /// The agent WebSocket keepalive interval, default to 30 seconds
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub ws_keepalive_interval: Option<String>,
     /// The log file path. If not specified, then the default rolling log file path would be used.
     /// If specified, then the log file would be exactly at the path specified.
     #[arg(long)]
@@ -217,6 +231,7 @@ impl Default for CoordinatorConfig {
             access_token_public_path: "public.pem".to_string().into(),
             access_token_expires_in: std::time::Duration::from_secs(60 * 60 * 24 * 7),
             heartbeat_timeout: std::time::Duration::from_secs(600),
+            ws_keepalive_interval: default_ws_keepalive_interval(),
             log_path: None,
             file_log: false,
         }
@@ -259,6 +274,23 @@ impl CoordinatorConfig {
         rx: AsyncRx<HeartbeatOp>,
     ) -> WorkerHeartbeatQueue {
         WorkerHeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
+    }
+
+    pub fn build_agent_heartbeat_queue(
+        &self,
+        cancel_token: CancellationToken,
+        pool: InfraPool,
+        rx: AsyncRx<AgentHeartbeatOp>,
+    ) -> AgentHeartbeatQueue {
+        AgentHeartbeatQueue::new(cancel_token, self.heartbeat_timeout, pool, rx)
+    }
+
+    pub fn build_ws_router(
+        &self,
+        cancel_token: CancellationToken,
+        rx: AsyncRx<RouterOp>,
+    ) -> AgentWsRouter {
+        AgentWsRouter::new(cancel_token, rx)
     }
 
     pub async fn build_redis_connection_info(
@@ -325,6 +357,8 @@ impl CoordinatorConfig {
         &self,
         worker_task_queue_tx: MTx<TaskDispatcherOp>,
         worker_heartbeat_queue_tx: MTx<HeartbeatOp>,
+        agent_heartbeat_queue_tx: MTx<AgentHeartbeatOp>,
+        ws_router_tx: MTx<RouterOp>,
     ) -> crate::error::Result<InfraPool> {
         let mut db_opt = sea_orm::ConnectOptions::new(self.db_url.clone());
         db_opt
@@ -352,6 +386,10 @@ impl CoordinatorConfig {
             attachments_bucket: self.attachments_bucket.clone(),
             worker_task_queue_tx,
             worker_heartbeat_queue_tx,
+            agent_heartbeat_queue_tx,
+            ws_router_tx,
+            boot_uuid: uuid::Uuid::new_v4(),
+            ws_keepalive_interval: self.ws_keepalive_interval,
         })
     }
 
@@ -470,6 +508,12 @@ pub struct InfraPool {
     pub attachments_bucket: String,
     pub worker_task_queue_tx: MTx<TaskDispatcherOp>,
     pub worker_heartbeat_queue_tx: MTx<HeartbeatOp>,
+    pub agent_heartbeat_queue_tx: MTx<AgentHeartbeatOp>,
+    pub ws_router_tx: MTx<RouterOp>,
+    /// Identifies this coordinator process. An agent compares it with the
+    /// `boot_id` of a `CounterSync` to find out that the coordinator restarted.
+    pub boot_uuid: uuid::Uuid,
+    pub ws_keepalive_interval: std::time::Duration,
 }
 
 #[derive(Debug)]

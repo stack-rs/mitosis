@@ -886,6 +886,61 @@ impl MitoHttpClient {
         }
     }
 
+    pub async fn query_agents(
+        &mut self,
+        req: AgentsQueryReq,
+    ) -> crate::error::Result<AgentsQueryResp> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
+        self.url.set_path("agents/query");
+        let resp = self
+            .http_client
+            .post(self.url.as_str())
+            .bearer_auth(credential)
+            .json(&req)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        if resp.status().is_success() {
+            let resp = resp
+                .json::<AgentsQueryResp>()
+                .await
+                .map_err(RequestError::from)?;
+            Ok(resp)
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
+    pub async fn shutdown_agent(&mut self, uuid: Uuid, force: bool) -> crate::error::Result<()> {
+        let credential = self
+            .credential_guard
+            .get_credential()
+            .ok_or(CredentialGuardError::CredentialNotFound)?
+            .token;
+        self.url.set_path(&format!("agents/{uuid}"));
+        if force {
+            self.url.set_query(Some("op=force"));
+        }
+        let resp = self
+            .http_client
+            .delete(self.url.as_str())
+            .bearer_auth(credential)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        // Other requests use `self.url` again, thus remove the query.
+        self.url.set_query(None);
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(get_error_from_resp(resp).await.into())
+        }
+    }
+
     pub async fn get_group_by_name(
         &mut self,
         group_name: &str,

@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    entity::state::TaskSuiteState,
+    entity::state::{SuiteJobState, TaskSuiteState},
     schema::{
         ChangeTaskSuiteReq, CreateTaskSuiteReq, ExecHooks, ExecHooksUpdate, ExecSpec,
-        TaskSuitesQueryReq, UpdateOp, WorkerSchedulePlan,
+        SuiteJobsQueryReq, TaskSuitesQueryReq, UpdateOp, WorkerSchedulePlan,
     },
 };
 
@@ -38,6 +38,10 @@ pub enum SuitesCommands {
     Cancel(CancelSuiteArgs),
     /// Set agent overrides on a suite in one batch: include, exclude, and/or clear agents
     Override(AgentsForSuiteOverrideArgs),
+    /// Show the jobs of the suite. A job is one run of the suite by one agent
+    Jobs(SuiteJobsArgs),
+    /// Stop a job of the suite. Its agent then picks a suite again
+    StopJob(StopSuiteJobArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -63,9 +67,10 @@ pub struct CreateSuiteArgs {
     /// Number of workers each agent spawns for this suite
     #[arg(short, long, default_value_t = 1)]
     pub workers: u32,
-    /// Number of tasks each worker prefetches locally
-    #[arg(long, default_value_t = 16)]
-    pub prefetch: u32,
+    /// Claim a task only when a worker is free. Without this flag, the agent keeps the next task
+    /// ready. Use it only for long tasks, because it adds a round trip for each task
+    #[arg(long, default_value_t = false)]
+    pub no_prefetch: bool,
     /// The provision hook, as a JSON exec spec, for example
     /// '{"args":["sh","-c","./setup.sh"],"terminal_output":true}'. It runs one time before the
     /// tasks. If it exits with a non-zero code, the job fails and its tasks do not start
@@ -102,7 +107,7 @@ impl From<CreateSuiteArgs> for CreateTaskSuiteReq {
             worker_schedule: WorkerSchedulePlan::FixedWorkers {
                 worker_count: args.workers,
                 cpu_binding: None,
-                task_prefetch_count: args.prefetch,
+                prefetch: !args.no_prefetch,
             },
             exec_hooks,
         }
@@ -147,10 +152,10 @@ pub struct ChangeSuiteArgs {
     /// `--prefetch`
     #[arg(short, long, requires = "prefetch")]
     pub workers: Option<u32>,
-    /// The number of tasks that each worker gets before it needs them. You must also give
-    /// `--workers`
+    /// Whether the agent keeps the next task ready, or claims a task only when a worker is free.
+    /// You must also give `--workers`
     #[arg(long, requires = "workers")]
-    pub prefetch: Option<u32>,
+    pub prefetch: Option<bool>,
     /// The new provision hook, as a JSON exec spec
     #[arg(long, value_parser = parse_exec_spec, conflicts_with = "clear_provision")]
     pub provision: Option<ExecSpec>,
@@ -202,7 +207,7 @@ impl From<ChangeSuiteArgs> for ChangeTaskSuiteReq {
             (Some(worker_count), Some(prefetch)) => Some(WorkerSchedulePlan::FixedWorkers {
                 worker_count,
                 cpu_binding: None,
-                task_prefetch_count: prefetch,
+                prefetch,
             }),
             _ => None,
         };
@@ -303,4 +308,57 @@ pub struct AgentsForSuiteOverrideArgs {
     /// Agents to reset to the tag-match default (clear any manual include/exclude)
     #[arg(long, num_args = 0.., value_delimiter = ',')]
     pub clear: Vec<Uuid>,
+}
+
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct SuiteJobsArgs {
+    /// The UUID of the suite
+    pub uuid: Uuid,
+    /// Show one job in full, with its hooks
+    #[arg(long)]
+    pub job: Option<i32>,
+    /// Filter by job state
+    #[arg(long, num_args = 0.., value_delimiter = ',')]
+    pub states: Vec<SuiteJobState>,
+    /// Show only the jobs of this agent
+    #[arg(long)]
+    pub agent: Option<Uuid>,
+    /// Maximum number of jobs to show
+    #[arg(long)]
+    pub limit: Option<u64>,
+    /// Number of jobs to skip
+    #[arg(long)]
+    pub offset: Option<u64>,
+    /// Only return the number of matching jobs
+    #[arg(long)]
+    pub count: bool,
+}
+
+/// The same stop as `agents stop-job`, by the job number in the suite. The caller needs Write in
+/// the group of the suite. The agent can accept this suite again: the command stops the job, it does
+/// not keep the agent away.
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct StopSuiteJobArgs {
+    /// The UUID of the suite
+    pub uuid: Uuid,
+    /// The job number in the suite, as `suites jobs` shows it
+    #[arg(long)]
+    pub job: i32,
+    /// Stop now: the job is killed without cleanup, and its tasks that are not committed go back to
+    /// Ready. Without this flag, the agent finishes and commits its running tasks, and runs the
+    /// cleanup hook first.
+    #[arg(short, long)]
+    pub force: bool,
+}
+
+impl From<&SuiteJobsArgs> for SuiteJobsQueryReq {
+    fn from(args: &SuiteJobsArgs) -> Self {
+        Self {
+            states: (!args.states.is_empty()).then(|| args.states.iter().copied().collect()),
+            agent_uuid: args.agent,
+            limit: args.limit,
+            offset: args.offset,
+            count: args.count,
+        }
+    }
 }

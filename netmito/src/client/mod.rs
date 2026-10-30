@@ -901,6 +901,62 @@ impl MitoClient {
         }
     }
 
+    /// Show the jobs of a suite, or one job in full with `--job`.
+    async fn suites_jobs(&mut self, args: SuiteJobsArgs) {
+        let suite = args.uuid;
+        if let Some(job_id) = args.job {
+            match self.http_client.get_suite_job(suite, job_id).await {
+                Ok(resp) => {
+                    tracing::info!(
+                        "Job {} ({}), agent: {}, created {}, updated {}",
+                        resp.info.job_id,
+                        resp.info.state,
+                        resp.info
+                            .agent_uuid
+                            .map(|u| u.to_string())
+                            .unwrap_or("[detached]".to_string()),
+                        resp.info.created_at,
+                        resp.info.updated_at,
+                    );
+                    if resp.hooks.is_empty() {
+                        tracing::info!("No hooks");
+                    }
+                    for hook in resp.hooks {
+                        tracing::info!(
+                            "  hook {} ({}): {}, exit status {}",
+                            hook.hook_type,
+                            hook.uuid,
+                            hook.state,
+                            hook.result
+                                .map(|r| r.exit_status.to_string())
+                                .unwrap_or("[none]".to_string()),
+                        );
+                    }
+                }
+                Err(e) => tracing::error!("{}", e),
+            }
+            return;
+        }
+        let req = SuiteJobsQueryReq::from(&args);
+        match self.http_client.query_suite_jobs(suite, req).await {
+            Ok(resp) => {
+                tracing::info!("Found {} jobs for suite {suite}", resp.count);
+                for job in resp.jobs {
+                    tracing::info!(
+                        "Job {} ({}), agent: {}, updated {}",
+                        job.job_id,
+                        job.state,
+                        job.agent_uuid
+                            .map(|u| u.to_string())
+                            .unwrap_or("[detached]".to_string()),
+                        job.updated_at,
+                    );
+                }
+            }
+            Err(e) => tracing::error!("{}", e),
+        }
+    }
+
     pub async fn tasks_batch_cancel(
         &mut self,
         args: CancelTasksArgs,
@@ -2118,7 +2174,7 @@ impl MitoClient {
                 }
                 SuitesCommands::Get(args) => match self.suites_get(args).await {
                     Ok(resp) => {
-                        output_parsed_suite_info(&resp.info, &resp.eligible_agents);
+                        output_parsed_suite_info(&resp);
                     }
                     Err(e) => {
                         tracing::error!("{}", e);
@@ -2142,6 +2198,17 @@ impl MitoClient {
                 },
                 SuitesCommands::Override(args) => {
                     self.suites_override_agents(args).await;
+                }
+                SuitesCommands::Jobs(args) => self.suites_jobs(args).await,
+                SuitesCommands::StopJob(args) => {
+                    match self
+                        .http_client
+                        .stop_suite_job(args.uuid, args.job, args.force)
+                        .await
+                    {
+                        Ok(resp) => report_stopped_job(resp),
+                        Err(e) => tracing::error!("{}", e),
+                    }
                 }
             },
             ClientCommand::Agents(args) => match args.command {
@@ -2179,6 +2246,12 @@ impl MitoClient {
                         Err(e) => tracing::error!("{}", e),
                     }
                 }
+                AgentsCommands::StopJob(args) => {
+                    match self.http_client.stop_agent_job(args.uuid, args.force).await {
+                        Ok(resp) => report_stopped_job(resp),
+                        Err(e) => tracing::error!("{}", e),
+                    }
+                }
             },
             ClientCommand::Quit => {
                 return false;
@@ -2213,5 +2286,15 @@ impl MitoClient {
             }
         });
         req
+    }
+}
+
+/// Both stop-job commands use this. "Nothing to stop" is a normal answer, not an error.
+fn report_stopped_job(resp: StopAgentJobResp) {
+    match (resp.stopped, resp.suite_uuid, resp.job_id) {
+        (true, Some(suite_uuid), Some(job_id)) => tracing::info!(
+            "Asked the agent to stop job {job_id} of suite {suite_uuid}; it will pick a suite again"
+        ),
+        _ => tracing::info!("No job was running to stop"),
     }
 }

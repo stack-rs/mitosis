@@ -75,6 +75,11 @@ pub struct CoordinatorConfig {
     /// proxies can close a notification socket that has no traffic.
     #[serde(with = "humantime_serde", default = "default_ws_keepalive_interval")]
     pub(crate) ws_keepalive_interval: std::time::Duration,
+    /// How long a suite can stay without a new task before the coordinator moves it out of
+    /// `Open`. It is also how long an agent keeps a job without tasks open for more work. A larger
+    /// value gives fewer provision hooks and more idle time of the machines.
+    #[serde(with = "humantime_serde", default = "default_suite_auto_close_timeout")]
+    pub(crate) suite_auto_close_timeout: std::time::Duration,
     pub(crate) log_path: Option<RelativePathBuf>,
     pub(crate) file_log: bool,
 }
@@ -85,6 +90,10 @@ fn default_db_max_connections() -> u32 {
 
 fn default_ws_keepalive_interval() -> std::time::Duration {
     std::time::Duration::from_secs(30)
+}
+
+fn default_suite_auto_close_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(60)
 }
 
 fn default_db_min_connections() -> u32 {
@@ -188,6 +197,11 @@ pub struct CoordinatorConfigCli {
     #[arg(long)]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub ws_keepalive_interval: Option<String>,
+    /// How long a suite can stay without a new task before it moves out of Open, and how long an
+    /// agent keeps a job without tasks. Default 60 seconds
+    #[arg(long)]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub suite_auto_close_timeout: Option<String>,
     /// The log file path. If not specified, then the default rolling log file path would be used.
     /// If specified, then the log file would be exactly at the path specified.
     #[arg(long)]
@@ -232,6 +246,7 @@ impl Default for CoordinatorConfig {
             access_token_expires_in: std::time::Duration::from_secs(60 * 60 * 24 * 7),
             heartbeat_timeout: std::time::Duration::from_secs(600),
             ws_keepalive_interval: default_ws_keepalive_interval(),
+            suite_auto_close_timeout: default_suite_auto_close_timeout(),
             log_path: None,
             file_log: false,
         }

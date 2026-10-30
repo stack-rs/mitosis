@@ -403,8 +403,8 @@ async fn internal_submit_task(
 
     // Not pending, notify agent/worker depending on whether it belongs to a suite
     match suite {
-        Some(_suite) => {
-            // TODO: If this task belongs to a suite, notify agents
+        Some(suite) => {
+            crate::service::agent::notify_suite_available(pool, suite.id).await;
         }
         None => {
             let builder = pool.db.get_database_backend();
@@ -496,9 +496,8 @@ pub async fn worker_trigger_pending_task(pool: &InfraPool, uuid: Uuid) -> crate:
     let task = task.update(&pool.db).await?;
     // A suite task does not go into the worker queues. Agents get it from its suite. Thus, wake the
     // idle agents that can run the suite.
-    if let Some(_suite_id) = task.task_suite_id {
-        // TODO: when agents can get notifications, call `notify_suite_available(pool, _suite_id)`
-        // here.
+    if let Some(suite_id) = task.task_suite_id {
+        crate::service::agent::notify_suite_available(pool, suite_id).await;
         return Ok(());
     }
     // Batch add task to worker task queues

@@ -25,24 +25,20 @@ impl Executor {
         uuid: Uuid,
         output: TaskResult,
     ) -> crate::error::Result<()> {
-        let (is_finished, exit_status) = output.state();
-        let req = ReportTaskReq {
-            id,
-            op: if is_finished {
-                self.announce_task_state_ex(&uuid, TaskExecState::UploadFinishedResult as i32, 660)
-                    .await;
-                ReportTaskOp::Finish
-            } else {
-                self.announce_task_state_ex(
-                    &uuid,
-                    TaskExecState::UploadCancelledResult as i32,
-                    660,
-                )
-                .await;
-                ReportTaskOp::Cancel
-            },
+        let (is_finished, exit_status) = match &output {
+            TaskResult::Finish(output) => (true, output.get_exit_status()),
+            TaskResult::Timeout(output) => (false, output.get_exit_status()),
         };
-        self.report_task(req).await?;
+        let op = if is_finished {
+            self.announce_task_state_ex(&uuid, TaskExecState::UploadFinishedResult as i32, 660)
+                .await;
+            ReportTaskOp::Finish
+        } else {
+            self.announce_task_state_ex(&uuid, TaskExecState::UploadCancelledResult as i32, 660)
+                .await;
+            ReportTaskOp::Cancel
+        };
+        self.report_task(id, op).await?;
         // A spawned task archives each output, and this task uploads each archive when it is ready.
         // The channel sends the content type and size of each archive.
         let (tx, rx) = crossfire::spsc::unbounded_async::<(ArtifactContentType, u64)>();
@@ -232,6 +228,8 @@ impl Executor {
             while let Ok((content_type, content_length)) = rx.recv().await {
                 let req = ReportTaskReq {
                     id,
+                    kind: TaskKind::Task,
+                    job: None,
                     op: ReportTaskOp::Upload {
                         content_type,
                         content_length,
@@ -375,14 +373,14 @@ impl Executor {
             _ = tokio::time::sleep_until(timeout_until) => {
                 tracing::warn!("Upload result timeout");
                 timeout_cancel_token.cancel();
-                let req = ReportTaskReq {
+                self.report_task(
                     id,
-                    op: ReportTaskOp::Commit(TaskResultSpec {
+                    ReportTaskOp::Commit(TaskResultSpec {
                         exit_status: exit_status.into_raw(),
                         msg: Some(TaskResultMessage::UploadResultTimeout),
                     }),
-                };
-                self.report_task(req).await?;
+                )
+                .await?;
                 self
                     .announce_task_state_ex(&uuid, TaskExecState::UploadResultTimeout as i32, 60)
                     .await;
@@ -415,14 +413,14 @@ impl Executor {
                 } else {
                     Some(TaskResultMessage::ExecTimeout)
                 };
-                let req = ReportTaskReq {
+                self.report_task(
                     id,
-                    op: ReportTaskOp::Commit(TaskResultSpec {
+                    ReportTaskOp::Commit(TaskResultSpec {
                         exit_status: exit_status.into_raw(),
                         msg
                     }),
-                };
-                self.report_task(req).await?;
+                )
+                .await?;
                 self
                     .announce_task_state_ex(&uuid, TaskExecState::TaskCommitted as i32, 60)
                     .await;

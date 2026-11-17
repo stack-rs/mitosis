@@ -1868,6 +1868,184 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /agents:
+    post:
+      summary: Register an agent
+      description: >-
+        Register the agent of a machine and issue its token. One machine has one
+        agent record for all its life, because `machine_code` is unique. If the
+        machine is already known, the coordinator uses its agent record again:
+        it replaces the tags, labels, groups and metadata, and it retires the
+        previous agent process. The caller must have the Admin role in
+        `admin_group`, and at least the Write role in each group of `groups`.
+        The request gives all the groups that can use the agent. Group access
+        that is not in the request is removed.
+      operationId: registerAgent
+      tags:
+        - Agents
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterAgentReq"
+      responses:
+        "200":
+          description: Agent registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterAgentResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      summary: Report that the agent exits
+      description: >-
+        The agent calls this when it exits. The coordinator marks the agent
+        Offline at once, and does not wait for its heartbeat to time out. The
+        agent record stays. After this call, the agent token does not work.
+        A second call has no effect.
+      operationId: agentExit
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      responses:
+        "200":
+          description: Agent marked Offline
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /agents/query:
+    post:
+      summary: Query agents
+      description: >-
+        List the agents of one group, with optional filters. The default group
+        is the personal group of the caller. The caller must have at least the
+        Read role in the group.
+      operationId: queryAgents
+      tags:
+        - Agents
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentsQueryReq"
+      responses:
+        "200":
+          description: List of agents
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentsQueryResp"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /agents/{uuid}:
+    delete:
+      summary: Shut an agent down
+      description: >-
+        Stop an agent. The agent record stays. The caller must have the Admin
+        role in the admin group of the agent. If the caller does not, the
+        response is 404, the same as for an unknown uuid.
+      operationId: shutdownAgent
+      tags:
+        - Agents
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: op
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - graceful
+              - force
+          description: |
+            Shutdown mode:
+            - graceful (default): tell the agent to stop. The agent finishes its
+              current work and then marks itself Offline
+            - force: mark the agent Offline now, then tell it to stop
+      responses:
+        "200":
+          description: Shutdown requested
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /agents/heartbeat:
+    post:
+      summary: Agent heartbeat
+      description: >-
+        Record that the agent is alive, and return all notifications that the
+        agent has not acknowledged. `last_notification_id` acknowledges all
+        notifications up to that id. The coordinator returns the notifications
+        after it again until the agent acknowledges them. If an agent does not
+        send a heartbeat in time, the coordinator marks it Offline.
+      operationId: agentHeartbeat
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentHeartbeatReq"
+      responses:
+        "200":
+          description: Notifications not acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentHeartbeatResp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /ws/agents:
+    get:
+      summary: Agent notification socket
+      description: >-
+        A WebSocket that sends notifications from the coordinator to the agent
+        as `speedy`-encoded binary `WsNotificationEvent` frames. The agent
+        acknowledges them with `AgentWsMessage` frames. The socket only makes
+        delivery faster: the next heartbeat also returns each notification, thus
+        an agent without a socket still gets all of them.
+      operationId: agentWebSocket
+      tags:
+        - Agents
+      security:
+        - agentAuth: []
+      responses:
+        "101":
+          description: Switching protocols
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /admin/users:
     post:
       summary: Create user (Admin)
@@ -2195,6 +2373,11 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: JWT token obtained when registering worker
+    agentAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained when registering an agent
 
   responses:
     BadRequest:
@@ -4834,6 +5017,256 @@ components:
           type: boolean
           description: Whether a manual override existed and was cleared (false = nothing to reset)
 
+    AgentState:
+      type: string
+      enum:
+        - Idle
+        - Provisioning
+        - Executing
+        - Cleaning
+        - Offline
+
+    AgentMetadata:
+      type: object
+      required:
+        - version
+        - long_version
+      properties:
+        version:
+          type: string
+        long_version:
+          type: string
+
+    RegisterAgentReq:
+      type: object
+      required:
+        - machine_code
+      properties:
+        tags:
+          type: array
+          items:
+            type: string
+          description: Tags that a suite must match to run on this agent
+        labels:
+          type: array
+          items:
+            type: string
+          description: Labels for queries and filters
+        admin_group:
+          type: string
+          description: >-
+            The group that gets the Admin role on the agent. Only an Admin of
+            this group can shut the agent down, and the caller must be one. The
+            default is the personal group of the caller.
+        groups:
+          type: array
+          items:
+            type: string
+          description: Groups that get the Write role on the agent
+        lifetime:
+          type: string
+          description: >-
+            The lifetime of the agent token, as a human duration. If it is not
+            given, the token never expires.
+          example: 30d
+        machine_code:
+          type: string
+          description: >-
+            A stable identifier of the machine. A restarted agent must send the
+            same value to use its agent record again.
+        metadata:
+          $ref: "#/components/schemas/AgentMetadata"
+
+    RegisterAgentResp:
+      type: object
+      required:
+        - agent_uuid
+        - token
+        - notification_counter
+        - reused
+      properties:
+        agent_uuid:
+          type: string
+          format: uuid
+        token:
+          type: string
+          description: The JWT of the agent, for all agent-authenticated calls
+        notification_counter:
+          type: integer
+          format: uint64
+          description: >-
+            The last notification id issued to this agent. The agent counts its
+            notifications from this value.
+        reused:
+          type: boolean
+          description: True if the machine was already known and its agent record is used again
+
+    AgentInfo:
+      type: object
+      required:
+        - uuid
+        - creator_username
+        - tags
+        - labels
+        - state
+        - last_heartbeat
+        - created_at
+        - updated_at
+      properties:
+        uuid:
+          type: string
+          format: uuid
+        creator_username:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        labels:
+          type: array
+          items:
+            type: string
+        state:
+          $ref: "#/components/schemas/AgentState"
+        last_heartbeat:
+          type: string
+          format: date-time
+        assigned_suite_uuid:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        machine_code:
+          type: string
+        metadata:
+          type: object
+
+    AgentsQueryReq:
+      type: object
+      required:
+        - count
+      properties:
+        group_name:
+          type: string
+          description: The default is the personal group of the caller
+        tags:
+          type: array
+          items:
+            type: string
+        labels:
+          type: array
+          items:
+            type: string
+        states:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentState"
+        creator_username:
+          type: string
+        limit:
+          type: integer
+          format: uint64
+        offset:
+          type: integer
+          format: uint64
+        count:
+          type: boolean
+          description: Return only the number of matching agents
+
+    AgentsQueryResp:
+      type: object
+      required:
+        - count
+        - agents
+        - group_name
+      properties:
+        count:
+          type: integer
+          format: uint64
+        agents:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentInfo"
+        group_name:
+          type: string
+
+    AgentHeartbeatReq:
+      type: object
+      required:
+        - state
+      properties:
+        state:
+          $ref: "#/components/schemas/AgentState"
+        last_notification_id:
+          type: integer
+          format: uint64
+          description: >-
+            The highest notification id the agent has processed. This
+            acknowledges all notifications up to this id.
+
+    AgentHeartbeatResp:
+      type: object
+      required:
+        - notifications
+      properties:
+        notifications:
+          type: array
+          items:
+            $ref: "#/components/schemas/WsNotificationEvent"
+
+    AgentNotification:
+      type: object
+      required:
+        - type
+      discriminator:
+        propertyName: type
+      properties:
+        type:
+          type: string
+          enum:
+            - shutdown
+            - counter_sync
+      description: |
+        A message from the coordinator that tells an agent to do something:
+        - shutdown: shut down; with `graceful`, finish the current work first
+        - counter_sync: the coordinator restarted and its notification ids
+          start again from `counter`; `boot_id` identifies the new process
+
+    WsNotificationEvent:
+      type: object
+      required:
+        - id
+        - event
+      properties:
+        id:
+          type: integer
+          format: uint64
+          description: Per-agent sequence id. It increases by one for each notification
+        event:
+          $ref: "#/components/schemas/AgentNotification"
+
+    AgentWsMessage:
+      type: object
+      required:
+        - type
+      discriminator:
+        propertyName: type
+      properties:
+        type:
+          type: string
+          enum:
+            - ack
+            - pong
+      description: |
+        A message from an agent to the coordinator:
+        - ack: the agent processed all notifications up to and including
+          `notification_id`
+        - pong: the reply to a ping, with the agent clock in `client_time`
+
 security:
   - bearerAuth: []
 
@@ -4850,6 +5283,8 @@ tags:
     description: Task submission and monitoring
   - name: Suites
     description: Task suite lifecycle and manual agent assignment
+  - name: Agents
+    description: Agent registration, heartbeat and shutdown
   - name: Admin
     description: Administrative operations
   - name: Health

@@ -16,6 +16,7 @@ use uuid::Uuid;
 use super::coordinator::DEFAULT_COORDINATOR_ADDR;
 
 pub mod admin;
+pub mod agents;
 pub mod artifacts;
 pub mod attachments;
 pub mod groups;
@@ -24,6 +25,7 @@ pub mod tasks;
 pub mod users;
 pub mod workers;
 pub use admin::*;
+pub use agents::*;
 pub use artifacts::*;
 pub use attachments::*;
 pub use groups::*;
@@ -113,6 +115,8 @@ pub enum ClientCommand {
     Suites(SuitesArgs),
     /// Manage workers, including querying workers, cancel workers, etc.
     Workers(WorkersArgs),
+    /// Manage agents, including querying agents and shutting one down.
+    Agents(AgentsArgs),
     /// Run an external command
     Cmd(CmdArgs),
     /// Quit the client's interactive mode

@@ -18,7 +18,11 @@ use sea_orm::{entity::prelude::*, Set};
 
 use crate::{
     config::InfraPool,
-    entity::{state::UserState, users as User, workers as Worker},
+    entity::{
+        agents as Agent,
+        state::{AgentState, UserState},
+        users as User, workers as Worker,
+    },
     error::{ApiError, AuthError},
     schema::{UserChangePasswordReq, UserLoginReq},
 };
@@ -62,11 +66,18 @@ pub struct AuthWorker {
     pub uuid: Uuid,
 }
 
+#[derive(Debug, Clone)]
+pub struct AuthAgent {
+    pub id: i64,
+    pub uuid: Uuid,
+}
+
 /// The caller of a route open to more than one role.
 #[derive(Debug, Clone)]
 pub enum AuthIdentity {
     User(AuthUser),
     Worker(AuthWorker),
+    Agent(AuthAgent),
 }
 
 fn generate_auth_signature() -> i64 {
@@ -320,9 +331,12 @@ pub async fn admin_change_password(
     Ok(())
 }
 
-/// Accept the token roles set in `ROLES` (a union of [`roles`] bits) and attach the
-/// caller to the request: always as [`AuthIdentity`], and also as the role's own type
-/// (`AuthUser`, `AuthWorker`) for handlers that serve a single role.
+/// Check the token of the caller. `ROLES` is a set of [`roles`] bits. If the token
+/// role is not in `ROLES`, reject the request.
+///
+/// Add the caller to the request two times: as [`AuthIdentity`], and as the type of
+/// its role (`AuthUser`, `AuthWorker` or `AuthAgent`). A handler for one role reads
+/// the role type. A handler for more than one role reads `AuthIdentity`.
 pub async fn auth_middleware<const ROLES: u8>(
     State(pool): State<InfraPool>,
     TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
@@ -349,8 +363,11 @@ pub async fn auth_middleware<const ROLES: u8>(
             req.extensions_mut().insert(auth_worker.clone());
             AuthIdentity::Worker(auth_worker)
         }
-        // No agent tokens are issued yet.
-        TokenRole::Agent => return Err(AuthError::InvalidToken.into()),
+        TokenRole::Agent => {
+            let auth_agent = agent_auth(&pool.db, &claims).await?;
+            req.extensions_mut().insert(auth_agent.clone());
+            AuthIdentity::Agent(auth_agent)
+        }
     };
     req.extensions_mut().insert(identity);
     Ok(next.run(req).await)
@@ -414,4 +431,24 @@ async fn worker_auth(
         id: worker.id,
         uuid,
     })
+}
+
+async fn agent_auth(
+    db: &DatabaseConnection,
+    claims: &TokenClaims<'_>,
+) -> Result<AuthAgent, AuthError> {
+    let uuid = Uuid::parse_str(&claims.sub).map_err(|_| AuthError::InvalidToken)?;
+
+    let agent = Agent::Entity::find()
+        .filter(Agent::Column::Uuid.eq(uuid))
+        .one(db)
+        .await
+        .map_err(|_| AuthError::WrongCredentials)?
+        .ok_or(AuthError::WrongCredentials)?;
+    // An agent row is never deleted, so a retired agent keeps its row. The
+    // Offline state is what makes its token stop working.
+    if agent.state == AgentState::Offline {
+        return Err(AuthError::WrongCredentials);
+    }
+    Ok(AuthAgent { id: agent.id, uuid })
 }

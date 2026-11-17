@@ -2144,6 +2144,42 @@ impl MitoClient {
                     self.suites_override_agents(args).await;
                 }
             },
+            ClientCommand::Agents(args) => match args.command {
+                AgentsCommands::Query(args) => {
+                    let counted = args.count;
+                    match self.http_client.query_agents(args.into()).await {
+                        Ok(resp) => {
+                            tracing::info!(
+                                "Found {} agents in group {}",
+                                resp.count,
+                                resp.group_name
+                            );
+                            if !counted {
+                                for agent in resp.agents {
+                                    tracing::info!(
+                                        "{} ({}), tags: [{}], machine: {}, suite: {}",
+                                        agent.uuid,
+                                        agent.state,
+                                        agent.tags.join(", "),
+                                        agent.machine_code.unwrap_or("[unknown]".to_string()),
+                                        agent
+                                            .assigned_suite_uuid
+                                            .map(|u| u.to_string())
+                                            .unwrap_or("[none]".to_string()),
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => tracing::error!("{}", e),
+                    }
+                }
+                AgentsCommands::Shutdown(args) => {
+                    match self.http_client.shutdown_agent(args.uuid, args.force).await {
+                        Ok(_) => tracing::info!("Agent {} asked to shut down", args.uuid),
+                        Err(e) => tracing::error!("{}", e),
+                    }
+                }
+            },
             ClientCommand::Quit => {
                 return false;
             }

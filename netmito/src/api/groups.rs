@@ -8,7 +8,7 @@ use axum_extra::extract::Query;
 
 use crate::{
     config::InfraPool,
-    error::{ApiError, ApiResult},
+    error::{ApiError, ApiResult, AuthError},
     schema::*,
     service::{
         self,
@@ -195,6 +195,9 @@ pub async fn download_attachment(
         AuthIdentity::Worker(w) => {
             service::s3::worker_get_attachment(&pool, w.uuid, group_name, key).await
         }
+        // TODO: let an agent read the attachments of a group whose suite it runs a job for.
+        // Do this when agents run jobs. Before that, no job rows exist and the check always fails.
+        AuthIdentity::Agent(_) => Err(AuthError::PermissionDenied.into()),
     }
     .map_err(|e| match e {
         crate::error::Error::AuthError(err) => ApiError::AuthError(err),

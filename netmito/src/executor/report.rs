@@ -8,7 +8,17 @@ use crate::schema::*;
 use super::Executor;
 
 impl Executor {
-    pub(super) async fn report_task(&mut self, req: ReportTaskReq) -> crate::error::Result<()> {
+    pub(super) async fn report_task(
+        &mut self,
+        id: i64,
+        op: ReportTaskOp,
+    ) -> crate::error::Result<()> {
+        let req = ReportTaskReq {
+            id,
+            kind: TaskKind::Task,
+            job: None,
+            op,
+        };
         self.http_url.set_path("tasks/report");
         loop {
             let resp = self
@@ -101,11 +111,10 @@ impl Executor {
             task_id,
             submit_req.group_name
         );
-        let req = ReportTaskReq {
-            id: task_id,
-            op: ReportTaskOp::Submit(Box::new(submit_req)),
-        };
-        if let Err(e) = self.report_task(req).await {
+        if let Err(e) = self
+            .report_task(task_id, ReportTaskOp::Submit(Box::new(submit_req)))
+            .await
+        {
             tracing::warn!("Failed to submit new task: {}", e);
             return false;
         }

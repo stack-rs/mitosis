@@ -16,6 +16,8 @@ pub enum AgentsCommands {
     Query(QueryAgentsArgs),
     /// Shut an agent down. The agent record stays.
     Shutdown(ShutdownAgentArgs),
+    /// Stop the job that an agent runs now. The agent then picks a suite again
+    StopJob(StopAgentJobArgs),
 }
 
 #[derive(Serialize, Debug, Deserialize, Args, Clone)]
@@ -67,6 +69,19 @@ pub struct ShutdownAgentArgs {
     pub uuid: Uuid,
     /// Mark the agent offline now. Without this flag, the agent finishes its
     /// current work and then stops.
+    #[arg(short, long)]
+    pub force: bool,
+}
+
+/// A stop moves an agent by hand: the agent ends the job and picks the suite with the highest
+/// priority now. This can be the same suite, then the agent provisions it again.
+#[derive(Serialize, Debug, Deserialize, Args, Clone)]
+pub struct StopAgentJobArgs {
+    /// The UUID of the agent
+    pub uuid: Uuid,
+    /// Stop now: the job is killed without cleanup, and its tasks that are not committed go back to
+    /// Ready. Without this flag, the agent finishes and commits its running tasks, and runs the
+    /// cleanup hook first.
     #[arg(short, long)]
     pub force: bool,
 }

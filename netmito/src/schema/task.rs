@@ -23,8 +23,20 @@ pub struct WorkerTaskResp {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ReportTaskReq {
+    /// The id of the task, or of the hook if `kind` is `Hook`.
     pub id: i64,
+    pub kind: TaskKind,
+    /// The job handle of an agent task. Workers and hooks do not send it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<i64>,
     pub op: ReportTaskOp,
+}
+
+/// The kind of task that a report is for. Only agents report hooks.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub enum TaskKind {
+    Task,
+    Hook,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -12,8 +12,9 @@ use crate::{
     error::ApiError,
     schema::{
         CancelTaskSuiteParam, ChangeTaskSuiteReq, CreateTaskSuiteReq, CreateTaskSuiteResp,
-        SuiteAgentOverrideReq, SuiteAgentOverrideResp, TaskSuiteQueryResp, TaskSuitesQueryReq,
-        TaskSuitesQueryResp,
+        StopAgentJobReq, StopAgentJobResp, SuiteAgentOverrideReq, SuiteAgentOverrideResp,
+        SuiteJobQueryResp, SuiteJobsQueryReq, SuiteJobsQueryResp, TaskSuiteQueryResp,
+        TaskSuitesQueryReq, TaskSuitesQueryResp,
     },
     service::{
         self,
@@ -33,6 +34,11 @@ pub fn suites_router(st: InfraPool) -> Router<InfraPool> {
         )
         .route("/{uuid}/close", post(close_suite))
         .route("/{uuid}/agents/override", post(override_agents_for_suite))
+        .route("/{uuid}/jobs/query", post(query_suite_jobs))
+        .route(
+            "/{uuid}/jobs/{job_id}",
+            get(get_suite_job).delete(stop_suite_job),
+        )
         .route_layer(middleware::from_fn_with_state(
             st.clone(),
             auth_middleware::<USER>,
@@ -115,6 +121,45 @@ pub async fn override_agents_for_suite(
     Json(req): Json<SuiteAgentOverrideReq>,
 ) -> Result<Json<SuiteAgentOverrideResp>, ApiError> {
     let resp = service::suite::user_override_agents_for_suite(u.id, &pool, uuid, req)
+        .await
+        .map_err(map_service_error)?;
+    Ok(Json(resp))
+}
+
+/// `POST /suites/{uuid}/jobs/query`: the jobs of the suite, with a filter.
+pub async fn query_suite_jobs(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<SuiteJobsQueryReq>,
+) -> Result<Json<SuiteJobsQueryResp>, ApiError> {
+    let resp = service::suite::user_query_suite_jobs(u.id, &pool, uuid, req)
+        .await
+        .map_err(map_service_error)?;
+    Ok(Json(resp))
+}
+
+/// `GET /suites/{uuid}/jobs/{job_id}`: one job with its hooks.
+pub async fn get_suite_job(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path((uuid, job_id)): Path<(Uuid, i32)>,
+) -> Result<Json<SuiteJobQueryResp>, ApiError> {
+    let resp = service::suite::user_get_suite_job(u.id, &pool, uuid, job_id)
+        .await
+        .map_err(map_service_error)?;
+    Ok(Json(resp))
+}
+
+/// `DELETE /suites/{uuid}/jobs/{job_id}?op=graceful|force`: stop the job. The agent stays up and
+/// picks a suite again, possibly this suite.
+pub async fn stop_suite_job(
+    Extension(u): Extension<AuthUser>,
+    State(pool): State<InfraPool>,
+    Path((uuid, job_id)): Path<(Uuid, i32)>,
+    Query(req): Query<StopAgentJobReq>,
+) -> Result<Json<StopAgentJobResp>, ApiError> {
+    let resp = service::suite::user_stop_suite_job(u.id, &pool, uuid, job_id, req.op)
         .await
         .map_err(map_service_error)?;
     Ok(Json(resp))

@@ -347,6 +347,14 @@ impl TaskSuiteState {
         !matches!(self, Self::Cancelled)
     }
 
+    /// Returns true if the suite allows its tasks to be executed.
+    /// - Open, Closed: tasks keep running
+    /// - Complete: nothing is left to run, but asking is not an error
+    /// - Cancelled: terminal state, no further execution
+    pub fn allows_task_execution(&self) -> bool {
+        !matches!(self, Self::Cancelled)
+    }
+
     // TODO: this method might be removed as we should do an idempotent update to state
     /// Returns true if the suite needs to be reopened before accepting tasks.
     /// This is true for Closed and Complete states.
@@ -411,7 +419,13 @@ impl AgentState {
 }
 
 /// Lifecycle state of a hook task (provision / cleanup / background).
-/// A hook task is reported on completion, so There is no `Running` state
+///
+/// The coordinator creates the row as `Pending` when the agent accepts the suite. The agent
+/// reports a hook like a task: `Finish` or `Cancel`, then `Commit` with the result. A hook has no
+/// `Running` state, because the agent does not report the start of a hook.
+///
+/// The row is closed when it has a result. When the job ends, the coordinator also changes the rows
+/// that are still open: `Pending` becomes `Cancelled` and `Finished` becomes `Failed`.
 #[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Copy)]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
 pub enum HookExecState {
@@ -421,6 +435,10 @@ pub enum HookExecState {
     Failed = 1,
     /// Hook was cancelled
     Cancelled = 2,
+    /// Hook is not reported yet. It may not have started
+    Pending = 3,
+    /// Hook process stopped, its result is not committed yet
+    Finished = 4,
 }
 
 impl Display for HookExecState {
@@ -429,6 +447,8 @@ impl Display for HookExecState {
             HookExecState::Completed => write!(f, "Completed"),
             HookExecState::Failed => write!(f, "Failed"),
             HookExecState::Cancelled => write!(f, "Cancelled"),
+            HookExecState::Pending => write!(f, "Pending"),
+            HookExecState::Finished => write!(f, "Finished"),
         }
     }
 }

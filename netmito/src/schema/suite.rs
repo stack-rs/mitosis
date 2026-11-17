@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::entity::state::TaskSuiteState;
 
+use super::agent::SuiteJobInfo;
 use super::exec::{ExecHooks, ExecSpec};
 
 /// Request to create a new task suite
@@ -138,19 +139,24 @@ impl ChangeTaskSuiteReq {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "PascalCase")]
 pub enum WorkerSchedulePlan {
-    /// Fixed number of workers with optional CPU binding
-    /// This is the basic scheduling policy where a fixed number of workers
-    /// are spawned to process tasks from the suite
-    // TODO: should update it to our final design
+    /// Fixed number of workers with optional CPU binding This is the basic scheduling policy where
+    /// a fixed number of workers are spawned to process tasks from the suite
+    ///
+    /// TODO: should update it to our final design
     FixedWorkers {
         /// Number of workers to spawn (1-256)
         worker_count: u32,
         /// Optional CPU core binding strategy
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cpu_binding: Option<CpuBinding>,
-        /// How many tasks to prefetch locally per worker (default: 16)
-        #[serde(default = "default_prefetch_count")]
-        task_prefetch_count: u32,
+        /// Whether the agent can hold claimed tasks in addition to the tasks that it runs. Then a
+        /// worker that becomes free gets its next task without a round trip. The agent holds at
+        /// most one more task for each worker.
+        ///
+        /// Turn it off only for suites whose tasks run much longer than a round trip. For these
+        /// suites, a task that waits on a busy agent is worse than a task that a free agent claims.
+        #[serde(default = "default_prefetch")]
+        prefetch: bool,
     },
     // Future extensions:
     // AutoScale { min_workers, max_workers, scale_up_threshold, scale_down_threshold, ... }
@@ -158,8 +164,8 @@ pub enum WorkerSchedulePlan {
     // Priority { high_priority_workers, low_priority_workers, ... }
 }
 
-fn default_prefetch_count() -> u32 {
-    16
+fn default_prefetch() -> bool {
+    true
 }
 
 /// CPU core binding configuration
@@ -262,11 +268,16 @@ pub struct ParsedTaskSuiteInfo {
     pub completed_at: Option<OffsetDateTime>,
 }
 
-/// Detailed suite response: the suite plus the UUIDs of its assigned agents
+/// Detailed suite response: the suite, the UUIDs of the agents that can run it, and the jobs that
+/// run it now.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSuiteQueryResp {
     pub info: ParsedTaskSuiteInfo,
+    /// The agents that match the tags or are included by hand, minus the agents that are excluded
+    /// by hand. The coordinator calculates this set for each query.
     pub eligible_agents: Vec<Uuid>,
+    /// The jobs of the suite that are not terminal, oldest first.
+    pub active_jobs: Vec<SuiteJobInfo>,
 }
 
 /// Query parameter for `DELETE /suites/{uuid}` selecting the cancellation mode

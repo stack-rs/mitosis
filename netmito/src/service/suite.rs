@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use sea_orm::sea_query::extension::postgres::PgExpr;
 use sea_orm::sea_query::{
-    Alias, CommonTableExpression, DeleteStatement, InsertStatement, PgFunc, Query, WithClause,
+    Alias, CommonTableExpression, DeleteStatement, Func, InsertStatement, PgFunc, Query, WithClause,
 };
 use sea_orm::{prelude::*, ConnectionTrait, FromQueryResult, Set, TransactionTrait};
 use uuid::Uuid;
@@ -10,21 +10,23 @@ use uuid::Uuid;
 use super::suite_agent::{apply_suite_agent_override, authorize_suite, resolve_agent};
 use crate::config::InfraPool;
 use crate::entity::role::UserGroupRole;
-use crate::entity::state::{TaskState, TaskSuiteState};
-use crate::entity::task_suite_agent::SuiteAgentOverrideType;
+use crate::entity::state::{SuiteJobState, TaskState, TaskSuiteState};
 use crate::entity::{
     active_tasks as ActiveTasks, agents as Agent, archived_tasks as ArchivedTasks, groups as Group,
-    task_suite_agent as TaskSuiteAgent, task_suites as TaskSuites, user_group as UserGroup,
-    users as User,
+    hook_tasks as HookTasks, suite_agent_jobs as SuiteAgentJobs, task_suites as TaskSuites,
+    user_group as UserGroup, users as User,
 };
 use crate::error::{ApiError, Error, ResolveError, Result};
 use crate::schema::{
-    CancelTaskSuiteOp, ChangeTaskSuiteReq, CountQuery, CreateTaskSuiteReq, CreateTaskSuiteResp,
-    ExecHooks, ParsedTaskSuiteInfo, SuiteAgentOverrideReq, SuiteAgentOverrideResp,
-    TaskResultMessage, TaskResultSpec, TaskSuiteInfo, TaskSuiteQueryResp, TaskSuitesQueryReq,
-    TaskSuitesQueryResp, UpdateOp, WorkerSchedulePlan,
+    AgentNotification, CancelTaskSuiteOp, ChangeTaskSuiteReq, CountQuery, CreateTaskSuiteReq,
+    CreateTaskSuiteResp, ExecHooks, HookTaskInfo, ParsedTaskSuiteInfo, StopAgentJobResp, StopJobOp,
+    SuiteAgentOverrideReq, SuiteAgentOverrideResp, SuiteJobInfo, SuiteJobQueryResp,
+    SuiteJobsQueryReq, SuiteJobsQueryResp, TaskResultMessage, TaskResultSpec, TaskSuiteInfo,
+    TaskSuiteQueryResp, TaskSuitesQueryReq, TaskSuitesQueryResp, UpdateOp, WorkerSchedulePlan,
 };
+use crate::service::agent;
 use crate::service::task::{check_exec_spec, parse_operators_with_number, OperatorWithNumber};
+use crate::ws::AgentWsRouter;
 
 #[derive(FromQueryResult)]
 struct GroupIdResult {
@@ -34,6 +36,77 @@ struct GroupIdResult {
 #[derive(FromQueryResult)]
 struct TaskUuidResult {
     uuid: Uuid,
+}
+
+/// Move the suites without a new task out of `Open`.
+///
+/// A suite stays `Open` for `timeout` after its last submission, also when it has no more tasks.
+/// During this time, the agent that runs it keeps its job and can run a late task without a new
+/// provision. Then:
+///
+/// | from | condition | to |
+/// |---|---|---|
+/// | `Open` | idle, tasks remain | `Closed` |
+/// | `Open` | idle, no task remains | `Complete` |
+/// | `Closed` | no task remains | `Complete` |
+///
+/// The last rule is a backup: `decrement_incomplete_tasks` makes a `Closed` suite `Complete` when its
+/// last task commits. This rule catches the suites that were closed after their last task.
+///
+/// The idle time starts at the last submission, or at the creation if the suite has no task. Thus a
+/// suite that never got a task also closes.
+pub async fn sweep_inactive_suites(
+    db: &DatabaseConnection,
+    timeout: std::time::Duration,
+) -> Result<u64> {
+    let now = TimeDateTimeWithTimeZone::now_utc();
+    let threshold = now - time::Duration::seconds(timeout.as_secs() as i64);
+    let idle_since = Expr::expr(Func::coalesce([
+        Expr::col(TaskSuites::Column::LastTaskSubmittedAt).into(),
+        Expr::col(TaskSuites::Column::CreatedAt).into(),
+    ]));
+
+    let completed = TaskSuites::Entity::update_many()
+        .col_expr(
+            TaskSuites::Column::State,
+            Expr::value(TaskSuiteState::Complete),
+        )
+        .col_expr(TaskSuites::Column::CompletedAt, Expr::value(Some(now)))
+        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+        .filter(TaskSuites::Column::IncompleteTasks.eq(0))
+        .filter(
+            // A `Closed` suite is already idle. An `Open` suite must be idle for the full window.
+            TaskSuites::Column::State
+                .eq(TaskSuiteState::Closed)
+                .or(TaskSuites::Column::State
+                    .eq(TaskSuiteState::Open)
+                    .and(idle_since.clone().lt(threshold))),
+        )
+        .exec(db)
+        .await?
+        .rows_affected;
+
+    let closed = TaskSuites::Entity::update_many()
+        .col_expr(
+            TaskSuites::Column::State,
+            Expr::value(TaskSuiteState::Closed),
+        )
+        .col_expr(TaskSuites::Column::UpdatedAt, Expr::value(now))
+        .filter(TaskSuites::Column::State.eq(TaskSuiteState::Open))
+        .filter(TaskSuites::Column::IncompleteTasks.gt(0))
+        .filter(idle_since.lt(threshold))
+        .exec(db)
+        .await?
+        .rows_affected;
+
+    if completed + closed > 0 {
+        tracing::debug!(
+            completed,
+            closed,
+            "Swept suites idle for more than {timeout:?}"
+        );
+    }
+    Ok(completed + closed)
 }
 
 /// Decrease `incomplete_tasks` of a suite by `count`, because `count` of its tasks are finished.
@@ -346,10 +419,10 @@ pub async fn user_change_task_suite(
     // If the change has new tags or a new priority, tell the agents that the suite is available.
     // New tags can let an idle agent run this suite. A new priority can change which suite an idle
     // agent selects or preempt an active agent.
-    let _needs_notify = req.affects_scheduling();
+    let needs_notify = req.affects_scheduling();
     let now = TimeDateTimeWithTimeZone::now_utc();
 
-    let _suite_id = pool
+    let suite_id = pool
         .db
         .transaction::<_, i64, Error>(|txn| {
             Box::pin(async move {
@@ -460,8 +533,9 @@ pub async fn user_change_task_suite(
 
     // Each query reads the eligibility and the pick order from the row, so there is nothing to
     // rebuild. A notified agent does a new fetch and gets the latest values.
-    // TODO: once agents can be notified, `if _needs_notify` call
-    // `notify_suite_available(pool, _suite_id)` here.
+    if needs_notify {
+        agent::notify_suite_available(pool, suite_id).await;
+    }
     Ok(())
 }
 
@@ -647,16 +721,8 @@ struct SuiteDetailResult {
     completed_at: Option<TimeDateTimeWithTimeZone>,
 }
 
-#[derive(FromQueryResult)]
-struct AgentUuidResult {
-    uuid: Uuid,
-}
-
-/// Get the details of one suite, with the UUIDs of the agents that can run it. The caller must
-/// have at least `Read` in the group of the suite.
-///
-/// At this time, the result shows only the agents that a user included in the suite.
-/// TODO: read the in-memory list to show the agents that match the tags.
+/// Get the details of one suite, with the UUIDs of the agents that can run it and the jobs that run
+/// it now. The caller must have at least `Read` in the group of the suite.
 pub async fn user_get_task_suite_by_uuid(
     user_id: i64,
     pool: &InfraPool,
@@ -724,37 +790,47 @@ pub async fn user_get_task_suite_by_uuid(
             "User doesn't have permission or suite with uuid {suite_uuid}"
         ))))?;
 
-    // Only the manually-included agents are persisted; excluded rows must not be
-    // reported as assigned.
-    //
-    // TODO: this is only the manual half. The *effective* assigned set is
-    // `(in-memory tag-matched ∪ UserIncluded) − UserExcluded`. Once the agent scheduler
-    // exists, merge its in-memory tag-matched set here (and subtract UserExcluded) to
-    // produce the real assigned-agent list.
-    let agent_stmt = Query::select()
-        .column((Agent::Entity, Agent::Column::Uuid))
-        .from(Agent::Entity)
+    // The tag-matched agents and the agents included by hand, without the agents excluded by hand.
+    // Refer to `service::agent::matching`.
+    let eligible_agents = agent::matching::eligible_agent_uuids(&pool.db, suite.id).await?;
+
+    // The jobs of the suite that are not terminal: the agents that run it now.
+    let jobs_stmt = Query::select()
+        .columns([
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::JobId),
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::State),
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::CreatedAt),
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::UpdatedAt),
+        ])
+        .expr_as(
+            Expr::col((Agent::Entity, Agent::Column::Uuid)),
+            Alias::new("agent_uuid"),
+        )
+        .from(SuiteAgentJobs::Entity)
+        // `agent_id` is nullable, thus a left join.
         .join(
-            sea_orm::JoinType::Join,
-            TaskSuiteAgent::Entity,
-            Expr::col((TaskSuiteAgent::Entity, TaskSuiteAgent::Column::AgentId))
-                .eq(Expr::col((Agent::Entity, Agent::Column::Id))),
+            sea_orm::JoinType::LeftJoin,
+            Agent::Entity,
+            Expr::col((Agent::Entity, Agent::Column::Id)).eq(Expr::col((
+                SuiteAgentJobs::Entity,
+                SuiteAgentJobs::Column::AgentId,
+            ))),
         )
         .and_where(
-            Expr::col((TaskSuiteAgent::Entity, TaskSuiteAgent::Column::TaskSuiteId)).eq(suite.id),
+            Expr::col((SuiteAgentJobs::Entity, SuiteAgentJobs::Column::TaskSuiteId)).eq(suite.id),
         )
         .and_where(
-            Expr::col((TaskSuiteAgent::Entity, TaskSuiteAgent::Column::OverrideType))
-                .eq(SuiteAgentOverrideType::UserIncluded),
+            Expr::col((SuiteAgentJobs::Entity, SuiteAgentJobs::Column::State))
+                .is_in(agent::job::IN_FLIGHT),
+        )
+        .order_by_expr(
+            Expr::col((SuiteAgentJobs::Entity, SuiteAgentJobs::Column::JobId)).into(),
+            sea_orm::Order::Asc,
         )
         .to_owned();
-
-    let eligible_agents = AgentUuidResult::find_by_statement(builder.build(&agent_stmt))
+    let active_jobs = SuiteJobInfo::find_by_statement(builder.build(&jobs_stmt))
         .all(&pool.db)
-        .await?
-        .into_iter()
-        .map(|m| m.uuid)
-        .collect();
+        .await?;
 
     let worker_schedule: WorkerSchedulePlan = serde_json::from_value(suite.worker_schedule)?;
     let exec_hooks: Option<ExecHooks> = suite.exec_hooks.map(serde_json::from_value).transpose()?;
@@ -780,6 +856,7 @@ pub async fn user_get_task_suite_by_uuid(
             completed_at: suite.completed_at,
         },
         eligible_agents,
+        active_jobs,
     })
 }
 
@@ -846,12 +923,12 @@ pub async fn user_cancel_task_suite(
     user_id: i64,
     pool: &InfraPool,
     suite_uuid: Uuid,
-    _op: CancelTaskSuiteOp,
+    op: CancelTaskSuiteOp,
 ) -> Result<()> {
     let now = TimeDateTimeWithTimeZone::now_utc();
     let builder = pool.db.get_database_backend();
 
-    let (_suite_id, _cancelled_task_uuids) = pool
+    let (suite_id, cancelled_task_uuids) = pool
         .db
         .transaction::<_, (i64, Vec<Uuid>), Error>(|txn| {
             Box::pin(async move {
@@ -1020,9 +1097,45 @@ pub async fn user_cancel_task_suite(
         })
         .await?;
 
-    // TODO: when agents run suites, stop the jobs of `_suite_id`. `Force` kills the jobs, and
-    // `Graceful` lets them finish their current work. Send `SuiteCancelled` to each agent, and
-    // send `TasksCancelled` for `_cancelled_task_uuids`.
+    // Stop the jobs that still run. `Force` writes the terminal state, thus the coordinator rejects
+    // later reports of the agents. `Graceful` does not change the jobs: each agent runs the cleanup
+    // hook and moves its job to `Completed`.
+    let graceful = matches!(op, CancelTaskSuiteOp::Graceful);
+    let running_agents = match op {
+        CancelTaskSuiteOp::Force => {
+            let killed = pool
+                .db
+                .transaction::<_, Vec<Uuid>, Error>(move |txn| {
+                    Box::pin(async move { agent::job::kill_suite_jobs(txn, suite_id, now).await })
+                })
+                .await?;
+            // All the jobs of the suite ended, and the suite has no more tasks to give.
+            pool.suite_queues.close_suite(suite_id);
+            killed
+        }
+        CancelTaskSuiteOp::Graceful => agent::job::agents_running_suite(&pool.db, suite_id).await?,
+    };
+
+    for agent_uuid in running_agents {
+        AgentWsRouter::notify(
+            &pool.ws_router_tx,
+            agent_uuid,
+            AgentNotification::SuiteCancelled {
+                suite_uuid,
+                reason: "Suite was cancelled by a user".to_string(),
+                graceful,
+            },
+        );
+        if !cancelled_task_uuids.is_empty() {
+            AgentWsRouter::notify(
+                &pool.ws_router_tx,
+                agent_uuid,
+                AgentNotification::TasksCancelled {
+                    task_uuids: cancelled_task_uuids.clone(),
+                },
+            );
+        }
+    }
 
     Ok(())
 }
@@ -1039,9 +1152,9 @@ pub async fn user_override_agents_for_suite(
 ) -> Result<SuiteAgentOverrideResp> {
     let now = TimeDateTimeWithTimeZone::now_utc();
 
-    let errors = pool
+    let (suite_id, errors) = pool
         .db
-        .transaction::<_, HashMap<Uuid, crate::error::ErrorMsg>, Error>(|txn| {
+        .transaction::<_, (i64, HashMap<Uuid, crate::error::ErrorMsg>), Error>(|txn| {
             Box::pin(async move {
                 // The suite is fixed for the whole batch, so a suite-level failure is request-level
                 let suite =
@@ -1072,13 +1185,203 @@ pub async fn user_override_agents_for_suite(
                     }
                 }
 
-                Ok(errors)
+                Ok((suite.id, errors))
             })
         })
         .await?;
 
-    // TODO: the manual overrides just changed the effective agent set. Once the
-    // scheduler exists, trigger a recompute for this suite.
+    // The overrides changed the set of agents that can run the suite.
+    agent::notify_suite_available(pool, suite_id).await;
 
     Ok(SuiteAgentOverrideResp { errors })
+}
+
+/// Query the jobs of a suite, newest first. The caller must have at least `Read` in the group of
+/// the suite.
+pub async fn user_query_suite_jobs(
+    user_id: i64,
+    pool: &InfraPool,
+    suite_uuid: Uuid,
+    query: SuiteJobsQueryReq,
+) -> Result<SuiteJobsQueryResp> {
+    let suite = match authorize_suite(&pool.db, user_id, suite_uuid, UserGroupRole::Read).await {
+        Ok(suite) => suite,
+        Err(ResolveError::Item(e)) => return Err(Error::ApiError(ApiError::NotFound(e.msg))),
+        Err(ResolveError::Fatal(e)) => return Err(e),
+    };
+
+    let mut stmt = Query::select();
+    if query.count {
+        stmt.expr(Expr::col((SuiteAgentJobs::Entity, SuiteAgentJobs::Column::Id)).count());
+    } else {
+        stmt.columns([
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::JobId),
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::State),
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::CreatedAt),
+            (SuiteAgentJobs::Entity, SuiteAgentJobs::Column::UpdatedAt),
+        ])
+        .expr_as(
+            Expr::col((Agent::Entity, Agent::Column::Uuid)),
+            Alias::new("agent_uuid"),
+        );
+    }
+
+    stmt.from(SuiteAgentJobs::Entity)
+        // `agent_id` is nullable, thus a left join.
+        .join(
+            sea_orm::JoinType::LeftJoin,
+            Agent::Entity,
+            Expr::col((Agent::Entity, Agent::Column::Id)).eq(Expr::col((
+                SuiteAgentJobs::Entity,
+                SuiteAgentJobs::Column::AgentId,
+            ))),
+        )
+        .and_where(
+            Expr::col((SuiteAgentJobs::Entity, SuiteAgentJobs::Column::TaskSuiteId)).eq(suite.id),
+        );
+
+    if let Some(ref states) = query.states {
+        let states_vec: Vec<SuiteJobState> = states.iter().copied().collect();
+        stmt.and_where(
+            Expr::col((SuiteAgentJobs::Entity, SuiteAgentJobs::Column::State))
+                .eq(PgFunc::any(states_vec)),
+        );
+    }
+    if let Some(agent_uuid) = query.agent_uuid {
+        stmt.and_where(Expr::col((Agent::Entity, Agent::Column::Uuid)).eq(agent_uuid));
+    }
+    if let Some(limit) = query.limit {
+        stmt.limit(limit);
+    }
+    if let Some(offset) = query.offset {
+        stmt.offset(offset);
+    }
+
+    let builder = pool.db.get_database_backend();
+    if query.count {
+        let count = CountQuery::find_by_statement(builder.build(&stmt))
+            .one(&pool.db)
+            .await?
+            .map(|c| c.count as u64)
+            .unwrap_or(0);
+        Ok(SuiteJobsQueryResp {
+            count,
+            jobs: vec![],
+        })
+    } else {
+        stmt.order_by_expr(
+            Expr::col((SuiteAgentJobs::Entity, SuiteAgentJobs::Column::JobId)).into(),
+            sea_orm::Order::Desc,
+        );
+        let jobs = SuiteJobInfo::find_by_statement(builder.build(&stmt))
+            .all(&pool.db)
+            .await?;
+        Ok(SuiteJobsQueryResp {
+            count: jobs.len() as u64,
+            jobs,
+        })
+    }
+}
+
+/// Get one job of a suite with its hooks. The artifacts of a hook use the hook uuid on the artifact
+/// endpoints. The caller must have at least `Read` in the group of the suite.
+pub async fn user_get_suite_job(
+    user_id: i64,
+    pool: &InfraPool,
+    suite_uuid: Uuid,
+    job_id: i32,
+) -> Result<SuiteJobQueryResp> {
+    let suite = match authorize_suite(&pool.db, user_id, suite_uuid, UserGroupRole::Read).await {
+        Ok(suite) => suite,
+        Err(ResolveError::Item(e)) => return Err(Error::ApiError(ApiError::NotFound(e.msg))),
+        Err(ResolveError::Fatal(e)) => return Err(e),
+    };
+
+    let job = SuiteAgentJobs::Entity::find()
+        .filter(SuiteAgentJobs::Column::TaskSuiteId.eq(suite.id))
+        .filter(SuiteAgentJobs::Column::JobId.eq(job_id))
+        .one(&pool.db)
+        .await?
+        .ok_or(Error::ApiError(ApiError::NotFound(format!(
+            "Job {job_id} of suite {suite_uuid}"
+        ))))?;
+
+    let agent_uuid = match job.agent_id {
+        Some(agent_id) => Agent::Entity::find_by_id(agent_id)
+            .one(&pool.db)
+            .await?
+            .map(|a| a.uuid),
+        None => None,
+    };
+
+    let hooks = HookTasks::Entity::find()
+        .filter(HookTasks::Column::SuiteAgentJobId.eq(job.id))
+        .all(&pool.db)
+        .await?
+        .into_iter()
+        .map(|hook| {
+            Ok(HookTaskInfo {
+                uuid: hook.uuid,
+                hook_type: hook.hook_type,
+                state: hook.state,
+                result: hook.result.map(serde_json::from_value).transpose()?,
+                started_at: hook.started_at,
+                completed_at: hook.completed_at,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(SuiteJobQueryResp {
+        info: SuiteJobInfo {
+            job_id: job.job_id,
+            state: job.state,
+            agent_uuid,
+            created_at: job.created_at,
+            updated_at: job.updated_at,
+        },
+        hooks,
+    })
+}
+
+/// Stop one job of a suite, by its number in the suite. The caller must have at least `Write` in
+/// the group of the suite.
+///
+/// The result is the same as the stop on the agent: the agent stays up and picks a suite again,
+/// possibly this suite.
+pub async fn user_stop_suite_job(
+    user_id: i64,
+    pool: &InfraPool,
+    suite_uuid: Uuid,
+    job_id: i32,
+    op: StopJobOp,
+) -> Result<StopAgentJobResp> {
+    let suite = match authorize_suite(&pool.db, user_id, suite_uuid, UserGroupRole::Write).await {
+        Ok(suite) => suite,
+        Err(ResolveError::Item(e)) => return Err(Error::ApiError(ApiError::NotFound(e.msg))),
+        Err(ResolveError::Fatal(e)) => return Err(e),
+    };
+
+    let job = SuiteAgentJobs::Entity::find()
+        .filter(SuiteAgentJobs::Column::TaskSuiteId.eq(suite.id))
+        .filter(SuiteAgentJobs::Column::JobId.eq(job_id))
+        .one(&pool.db)
+        .await?
+        .ok_or(Error::ApiError(ApiError::NotFound(format!(
+            "Job {job_id} of suite {suite_uuid}"
+        ))))?;
+
+    // A terminal job, or a job without an agent, has nothing to stop.
+    let agent = match (job.state.is_terminal(), job.agent_id) {
+        (false, Some(agent_id)) => Agent::Entity::find_by_id(agent_id).one(&pool.db).await?,
+        _ => None,
+    };
+    let Some(agent) = agent else {
+        return Ok(StopAgentJobResp {
+            stopped: false,
+            suite_uuid: None,
+            job_id: None,
+        });
+    };
+
+    agent::stop_agent_job(pool, &agent, &job, suite_uuid, op).await
 }

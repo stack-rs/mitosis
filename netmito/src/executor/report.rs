@@ -5,20 +5,16 @@ use reqwest::StatusCode;
 use crate::error::{Error, ErrorMsg, RequestError};
 use crate::schema::*;
 
-use super::Executor;
+use super::{ExecKind, Executor};
 
 impl Executor {
     pub(super) async fn report_task(
         &mut self,
+        kind: ExecKind,
         id: i64,
         op: ReportTaskOp,
     ) -> crate::error::Result<()> {
-        let req = ReportTaskReq {
-            id,
-            kind: TaskKind::Task,
-            job: None,
-            op,
-        };
+        let req = kind.report_req(id, op);
         self.http_url.set_path("tasks/report");
         loop {
             let resp = self
@@ -36,7 +32,7 @@ impl Executor {
                         tracing::info!("Report task failed with coordinator force exit");
                         self.coordinator_force_exit
                             .store(true, std::sync::atomic::Ordering::Release);
-                        self.task_cancel_token.cancel();
+                        self.runner_cancel_token.cancel();
                         return Ok(());
                     } else if resp.status() == StatusCode::NOT_FOUND {
                         tracing::debug!("Task not found, ignore and go on for next cycle");
@@ -76,7 +72,15 @@ impl Executor {
 
     /// Submits the downstream task that the process wrote to `MITO_NEW_TASK`.
     /// Returns false only if the file is present and the submission fails.
-    pub(super) async fn submit_new_task_if_present(&mut self, task_id: i64) -> bool {
+    pub(super) async fn submit_new_task_if_present(
+        &mut self,
+        kind: ExecKind,
+        task_id: i64,
+    ) -> bool {
+        // A hook has no `MITO_NEW_TASK` and cannot submit a task.
+        if let ExecKind::Hook = kind {
+            return true;
+        }
         let new_task_path = self.task_cache_path.join("new_task.json");
         if !new_task_path.exists() {
             return true;
@@ -112,7 +116,7 @@ impl Executor {
             submit_req.group_name
         );
         if let Err(e) = self
-            .report_task(task_id, ReportTaskOp::Submit(Box::new(submit_req)))
+            .report_task(kind, task_id, ReportTaskOp::Submit(Box::new(submit_req)))
             .await
         {
             tracing::warn!("Failed to submit new task: {}", e);

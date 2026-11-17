@@ -36,7 +36,8 @@ pub struct ExecHooks {
     /// Environment cleanup hook (runs after suite completes)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<ExecSpec>,
-    /// Background process hook (runs alongside workers)
+    /// Background process hook (runs alongside workers). The agent stops it with SIGTERM when the
+    /// tasks of the job end. The hook must then exit with 0, or its record is `Failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<ExecSpec>,
 }
